@@ -15,6 +15,7 @@ CREATE TABLE upstream_servers (
   id TEXT PRIMARY KEY,
   catalog_namespace TEXT NOT NULL UNIQUE,
   verified_catalog_id TEXT UNIQUE,
+  verified_base_url TEXT,
   generation INTEGER NOT NULL CHECK (generation > 0),
   name TEXT NOT NULL,
   base_url TEXT NOT NULL,
@@ -26,6 +27,7 @@ CREATE TABLE upstream_servers (
   enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
   health TEXT NOT NULL CHECK (health IN ('unknown', 'healthy', 'degraded')),
   last_success_at_ms INTEGER,
+  deleted_at_ms INTEGER,
   created_at_ms INTEGER NOT NULL,
   updated_at_ms INTEGER NOT NULL
 ) STRICT;

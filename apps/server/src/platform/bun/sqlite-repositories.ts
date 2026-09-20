@@ -29,7 +29,6 @@ import { Repositories, type RepositoriesService } from "../../core/repositories.
 const decodeServerId = Schema.decodeUnknownSync(ServerViewSchema.fields.id)
 const decodeSourceLibraryId = Schema.decodeUnknownSync(SourceLibraryViewSchema.fields.id)
 const decodeVirtualLibraryId = Schema.decodeUnknownSync(VirtualLibraryViewSchema.fields.id)
-const decodeHttpUrl = Schema.decodeUnknownSync(ServerViewSchema.fields.baseUrl)
 
 const failure = (operation: string, cause: unknown) => new RepositoryError({
   operation,
@@ -184,6 +183,7 @@ interface ServerRow {
   readonly id: string
   readonly catalog_namespace: string
   readonly verified_catalog_id: string | null
+  readonly verified_base_url: string | null
   readonly generation: unknown
   readonly name: string
   readonly base_url: string
@@ -195,6 +195,7 @@ interface ServerRow {
   readonly enabled: unknown
   readonly health: unknown
   readonly last_success_at_ms: unknown | null
+  readonly deleted_at_ms: unknown | null
   readonly created_at_ms: unknown
   readonly updated_at_ms: unknown
 }
@@ -203,9 +204,11 @@ const upstreamServer = (row: ServerRow): UpstreamServer => ({
   id: decodeServerId(row.id),
   catalogNamespace: row.catalog_namespace,
   verifiedCatalogId: row.verified_catalog_id,
+  verifiedBaseUrl: row.verified_base_url,
   generation: integer(row.generation, "generation"),
   name: row.name,
-  baseUrl: decodeHttpUrl(row.base_url),
+  // Revalidate at the outbound request boundary as well as the Dashboard contract.
+  baseUrl: row.base_url as UpstreamServer["baseUrl"],
   username: row.username,
   password: row.password,
   accessToken: row.access_token,
@@ -218,6 +221,7 @@ const upstreamServer = (row: ServerRow): UpstreamServer => ({
   lastSuccessAtMs: row.last_success_at_ms === null
     ? null
     : integer(row.last_success_at_ms, "last_success_at_ms"),
+  deletedAtMs: row.deleted_at_ms === null ? null : integer(row.deleted_at_ms, "deleted_at_ms"),
   createdAtMs: integer(row.created_at_ms, "created_at_ms"),
   updatedAtMs: integer(row.updated_at_ms, "updated_at_ms")
 })
@@ -502,21 +506,32 @@ const makeRepositories = Effect.gen(function*() {
     })))
 
   const listServers: RepositoriesService["listServers"] = () =>
-    database("listServers", sql.unsafe<ServerRow>("SELECT * FROM upstream_servers ORDER BY id")).pipe(
+    database("listServers", sql.unsafe<ServerRow>(
+      "SELECT * FROM upstream_servers WHERE deleted_at_ms IS NULL ORDER BY id"
+    )).pipe(
       Effect.flatMap((rows) => decode("listServers", () => rows.map(upstreamServer)))
+    )
+
+  const getServer: RepositoriesService["getServer"] = (id) =>
+    database("getServer", sql.unsafe<ServerRow>(
+      "SELECT * FROM upstream_servers WHERE id = ? AND deleted_at_ms IS NULL",
+      [id]
+    )).pipe(
+      Effect.flatMap((rows) => decode("getServer", () => rows[0] === undefined ? null : upstreamServer(rows[0])))
     )
 
   const saveServer: RepositoriesService["saveServer"] = (input) =>
     database("saveServer", sql.withTransaction(Effect.gen(function*() {
       yield* sql.unsafe(`
         INSERT INTO upstream_servers (
-          id, catalog_namespace, verified_catalog_id, generation, name, base_url,
+          id, catalog_namespace, verified_catalog_id, verified_base_url, generation, name, base_url,
           username, password, access_token, access_token_expires_at_ms, user_agent,
-          enabled, health, last_success_at_ms, created_at_ms, updated_at_ms
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          enabled, health, last_success_at_ms, deleted_at_ms, created_at_ms, updated_at_ms
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           catalog_namespace = excluded.catalog_namespace,
           verified_catalog_id = excluded.verified_catalog_id,
+          verified_base_url = excluded.verified_base_url,
           generation = excluded.generation,
           name = excluded.name,
           base_url = excluded.base_url,
@@ -528,11 +543,13 @@ const makeRepositories = Effect.gen(function*() {
           enabled = excluded.enabled,
           health = excluded.health,
           last_success_at_ms = excluded.last_success_at_ms,
+          deleted_at_ms = excluded.deleted_at_ms,
           updated_at_ms = excluded.updated_at_ms
       `, [
         input.id,
         input.catalogNamespace,
         input.verifiedCatalogId,
+        input.verifiedBaseUrl,
         input.generation,
         input.name,
         input.baseUrl,
@@ -544,12 +561,98 @@ const makeRepositories = Effect.gen(function*() {
         input.enabled ? 1 : 0,
         input.health,
         input.lastSuccessAtMs,
+        input.deletedAtMs,
         input.createdAtMs,
         input.updatedAtMs
       ])
       const rows = yield* sql.unsafe<ServerRow>("SELECT * FROM upstream_servers WHERE id = ?", [input.id])
       return yield* decode("saveServer", () => upstreamServer(rows[0]!))
     })))
+
+  const saveServerResult: RepositoriesService["saveServerResult"] = (input) =>
+    database("saveServerResult", sql.withTransaction(Effect.gen(function*() {
+      const rows = yield* sql.unsafe<ServerRow>(
+        "SELECT * FROM upstream_servers WHERE id = ? AND generation = ?",
+        [input.serverId, input.expectedGeneration]
+      )
+      if (rows[0] === undefined) return null
+      const current = upstreamServer(rows[0])
+      const updated: UpstreamServer = {
+        ...current,
+        accessToken: input.accessToken === undefined ? current.accessToken : input.accessToken,
+        accessTokenExpiresAtMs: input.accessTokenExpiresAtMs === undefined
+          ? current.accessTokenExpiresAtMs
+          : input.accessTokenExpiresAtMs,
+        verifiedCatalogId: input.verifiedCatalogId === undefined
+          ? current.verifiedCatalogId
+          : input.verifiedCatalogId,
+        verifiedBaseUrl: input.verifiedBaseUrl === undefined
+          ? current.verifiedBaseUrl
+          : input.verifiedBaseUrl,
+        health: input.health ?? current.health,
+        lastSuccessAtMs: input.lastSuccessAtMs === undefined
+          ? current.lastSuccessAtMs
+          : input.lastSuccessAtMs,
+        updatedAtMs: input.updatedAtMs
+      }
+      const saved = yield* sql.unsafe<ServerRow>(`
+        UPDATE upstream_servers SET
+          verified_catalog_id = ?, verified_base_url = ?, access_token = ?,
+          access_token_expires_at_ms = ?, health = ?, last_success_at_ms = ?, updated_at_ms = ?
+        WHERE id = ? AND generation = ?
+        RETURNING *
+      `, [
+        updated.verifiedCatalogId,
+        updated.verifiedBaseUrl,
+        updated.accessToken,
+        updated.accessTokenExpiresAtMs,
+        updated.health,
+        updated.lastSuccessAtMs,
+        updated.updatedAtMs,
+        input.serverId,
+        input.expectedGeneration
+      ])
+      return saved[0] === undefined ? null : upstreamServer(saved[0])
+    })))
+
+  const saveServerConfiguration: RepositoriesService["saveServerConfiguration"] = (input, expectedGeneration) =>
+    database("saveServerConfiguration", sql.withTransaction(Effect.gen(function*() {
+      const rows = yield* sql.unsafe<ServerRow>(`
+        UPDATE upstream_servers SET
+          verified_catalog_id = ?, verified_base_url = ?, generation = ?, name = ?, base_url = ?,
+          username = ?, password = ?, access_token = ?, access_token_expires_at_ms = ?, user_agent = ?,
+          enabled = ?, health = ?, last_success_at_ms = ?, updated_at_ms = ?
+        WHERE id = ? AND generation = ?
+        RETURNING *
+      `, [
+        input.verifiedCatalogId,
+        input.verifiedBaseUrl,
+        input.generation,
+        input.name,
+        input.baseUrl,
+        input.username,
+        input.password,
+        input.accessToken,
+        input.accessTokenExpiresAtMs,
+        input.userAgent,
+        input.enabled ? 1 : 0,
+        input.health,
+        input.lastSuccessAtMs,
+        input.updatedAtMs,
+        input.id,
+        expectedGeneration
+      ])
+      return rows[0] === undefined ? null : upstreamServer(rows[0])
+    })))
+
+  const deleteServer: RepositoriesService["deleteServer"] = (id) =>
+    database("deleteServer", sql.unsafe(`
+      UPDATE upstream_servers SET
+        enabled = 0, health = 'unknown', generation = generation + 1,
+        access_token = NULL, access_token_expires_at_ms = NULL,
+        deleted_at_ms = ?, updated_at_ms = ?
+      WHERE id = ? AND deleted_at_ms IS NULL
+    `, [Date.now(), Date.now(), id])).pipe(Effect.asVoid)
 
   interface LibraryRow {
     readonly id: string
@@ -646,6 +749,23 @@ const makeRepositories = Effect.gen(function*() {
       Effect.asVoid
     )
 
+  const isSourceEligible: RepositoriesService["isSourceEligible"] = (serverId, sourceLibraryId) =>
+    database("isSourceEligible", sql.unsafe<{ readonly eligible: unknown }>(`
+      SELECT EXISTS(
+        SELECT 1
+        FROM library_sources ls
+        JOIN virtual_libraries vl ON vl.id = ls.virtual_library_id
+        JOIN upstream_servers us ON us.id = ls.server_id
+        WHERE ls.server_id = ? AND ls.source_library_id = ?
+          AND vl.enabled = 1 AND ls.enabled = 1 AND us.enabled = 1
+          AND us.deleted_at_ms IS NULL
+          AND us.health = 'healthy'
+          AND (us.verified_catalog_id IS NOT NULL OR us.verified_base_url IS NOT NULL)
+      ) AS eligible
+    `, [serverId, sourceLibraryId])).pipe(
+      Effect.flatMap((rows) => decode("isSourceEligible", () => boolean(rows[0]?.eligible, "eligible")))
+    )
+
   interface EligibleSourceRow {
     readonly virtual_library_id: string
     readonly server_id: string
@@ -691,7 +811,9 @@ const makeRepositories = Effect.gen(function*() {
         AND vl.enabled = 1
         AND ls.enabled = 1
         AND us.enabled = 1
-        AND us.verified_catalog_id IS NOT NULL
+        AND us.deleted_at_ms IS NULL
+        AND us.health = 'healthy'
+        AND (us.verified_catalog_id IS NOT NULL OR us.verified_base_url IS NOT NULL)
       ORDER BY ls.source_order, ls.server_id, ls.source_library_id
     `, [libraryId])).pipe(Effect.flatMap((rows) => decode("resolveEligibleSources", () => rows.map((row): EligibleSource => ({
       virtualLibraryId: decodeVirtualLibraryId(row.virtual_library_id),
@@ -702,9 +824,9 @@ const makeRepositories = Effect.gen(function*() {
       sourceOrder: integer(row.source_order, "source_order"),
       enabled: boolean(row.source_enabled, "source_enabled"),
       catalogNamespace: row.catalog_namespace,
-      verifiedCatalogId: row.verified_catalog_id,
+      verifiedCatalogId: row.verified_catalog_id ?? row.catalog_namespace,
       serverGeneration: integer(row.generation, "generation"),
-      baseUrl: decodeHttpUrl(row.base_url),
+      baseUrl: row.base_url as EligibleSource["baseUrl"],
       username: row.username,
       password: row.password,
       accessToken: row.access_token,
@@ -1114,10 +1236,15 @@ const makeRepositories = Effect.gen(function*() {
     clearAuthAttempts,
     revokeAuthentication,
     listServers,
+    getServer,
     saveServer,
+    saveServerConfiguration,
+    saveServerResult,
+    deleteServer,
     listVirtualLibraries,
     saveVirtualLibrary,
     deleteVirtualLibrary,
+    isSourceEligible,
     resolveEligibleSources,
     persistIdentityResult,
     readQueryGeneration,

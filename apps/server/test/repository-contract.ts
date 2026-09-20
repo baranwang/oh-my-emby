@@ -50,6 +50,7 @@ const server = (id: string, sourceOrder = 0) => ({
   id,
   catalogNamespace: `catalog:${id}`,
   verifiedCatalogId: `verified:${id}`,
+  verifiedBaseUrl: `https://${id}.example.com`,
   generation: 1,
   name: id,
   baseUrl: `https://${id}.example.com`,
@@ -61,6 +62,7 @@ const server = (id: string, sourceOrder = 0) => ({
   enabled: true,
   health: "healthy" as const,
   lastSuccessAtMs: 1_234,
+  deletedAtMs: null,
   createdAtMs: 1_000 + sourceOrder,
   updatedAtMs: 2_000 + sourceOrder
 })

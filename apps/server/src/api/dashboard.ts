@@ -4,7 +4,10 @@ import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse"
 import type { HttpServerRequest } from "effect/unstable/http/HttpServerRequest"
 import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder"
 
-import { Auth, type DashboardSession } from "../core/auth.js"
+import { Auth, type AuthService, type DashboardSession } from "../core/auth.js"
+import { InvalidCredentials } from "../core/errors.js"
+import { LibraryService } from "../core/library-service.js"
+import { ServerService } from "../core/server-service.js"
 
 export const DASHBOARD_SESSION_COOKIE = "oh_my_emby_session"
 const dashboardCookiePath = "/api/dashboard"
@@ -28,6 +31,10 @@ export interface DashboardRequest {
 
 export interface GuardedDashboardRequest {
   readonly clientKey: string
+}
+
+export interface AuthorizedDashboardRequest<A> extends GuardedDashboardRequest {
+  readonly principal: A
 }
 
 export interface ForbiddenOriginFailure {
@@ -85,6 +92,19 @@ export const guardDashboardRequest = (
   return { clientKey: forwardedFor || request.remoteAddress || "unknown" }
 })
 
+export const authorizeDashboardControlRequest = <A, E>(
+  policy: DashboardRequestPolicy,
+  request: DashboardRequest,
+  token: string | undefined,
+  authenticate: (token: string) => Effect.Effect<A, E>
+): Effect.Effect<AuthorizedDashboardRequest<A>, ForbiddenOriginFailure | InvalidCredentials | E> =>
+  Effect.gen(function*() {
+    const boundary = yield* guardDashboardRequest(policy, request)
+    if (token === undefined) return yield* Effect.fail(new InvalidCredentials())
+    const principal = yield* authenticate(token)
+    return { ...boundary, principal }
+  })
+
 const cookieOptions = (expiresAtMs: number) => ({
   expires: new Date(expiresAtMs),
   httpOnly: true,
@@ -113,6 +133,23 @@ const statusFor = (tag: string): number => {
   switch (tag) {
     case "ForbiddenOrigin": return 403
     case "AlreadyInitialized": return 409
+    case "ServerNotFound":
+    case "LibraryNotFound": return 404
+    case "InvalidUpstreamUrl":
+    case "LibraryValidationFailed": return 400
+    case "CatalogIdentityMismatch":
+    case "CatalogIdentityUnverifiable":
+    case "ObsoleteGeneration":
+    case "ServerLimitExceeded": return 409
+    case "UpstreamUnavailable":
+    case "DestinationRejected":
+    case "RedirectLimitExceeded":
+    case "RedirectLoop":
+    case "HttpsDowngrade":
+    case "ResponseTooLarge":
+    case "UpstreamInvalidResponse": return 503
+    case "UpstreamRejected": return 502
+    case "UpstreamTimeout": return 504
     case "InvalidCredentials":
     case "AuthenticationChanged":
     case "RateLimited": return 401
@@ -122,12 +159,32 @@ const statusFor = (tag: string): number => {
 
 const publicFailure = (error: { readonly _tag?: string }): HttpServerResponse.HttpServerResponse => {
   const tag = error._tag ?? "RepositoryError"
+  const serverId = "serverId" in error && typeof error.serverId === "string" ? error.serverId : "unknown"
   const body = tag === "AlreadyInitialized"
     ? { _tag: "Conflict", code: "already_initialized" }
     : tag === "ForbiddenOrigin"
     ? { _tag: "ForbiddenOrigin" }
     : tag === "InvalidCredentials" || tag === "AuthenticationChanged" || tag === "RateLimited"
     ? { _tag: "Unauthorized" }
+    : tag === "ServerNotFound" || tag === "LibraryNotFound"
+    ? { _tag: "NotFound" }
+    : tag === "InvalidUpstreamUrl" || tag === "LibraryValidationFailed"
+    ? { _tag: "ValidationFailed", fieldErrors: [{ field: "configuration", message: "invalid configuration" }] }
+    : tag === "CatalogIdentityMismatch" || tag === "CatalogIdentityUnverifiable" || tag === "ObsoleteGeneration" || tag === "ServerLimitExceeded"
+    ? { _tag: "Conflict", code: tag === "CatalogIdentityMismatch"
+      ? "catalog_identity_mismatch"
+      : tag === "CatalogIdentityUnverifiable"
+      ? "catalog_identity_unverifiable"
+      : tag === "ObsoleteGeneration"
+      ? "obsolete_generation"
+      : "server_limit_exceeded" }
+    : tag === "UpstreamRejected"
+    ? { _tag: "UpstreamRejected", serverId, status: "status" in error && typeof error.status === "number" ? error.status : 502 }
+    : tag === "UpstreamTimeout"
+    ? { _tag: "Timeout" }
+    : tag === "UpstreamUnavailable" || tag === "DestinationRejected" || tag === "RedirectLimitExceeded" ||
+        tag === "RedirectLoop" || tag === "HttpsDowngrade" || tag === "ResponseTooLarge" || tag === "UpstreamInvalidResponse"
+    ? { _tag: "UpstreamUnavailable", serverId }
     : { _tag: "Internal", requestId: crypto.randomUUID() }
   return HttpServerResponse.jsonUnsafe(body, { status: statusFor(tag) })
 }
@@ -144,6 +201,17 @@ const requestMetadata = (request: HttpServerRequest): DashboardRequest => {
 
 const guarded = (policy: DashboardRequestPolicy, request: HttpServerRequest) =>
   guardDashboardRequest(policy, requestMetadata(request))
+
+const authorized = (policy: DashboardRequestPolicy, request: HttpServerRequest, auth: AuthService) =>
+  authorizeDashboardControlRequest(
+    policy,
+    requestMetadata(request),
+    request.cookies[DASHBOARD_SESSION_COOKIE],
+    auth.authenticateDashboard
+  )
+
+const resultOrFailure = <A, E extends { readonly _tag?: string }>(effect: Effect.Effect<A, E, never>) =>
+  effect.pipe(Effect.result, Effect.map((result) => Result.isFailure(result) ? publicFailure(result.failure) : result.success))
 
 export const makeDashboardAuthLayers = (
   config: DashboardRequestPolicyConfig
@@ -221,4 +289,94 @@ export const makeDashboardAuthLayers = (
     })
   }))
   return Layer.merge(bootstrap, authentication)
+}
+
+export const makeDashboardControlPlaneLayers = (
+  config: DashboardRequestPolicyConfig
+) => {
+  const policy = makeDashboardRequestPolicy(config)
+  const servers = HttpApiBuilder.group(DashboardApi, "servers", (handlers) => Effect.gen(function*() {
+    const auth = yield* Auth
+    const service = yield* ServerService
+    return handlers.handleAll({
+      listServers: ({ request }) => Effect.gen(function*() {
+        const access = yield* authorized(policy, request, auth).pipe(Effect.result)
+        if (Result.isFailure(access)) return publicFailure(access.failure)
+        return yield* resultOrFailure(service.list())
+      }),
+      createServer: ({ payload, request }) => Effect.gen(function*() {
+        const access = yield* authorized(policy, request, auth).pipe(Effect.result)
+        if (Result.isFailure(access)) return publicFailure(access.failure)
+        return yield* resultOrFailure(service.create(payload))
+      }),
+      getServer: ({ params, request }) => Effect.gen(function*() {
+        const access = yield* authorized(policy, request, auth).pipe(Effect.result)
+        if (Result.isFailure(access)) return publicFailure(access.failure)
+        return yield* resultOrFailure(service.get(params.id))
+      }),
+      updateServer: ({ params, payload, request }) => Effect.gen(function*() {
+        const access = yield* authorized(policy, request, auth).pipe(Effect.result)
+        if (Result.isFailure(access)) return publicFailure(access.failure)
+        return yield* resultOrFailure(service.update(params.id, payload))
+      }),
+      deleteServer: ({ params, request }) => Effect.gen(function*() {
+        const access = yield* authorized(policy, request, auth).pipe(Effect.result)
+        if (Result.isFailure(access)) return publicFailure(access.failure)
+        const removed = yield* service.delete(params.id).pipe(Effect.result)
+        return Result.isFailure(removed) ? publicFailure(removed.failure) : HttpServerResponse.empty()
+      }),
+      testServerConnection: ({ params, request }) => Effect.gen(function*() {
+        const access = yield* authorized(policy, request, auth).pipe(Effect.result)
+        if (Result.isFailure(access)) return publicFailure(access.failure)
+        return yield* resultOrFailure(service.testConnection(params.id))
+      }),
+      getServerHealth: ({ params, request }) => Effect.gen(function*() {
+        const access = yield* authorized(policy, request, auth).pipe(Effect.result)
+        if (Result.isFailure(access)) return publicFailure(access.failure)
+        return yield* resultOrFailure(service.getRecord(params.id).pipe(Effect.map((server) => ({
+          serverId: server.id,
+          health: server.health,
+          lastSuccessAtMs: server.lastSuccessAtMs
+        }))))
+      }),
+      listSourceLibraries: ({ params, request }) => Effect.gen(function*() {
+        const access = yield* authorized(policy, request, auth).pipe(Effect.result)
+        if (Result.isFailure(access)) return publicFailure(access.failure)
+        return yield* resultOrFailure(service.listSourceLibraries(params.id))
+      })
+    })
+  }))
+  const libraries = HttpApiBuilder.group(DashboardApi, "libraries", (handlers) => Effect.gen(function*() {
+    const auth = yield* Auth
+    const service = yield* LibraryService
+    return handlers.handleAll({
+      listVirtualLibraries: ({ request }) => Effect.gen(function*() {
+        const access = yield* authorized(policy, request, auth).pipe(Effect.result)
+        if (Result.isFailure(access)) return publicFailure(access.failure)
+        return yield* resultOrFailure(service.list())
+      }),
+      createVirtualLibrary: ({ payload, request }) => Effect.gen(function*() {
+        const access = yield* authorized(policy, request, auth).pipe(Effect.result)
+        if (Result.isFailure(access)) return publicFailure(access.failure)
+        return yield* resultOrFailure(service.create(payload))
+      }),
+      getVirtualLibrary: ({ params, request }) => Effect.gen(function*() {
+        const access = yield* authorized(policy, request, auth).pipe(Effect.result)
+        if (Result.isFailure(access)) return publicFailure(access.failure)
+        return yield* resultOrFailure(service.get(params.id))
+      }),
+      updateVirtualLibrary: ({ params, payload, request }) => Effect.gen(function*() {
+        const access = yield* authorized(policy, request, auth).pipe(Effect.result)
+        if (Result.isFailure(access)) return publicFailure(access.failure)
+        return yield* resultOrFailure(service.update(params.id, payload))
+      }),
+      deleteVirtualLibrary: ({ params, request }) => Effect.gen(function*() {
+        const access = yield* authorized(policy, request, auth).pipe(Effect.result)
+        if (Result.isFailure(access)) return publicFailure(access.failure)
+        const removed = yield* service.delete(params.id).pipe(Effect.result)
+        return Result.isFailure(removed) ? publicFailure(removed.failure) : HttpServerResponse.empty()
+      })
+    })
+  }))
+  return Layer.merge(servers, libraries)
 }

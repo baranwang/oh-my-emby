@@ -1,4 +1,4 @@
-import { Effect } from "effect"
+import { Effect, Layer } from "effect"
 
 import {
   Auth,
@@ -6,45 +6,37 @@ import {
   type DashboardSession,
   type LoginOptions
 } from "./auth.js"
-import {
-  type ClaimError,
-  type LoginError,
-  UpstreamRejected,
-  UpstreamUnavailable
-} from "./errors.js"
+import { type ClaimError, type LoginError, type UpstreamFailure } from "./errors.js"
 import type { SaveServerCommand } from "./model.js"
 import { Repositories } from "./repositories.js"
+import { makeServerServiceLayer, ServerService } from "./server-service.js"
+import { makeUpstreamClientLayer, type DestinationPolicy } from "./upstream-client.js"
 
-export type PlatformFetch = (input: URL, init: RequestInit) => Promise<Response>
+export type PlatformFetch = typeof globalThis.fetch
 
 export const claimAndAttemptFirstServerSetup = (
   credentials: Credentials,
   options: LoginOptions,
   server: SaveServerCommand,
-  platformFetch: PlatformFetch
+  platformFetch: PlatformFetch,
+  destinationPolicy: DestinationPolicy
 ): Effect.Effect<
   DashboardSession,
-  ClaimError | LoginError | UpstreamRejected | UpstreamUnavailable,
+  ClaimError | LoginError | UpstreamFailure,
   Auth | Repositories
 > => Effect.gen(function*() {
   const auth = yield* Auth
   const repositories = yield* Repositories
   const session = yield* auth.claim(credentials, options)
   yield* repositories.saveServer(server)
-
-  const baseUrl = server.baseUrl.endsWith("/") ? server.baseUrl : `${server.baseUrl}/`
-  const response = yield* Effect.tryPromise({
-    try: () => platformFetch(new URL("System/Info/Public", baseUrl), {
-      method: "GET",
-      redirect: "error"
-    }),
-    catch: () => new UpstreamUnavailable({ serverId: server.id })
+  const upstream = makeUpstreamClientLayer({
+    fetch: platformFetch,
+    destinationPolicy
   })
-  if (!response.ok) {
-    return yield* Effect.fail(new UpstreamRejected({
-      serverId: server.id,
-      status: response.status
-    }))
-  }
+  const service = makeServerServiceLayer.pipe(Layer.provide(upstream))
+  yield* Effect.gen(function*() {
+    const servers = yield* ServerService
+    yield* servers.testConnection(server.id)
+  }).pipe(Effect.provide(service))
   return session
 })

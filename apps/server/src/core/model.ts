@@ -94,15 +94,29 @@ export type ServerHealth = ServerView["health"]
 
 export interface UpstreamServer extends Omit<ServerView, "hasPassword"> {
   readonly catalogNamespace: string
+  readonly verifiedBaseUrl: string | null
   readonly password: string | null
   readonly accessToken: string | null
   readonly accessTokenExpiresAtMs: number | null
   readonly lastSuccessAtMs: number | null
+  readonly deletedAtMs: number | null
   readonly createdAtMs: number
   readonly updatedAtMs: number
 }
 
 export type SaveServerCommand = UpstreamServer
+
+export interface SaveServerResultCommand {
+  readonly serverId: string
+  readonly expectedGeneration: number
+  readonly accessToken?: string | null
+  readonly accessTokenExpiresAtMs?: number | null
+  readonly verifiedCatalogId?: string | null
+  readonly verifiedBaseUrl?: string | null
+  readonly health?: ServerHealth
+  readonly lastSuccessAtMs?: number | null
+  readonly updatedAtMs: number
+}
 export type MediaType = SourceLibraryView["mediaType"]
 type ContractLibrarySource = VirtualLibraryView["sources"][number]
 

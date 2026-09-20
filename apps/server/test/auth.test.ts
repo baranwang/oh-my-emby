@@ -81,6 +81,7 @@ describe("local authentication", () => {
       id: "first-server",
       catalogNamespace: "catalog:first-server",
       verifiedCatalogId: null,
+      verifiedBaseUrl: null,
       generation: 1,
       name: "Offline Emby",
       baseUrl,
@@ -92,24 +93,26 @@ describe("local authentication", () => {
       enabled: true,
       health: "unknown" as const,
       lastSuccessAtMs: null,
+      deletedAtMs: null,
       createdAtMs: nowMs,
       updatedAtMs: nowMs
     }
-    let observedUrl: URL | undefined
-    let observedInit: RequestInit | undefined
-    const platformFetch = (input: URL, init: RequestInit) => {
-      observedUrl = input
-      observedInit = init
+    let observedRequest: Request | undefined
+    const platformFetch: typeof globalThis.fetch = (input, init) => {
+      observedRequest = new Request(input, init)
       return globalThis.fetch(input, init)
     }
     await expect(run(claimAndAttemptFirstServerSetup(
         credentials,
         { scopeKey: "claim:first-server" },
         unreachableServer,
-        platformFetch
+        platformFetch,
+        { platform: "docker", administratorPrivateHosts: [new URL(baseUrl).hostname] }
     ))).rejects.toMatchObject({ _tag: "UpstreamUnavailable", serverId: "first-server" })
-    expect(observedUrl?.pathname).toBe("/System/Info/Public")
-    expect(observedInit).toEqual({ method: "GET", redirect: "error" })
+    expect(new URL(observedRequest?.url ?? "https://invalid").pathname).toBe("/Users/AuthenticateByName")
+    expect(observedRequest?.method).toBe("POST")
+    expect(observedRequest?.redirect).toBe("manual")
+    expect(observedRequest?.headers.get("user-agent")).toBe("oh-my-emby-test")
     expect(await run(Effect.gen(function*() {
       const repositories = yield* Repositories
       return yield* repositories.listServers()
@@ -129,6 +132,7 @@ describe("local authentication", () => {
       id: "rejected-server",
       catalogNamespace: "catalog:rejected-server",
       verifiedCatalogId: null,
+      verifiedBaseUrl: null,
       generation: 1,
       name: "Rejected Emby",
       baseUrl: listener.url.origin,
@@ -140,6 +144,7 @@ describe("local authentication", () => {
       enabled: true,
       health: "unknown" as const,
       lastSuccessAtMs: null,
+      deletedAtMs: null,
       createdAtMs: nowMs,
       updatedAtMs: nowMs
     }
@@ -148,7 +153,8 @@ describe("local authentication", () => {
         credentials,
         { scopeKey: "claim:rejected-server" },
         server,
-        globalThis.fetch
+        globalThis.fetch,
+        { platform: "docker", administratorPrivateHosts: [new URL(server.baseUrl).hostname] }
       ))).rejects.toMatchObject({
         _tag: "UpstreamRejected",
         serverId: "rejected-server",

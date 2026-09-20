@@ -19,6 +19,7 @@ import type {
   QueryGeneration,
   QueryGenerationAppend,
   SaveServerCommand,
+  SaveServerResultCommand,
   SaveVirtualLibraryCommand,
   SessionIssue,
   SessionRecord,
@@ -52,10 +53,23 @@ export interface RepositoriesService {
   readonly clearAuthAttempts: (scopeKey: string) => Effect.Effect<void, RepositoryError>
   readonly revokeAuthentication: (input: PasswordReplacement) => Effect.Effect<void, AuthError>
   readonly listServers: () => Effect.Effect<ReadonlyArray<UpstreamServer>, RepositoryError>
+  readonly getServer: (id: string) => Effect.Effect<UpstreamServer | null, RepositoryError>
   readonly saveServer: (input: SaveServerCommand) => Effect.Effect<UpstreamServer, RepositoryError>
+  readonly saveServerConfiguration: (
+    input: SaveServerCommand,
+    expectedGeneration: number
+  ) => Effect.Effect<UpstreamServer | null, RepositoryError>
+  readonly saveServerResult: (
+    input: SaveServerResultCommand
+  ) => Effect.Effect<UpstreamServer | null, RepositoryError>
+  readonly deleteServer: (id: string) => Effect.Effect<void, RepositoryError>
   readonly listVirtualLibraries: () => Effect.Effect<ReadonlyArray<VirtualLibrary>, RepositoryError>
   readonly saveVirtualLibrary: (input: SaveVirtualLibraryCommand) => Effect.Effect<VirtualLibrary, RepositoryError>
   readonly deleteVirtualLibrary: (id: string) => Effect.Effect<void, RepositoryError>
+  readonly isSourceEligible: (
+    serverId: string,
+    sourceLibraryId: string
+  ) => Effect.Effect<boolean, RepositoryError>
   readonly resolveEligibleSources: (libraryId: string) => Effect.Effect<ReadonlyArray<EligibleSource>, RepositoryError>
   readonly persistIdentityResult: (result: IdentityResolution) => Effect.Effect<CanonicalItem, IdentityFailure>
   readonly readQueryGeneration: (key: string) => Effect.Effect<QueryGeneration | null, RepositoryError>
