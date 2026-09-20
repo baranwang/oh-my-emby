@@ -221,6 +221,35 @@ describe("exact canonical identity", () => {
     ])
   })
 
+  it("does not downgrade an issued exact identity on a claim-less refresh", async () => {
+    const issued = await resolve(movie("a", { tmdbMovie: "10" }, "exact-refresh"))
+    const refreshed = await resolve(source("a", "exact-refresh", "Movie", {}, {
+      observedAtMs: 2_000
+    }))
+
+    expect(refreshed.canonical.id).toBe(issued.canonical.id)
+    expect(refreshed.canonical.identityState).toBe("exact")
+    expect(refreshed.claims.map(({ namespace, value, state }) => ({ namespace, value, state }))).toEqual([
+      { namespace: "tmdb:movie", value: "10", state: "exact" }
+    ])
+  })
+
+  it("does not downgrade an issued fallback identity when numbering is temporarily absent", async () => {
+    const issued = await resolve(source("a", "fallback-refresh", "Episode", {}, {
+      canonicalSeriesId: "series-parent",
+      seasonNumber: 1,
+      episodeNumber: 3
+    }))
+    const refreshed = await resolve(source("a", "fallback-refresh", "Episode", {}, {
+      observedAtMs: 2_000
+    }))
+
+    expect(refreshed.canonical.id).toBe(issued.canonical.id)
+    expect(refreshed.canonical.identityState).toBe("fallback")
+    expect(refreshed.claims).toHaveLength(1)
+    expect(refreshed.claims[0]?.namespace).toBe("fallback:episode")
+  })
+
   it("keeps the oldest canonical, resolves its alias, and preserves the highest state revision", async () => {
     const oldest = await resolve(source("a", "oldest", "Movie", { tmdbMovie: "10" }, { observedAtMs: 1_000 }))
     const newest = await resolve(source("b", "newest", "Movie", { imdbTitle: "tt1" }, { observedAtMs: 2_000 }))
@@ -258,6 +287,80 @@ describe("exact canonical identity", () => {
     expect(withDatabase((database) => database.query(
       "SELECT id FROM canonical_items WHERE id = ?"
     ).get(newest.canonical.id))).toBeNull()
+  })
+
+  it("rewrites retired query items without deleting generations or unrelated items", async () => {
+    const survivor = await resolve(source("a", "query-survivor", "Movie", {
+      tmdbMovie: "10"
+    }, { observedAtMs: 1_000 }))
+    const retired = await resolve(source("b", "query-retired", "Movie", {
+      imdbTitle: "tt1"
+    }, { observedAtMs: 2_000 }))
+    const bridge = await resolve(source("c", "query-bridge", "Movie", {}, {
+      observedAtMs: 3_000
+    }))
+    const unrelated = await resolve(source("c", "query-unrelated", "Movie", {
+      tmdbMovie: "99"
+    }, { observedAtMs: 4_000 }))
+    withDatabase((database) => {
+      database.run(`
+        INSERT INTO virtual_libraries (
+          id, name, media_type, enabled, created_at_ms, updated_at_ms
+        ) VALUES ('query-library', 'Movies', 'movies', 1, 1, 1)
+      `)
+      for (const [id, key] of [["generation-both", "both"], ["generation-retired", "retired"]]) {
+        database.run(`
+          INSERT INTO query_generations (
+            id, query_key, user_key, device_id, virtual_library_id,
+            normalized_query_json, source_state_json, all_sources_exhausted,
+            state_dependent, created_at_ms, expires_at_ms
+          ) VALUES (?, ?, 'owner', 'device', 'query-library', '{}', '{}', 1, 0, 1, 10000)
+        `, [id, key])
+      }
+      database.run(`
+        INSERT INTO query_generation_items (
+          generation_id, ordinal, canonical_id, sort_values_json
+        ) VALUES
+          ('generation-both', 0, ?, '[]'),
+          ('generation-both', 1, ?, '[]'),
+          ('generation-both', 2, ?, '[]'),
+          ('generation-both', 3, ?, '[]'),
+          ('generation-retired', 0, ?, '[]'),
+          ('generation-retired', 1, ?, '[]'),
+          ('generation-retired', 2, ?, '[]')
+      `, [
+        survivor.canonical.id,
+        retired.canonical.id,
+        bridge.canonical.id,
+        unrelated.canonical.id,
+        retired.canonical.id,
+        bridge.canonical.id,
+        unrelated.canonical.id
+      ])
+    })
+
+    await resolve(source("c", "query-bridge", "Movie", {
+      tmdbMovie: "10",
+      imdbTitle: "tt1"
+    }, { observedAtMs: 5_000 }))
+
+    expect(withDatabase((database) => database.query<{
+      generation_id: string
+      ordinal: number
+      canonical_id: string
+    }, []>(`
+      SELECT generation_id, ordinal, canonical_id
+      FROM query_generation_items
+      ORDER BY generation_id, ordinal
+    `).all())).toEqual([
+      { generation_id: "generation-both", ordinal: 0, canonical_id: survivor.canonical.id },
+      { generation_id: "generation-both", ordinal: 3, canonical_id: unrelated.canonical.id },
+      { generation_id: "generation-retired", ordinal: 0, canonical_id: survivor.canonical.id },
+      { generation_id: "generation-retired", ordinal: 2, canonical_id: unrelated.canonical.id }
+    ])
+    expect(withDatabase((database) => database.query<{ count: number }, []>(
+      "SELECT count(*) AS count FROM query_generations"
+    ).get())).toEqual({ count: 2 })
   })
 
   it("quarantines a late conflict without moving existing user state", async () => {

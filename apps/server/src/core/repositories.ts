@@ -80,7 +80,16 @@ export interface RepositoriesService {
     sourceLibraryId: string
   ) => Effect.Effect<boolean, RepositoryError>
   readonly resolveEligibleSources: (libraryId: string) => Effect.Effect<ReadonlyArray<EligibleSource>, RepositoryError>
+  /**
+   * One identity transaction must lock/read every cluster matched by the candidate's typed claims,
+   * validate complete-cluster compatibility, persist claims and the source mapping, and recheck the
+   * server generation immediately before commit. Compatible consolidation keeps the oldest canonical,
+   * retains retired IDs as resolvable aliases, moves every compatible source mapping and dependent
+   * canonical reference, and preserves the highest user-state revision. Ambiguous or late-conflicting
+   * input is quarantined without splitting an issued canonical or moving its existing state.
+   */
   readonly resolveIdentity: (candidate: PreparedIdentityCandidate) => Effect.Effect<IdentityResolution, IdentityFailure>
+  /** Resolves an active canonical ID or any permanent retired alias to its active canonical ID. */
   readonly lookupCanonicalId: (id: string) => Effect.Effect<string | null, RepositoryError>
   readonly persistIdentityResult: (result: IdentityResolution) => Effect.Effect<CanonicalItem, IdentityFailure>
   readonly readQueryGeneration: (key: string) => Effect.Effect<QueryGeneration | null, RepositoryError>

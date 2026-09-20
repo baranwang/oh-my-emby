@@ -1123,6 +1123,21 @@ const makeRepositories = Effect.gen(function*() {
         ORDER BY created_at_ms, canonical_id, namespace
       `, canonicalRows.map(({ id }) => id))
 
+      const stateRank = { "source-exclusive": 0, fallback: 1, exact: 2 } as const
+      const retainedIdentityState = [
+        identityState,
+        ...canonicalRows.map(({ identity_state }) => identity_state),
+        ...(clusterClaims.some(({ namespace, state }) => state === "exact" && providerNamespaces.has(namespace))
+          ? ["exact"]
+          : clusterClaims.some(({ namespace, state }) => state === "exact" && namespace.startsWith("fallback:"))
+            ? ["fallback"]
+            : [])
+      ].reduce((retained, state) =>
+        (stateRank[state as keyof typeof stateRank] ?? -1) > (stateRank[retained as keyof typeof stateRank] ?? -1)
+          ? state
+          : retained
+      )
+
       let incompatible = false
       const candidateSet = toClaimSet(candidate.claims)
       for (const row of canonicalRows) {
@@ -1276,12 +1291,25 @@ const makeRepositories = Effect.gen(function*() {
       if (retiredIds.length > 0) {
         const retiredPlaceholders = retiredIds.map(() => "?").join(", ")
         yield* sql.unsafe(`
-          DELETE FROM query_generations
-          WHERE id IN (
-            SELECT generation_id FROM query_generation_items
-            WHERE canonical_id IN (${retiredPlaceholders})
-          )
-        `, retiredIds)
+          DELETE FROM query_generation_items AS retired
+          WHERE retired.canonical_id IN (${retiredPlaceholders})
+            AND EXISTS (
+              SELECT 1 FROM query_generation_items AS preferred
+              WHERE preferred.generation_id = retired.generation_id
+                AND (
+                  preferred.canonical_id = ?
+                  OR (
+                    preferred.canonical_id IN (${retiredPlaceholders})
+                    AND preferred.ordinal < retired.ordinal
+                  )
+                )
+            )
+        `, [...retiredIds, survivorId, ...retiredIds])
+        yield* sql.unsafe(`
+          UPDATE query_generation_items
+          SET canonical_id = ?
+          WHERE canonical_id IN (${retiredPlaceholders})
+        `, [survivorId, ...retiredIds])
         yield* sql.unsafe(`
           UPDATE source_items SET canonical_id = ?
           WHERE canonical_id IN (${retiredPlaceholders})
@@ -1376,7 +1404,7 @@ const makeRepositories = Effect.gen(function*() {
         UPDATE canonical_items
         SET identity_state = ?, updated_at_ms = ?
         WHERE id = ?
-      `, [identityState, candidate.observedAtMs, survivorId])
+      `, [retainedIdentityState, candidate.observedAtMs, survivorId])
       yield* saveVersions
       yield* assertIdentityFence(candidate, false)
       return yield* readResolution(survivorId)
