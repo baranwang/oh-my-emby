@@ -74,10 +74,12 @@ describe("Emby authentication and application routing", () => {
     "authenticates a SenPlayer login at %s",
     async (path) => {
       let input: unknown
+      let scopeKey = ""
       const app = makeEmbyHandler(services({
         auth: {
-          loginEmby: (value) => {
+          loginEmby: (value, options) => {
             input = value
+            scopeKey = options.scopeKey
             return Effect.succeed({
               accessToken: "local-token",
               userId: "owner",
@@ -99,6 +101,7 @@ describe("Emby authentication and application routing", () => {
         deviceId: "sen-device",
         deviceName: "iPhone"
       })
+      expect(scopeKey).toBe("emby:owner")
       await expect(response.json()).resolves.toMatchObject({
         AccessToken: "local-token",
         ServerId: "virtual-server",

@@ -21,6 +21,7 @@ const item = (
   itemType: type,
   displayMetadata: {
     Name: `${type} ${id}`,
+    Path: "file:///srv/private/private-token/movie.mkv",
     UserData: { IsFavorite: false, Played: true },
     MediaSources: [{ Id: "untrusted-upstream-version" }]
   },
@@ -143,6 +144,7 @@ describe("Emby catalog routes", () => {
     })
     expect(body.Items[0].MediaSources[0]).not.toHaveProperty("Path")
     expect(body.Items[0].MediaSources[0]).not.toHaveProperty("DirectStreamUrl")
+    expect(body.Items[0]).not.toHaveProperty("Path")
     expect(JSON.stringify(body)).not.toContain("private-token")
   })
 

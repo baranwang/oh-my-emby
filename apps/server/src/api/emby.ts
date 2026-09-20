@@ -179,6 +179,11 @@ const itemDto = (item: CanonicalItemView) => {
     Type: _type,
     UserData: _userData,
     MediaSources: _mediaSources,
+    Path: _path,
+    ServerId: _serverId,
+    DirectPlayUrl: _directPlayUrl,
+    DirectStreamUrl: _directStreamUrl,
+    TranscodingUrl: _transcodingUrl,
     ...metadata
   } = object(item.displayMetadata)
   const mediaSources = item.mediaVersions.map((version) => {
@@ -325,7 +330,7 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
       password: body.Pw,
       deviceId: metadata.DeviceId,
       deviceName: metadata.Device
-    }, { scopeKey: `emby:${metadata.DeviceId}` })
+    }, { scopeKey: `emby:${body.Username}` })
     return json({
       AccessToken: session.accessToken,
       ServerId: services.config.serverId,
