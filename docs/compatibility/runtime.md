@@ -24,6 +24,6 @@ If either target misses 250 ms, change only `PBKDF2_ITERATIONS`, then rerun auth
 | Target | Evidence |
 | --- | --- |
 | Workers local workerd + local D1 | Run `./scripts/smoke-workers.sh` |
-| Workers remote staging + ephemeral D1 | **UNEXECUTED**; run the explicit `--remote` command in the Workers deployment guide |
+| Workers remote staging + ephemeral D1 | **UNEXECUTED**; the local fake-API integration proves fail-closed Worker ownership and exact-ID cleanup, but run the explicit `--remote` command for Cloudflare evidence |
 | Docker/Bun + SQLite | Run `docker build -t oh-my-emby:verify . && ./scripts/smoke-docker.sh` |
 | Real SenPlayer | **UNTESTED**; follow `docs/compatibility/senplayer.md` |

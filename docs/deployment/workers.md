@@ -51,9 +51,14 @@ Inspect the remote plan without creating local temporary state or contacting Clo
 Run the remote smoke only from an authenticated release environment:
 
 ```sh
+CLOUDFLARE_ACCOUNT_ID=... CLOUDFLARE_API_TOKEN=... \
 ./scripts/smoke-workers.sh --remote
 ```
 
-Remote mode generates one 128-bit run ID and derives the exact ephemeral Worker and D1 names from it. Caller-supplied Worker names and origins are not accepted. The script writes the returned D1 ID into a temporary config, migrates D1 before deployment, parses and validates the run-owned `workers.dev` URL from Wrangler's deploy output, and checks health/assets/non-HTML misses/claim/session.
+Remote mode generates one 128-bit run ID and derives the exact ephemeral Worker and D1 names from it. Caller-supplied Worker names and origins are not accepted. Before creating D1 or invoking deploy, the script authenticates to the exact Workers Script API resource and continues only for a Cloudflare `404` with error code `10007`; an existing script or any ambiguous response stops the run.
 
-The same run then temporarily replaces that Worker with an authenticated single-derivation PBKDF2 entrypoint. A local Bun runner sends ten requests, discards the first timing, and gates the remaining end-to-end request samples at p95 below 250 ms. This caller-side timing is required because [deployed Workers timers do not advance during CPU-only execution](https://developers.cloudflare.com/workers/runtime-apis/performance/). Cleanup validates the run ID again and deletes only the Worker and D1 database that this invocation successfully created. The command still has remote side effects and must not run against a production release path.
+The first deployment is a token-protected ownership probe. The script parses the run-owned `workers.dev` URL from Wrangler output, calls that exact origin, and requires the exact run ID plus `private, no-store`. Only then is the Worker eligible for automatic deletion. A failed deploy or ownership check prints the generated Worker name for manual inspection and deliberately does not delete it. D1 cleanup uses only the validated UUID returned by creation, never a name lookup. Loopback API/Wrangler overrides exist solely for the local integration test and reject non-loopback endpoints.
+
+After ownership is proven, the script replaces the probe with the application, migrates D1 before application deployment, and checks health/assets/non-HTML misses/claim/session.
+
+The same run then temporarily replaces that Worker with an authenticated single-derivation PBKDF2 entrypoint. A local Bun runner sends ten requests, discards the first timing, and gates the remaining end-to-end request samples at p95 below 250 ms. This caller-side timing is required because [deployed Workers timers do not advance during CPU-only execution](https://developers.cloudflare.com/workers/runtime-apis/performance/). Cleanup deletes only the ownership-verified Worker name and the exact D1 creation UUID. The command still has remote side effects and must not run against a production release path.
