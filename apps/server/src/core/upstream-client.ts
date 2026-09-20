@@ -156,12 +156,21 @@ const validateDestination = (
   if (url.username !== "" || url.password !== "") {
     return Effect.fail(new DestinationRejected({ serverId: server.id }))
   }
+  const configuredBase = normalizedBaseUrl(server.baseUrl)
+  if (
+    policy.platform === "docker" &&
+    resourcePolicy === "control" &&
+    (isPrivateHostname(configuredBase.hostname) || isIpLiteral(configuredBase.hostname)) &&
+    url.origin !== configuredBase.origin
+  ) {
+    return Effect.fail(new DestinationRejected({ serverId: server.id }))
+  }
   if (policy.platform === "workers") {
     if (isIpLiteral(hostname) || isPrivateHostname(hostname)) {
       return Effect.fail(new DestinationRejected({ serverId: server.id }))
     }
   } else if (isPrivateHostname(hostname) || isIpLiteral(hostname)) {
-    if (resourcePolicy === "control" && url.origin !== normalizedBaseUrl(server.baseUrl).origin) {
+    if (resourcePolicy === "control" && url.origin !== configuredBase.origin) {
       return Effect.fail(new DestinationRejected({ serverId: server.id }))
     }
     const allowed = new Set((policy.administratorPrivateHosts ?? []).map((item) => item.toLowerCase()))
@@ -169,7 +178,7 @@ const validateDestination = (
       return Effect.fail(new DestinationRejected({ serverId: server.id }))
     }
   }
-  if (resourcePolicy === "registered-resource" && url.origin !== normalizedBaseUrl(server.baseUrl).origin) {
+  if (resourcePolicy === "registered-resource" && url.origin !== configuredBase.origin) {
     if (!(policy.registeredResourceOrigins ?? []).includes(url.origin)) {
       return Effect.fail(new DestinationRejected({ serverId: server.id }))
     }

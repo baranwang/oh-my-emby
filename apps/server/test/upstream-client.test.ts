@@ -240,6 +240,32 @@ describe("UpstreamClient", () => {
     expect(urls).toEqual(["https://example.com/System/Info"])
   })
 
+  it("rejects a Docker control redirect from a private base to a public origin", async () => {
+    const calls: Array<string> = []
+    await expect(run(async (input, init) => {
+      const request = new Request(input, init)
+      calls.push(request.url)
+      return calls.length === 1
+        ? new Response(null, { status: 302, headers: { location: "https://public.example.com/info" } })
+        : Response.json({ ok: true })
+    }, Effect.gen(function*() {
+      const client = yield* UpstreamClient
+      return yield* client.request({
+        serverId: "server-1",
+        generation: 1,
+        path: "/System/Info",
+        method: "GET"
+      }, JsonOk)
+    }), {
+      server: server({
+        baseUrl: "http://192.168.1.20:8096" as any,
+        verifiedBaseUrl: "http://192.168.1.20:8096"
+      }),
+      policy: { platform: "docker", administratorPrivateHosts: ["192.168.1.20"] }
+    })).rejects.toMatchObject({ _tag: "DestinationRejected" })
+    expect(calls).toEqual(["http://192.168.1.20:8096/System/Info"])
+  })
+
   it("allows three redirects but rejects a fourth and redirect loops", async () => {
     const redirecting = (limit: number, loop = false): typeof globalThis.fetch => async (input, init) => {
       const request = new Request(input, init)
