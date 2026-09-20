@@ -4,9 +4,9 @@ import { describe, expect, it } from "vitest"
 import { makeEmbyHandler, type EmbyServices } from "../src/api/emby.js"
 import { Federation, type CanonicalItemView } from "../src/core/federation.js"
 import type { EligibleSource, SourceItemRecord, SourceMediaVersion } from "../src/core/model.js"
-import { Playback, makePlaybackLayer } from "../src/core/playback.js"
+import { Playback, makePlaybackLayer, serveRegisteredResource } from "../src/core/playback.js"
 import { Repositories, type CatalogItemRecord } from "../src/core/repositories.js"
-import { UpstreamClient } from "../src/core/upstream-client.js"
+import { UpstreamClient, makeUpstreamClientLayer } from "../src/core/upstream-client.js"
 
 const source = (serverId: string, id: string, upstreamItemId: string, generation = 1): SourceItemRecord => ({
   id,
@@ -68,6 +68,7 @@ const makeFixture = (options: {
   fail?: ReadonlySet<string>
   binding?: (serverId: string) => boolean
   clientUsable?: boolean
+  resourceRequest?: () => Effect.Effect<Response, any>
 } = {}) => {
   const sourceA = source("a", "source-a", "item-a")
   const sourceB = source("b", "source-b", "item-b")
@@ -122,7 +123,10 @@ const makeFixture = (options: {
       }
       const details = candidate.capabilities as { url: string; serverId: string }
       return Effect.succeed({ serverId: details.serverId, generation: 1, url: details.url })
-    }
+    },
+    requestResource: () => options.resourceRequest?.() ?? Effect.succeed(new Response("image", {
+      headers: { "content-type": "image/png" }
+    }))
   } as any))
   const layer = makePlaybackLayer({
     sessionId: () => "play-session",
@@ -161,6 +165,96 @@ const services = (playback: EmbyServices["playback"], item: CanonicalItemView): 
 })
 
 describe("playback decisions", () => {
+  it("authorizes the connected address at the registered-resource transport boundary", async () => {
+    const server = {
+      id: "server-1",
+      catalogNamespace: "catalog:server-1",
+      verifiedCatalogId: "verified:server-1",
+      verifiedBaseUrl: "https://example.com",
+      generation: 1,
+      name: "Server",
+      baseUrl: "https://example.com",
+      username: "owner",
+      password: null,
+      accessToken: "token",
+      accessTokenExpiresAtMs: null,
+      upstreamUserId: "upstream-owner",
+      userAgent: "test",
+      enabled: true,
+      health: "healthy",
+      lastSuccessAtMs: 1,
+      deletedAtMs: null,
+      createdAtMs: 1,
+      updatedAtMs: 1
+    } as any
+    const repositories = Layer.succeed(Repositories, Repositories.of({
+      getServer: () => Effect.succeed(server)
+    } as any))
+    const allowedFor = async (
+      destinationPolicy: Parameters<typeof makeUpstreamClientLayer>[0]["destinationPolicy"],
+      address: string
+    ) => {
+      let allowed: boolean | undefined
+      const layer = makeUpstreamClientLayer({
+        fetch: () => Promise.reject(new Error("control fetch must not run")),
+        destinationPolicy,
+        fetchRegisteredResource: async (_request, context) => {
+          allowed = context.isConnectedAddressAllowed(address)
+          return new Response(null)
+        }
+      }).pipe(Layer.provide(repositories))
+      await Effect.runPromise(Effect.scoped(Effect.gen(function*() {
+        const upstream = yield* UpstreamClient
+        return yield* upstream.requestResource({
+          serverId: "server-1",
+          generation: 1,
+          url: new URL("https://example.com/Items/item/Images/Primary"),
+          accept: ["image/png"]
+        })
+      })).pipe(Effect.provide(layer)))
+      return allowed
+    }
+
+    await expect(allowedFor({ platform: "workers" }, "203.0.113.9")).resolves.toBe(true)
+    await expect(allowedFor({ platform: "workers" }, "127.0.0.1")).resolves.toBe(false)
+    await expect(allowedFor({ platform: "workers" }, "not-an-ip")).resolves.toBe(false)
+    await expect(allowedFor({
+      platform: "docker",
+      administratorPrivateHosts: ["example.com"]
+    }, "192.168.1.20")).resolves.toBe(true)
+    await expect(allowedFor({
+      platform: "docker",
+      administratorPrivateHosts: ["192.168.1.20"]
+    }, "192.168.1.20")).resolves.toBe(true)
+    await expect(allowedFor({ platform: "docker" }, "192.168.1.20")).resolves.toBe(false)
+
+    const perHopAllowed: Array<boolean> = []
+    const redirectLayer = makeUpstreamClientLayer({
+      fetch: () => Promise.reject(new Error("control fetch must not run")),
+      destinationPolicy: {
+        platform: "docker",
+        administratorPrivateHosts: ["example.com"],
+        registeredResourceOrigins: ["https://cdn.example.com"]
+      },
+      fetchRegisteredResource: async (request, context) => {
+        perHopAllowed.push(context.isConnectedAddressAllowed("192.168.1.20"))
+        return request.url.startsWith("https://example.com/")
+          ? new Response(null, { status: 302, headers: { location: "https://cdn.example.com/image" } })
+          : new Response(null)
+      }
+    }).pipe(Layer.provide(repositories))
+    await Effect.runPromise(Effect.scoped(Effect.gen(function*() {
+      const upstream = yield* UpstreamClient
+      return yield* upstream.requestResource({
+        serverId: "server-1",
+        generation: 1,
+        url: new URL("https://example.com/Items/item/Images/Primary"),
+        accept: ["image/png"]
+      })
+    })).pipe(Effect.provide(redirectLayer)))
+    expect(perHopAllowed).toEqual([true, false])
+  })
+
   it("redirects the selected version without reading video bytes", async () => {
     const fixture = makeFixture()
     const playback = await fixture.run(Playback)
@@ -264,7 +358,7 @@ describe("playback decisions", () => {
     }))).resolves.toMatchObject({
       _tag: "Proxy",
       request: {
-        key: "subtitle:movie-1:version-a:2:srt",
+        key: "subtitle:movie-1:version-a:2:srt:1",
         kind: "subtitle",
         maxBytes: 5 * 1024 * 1024
       }
@@ -295,7 +389,7 @@ describe("playback decisions", () => {
     expect(decision).toMatchObject({
       _tag: "Proxy",
       request: {
-        key: "image:movie-1:Primary:0:version-a-1",
+        key: "image:movie-1:Primary:0:version-a-1:1",
         kind: "image",
         maxBytes: 20 * 1024 * 1024
       }
@@ -303,6 +397,53 @@ describe("playback decisions", () => {
     expect(decision._tag === "Proxy" && decision.request.url.href).toBe(
       "https://a.example.com/Items/item-a/Images/Primary/0?api_key=token-a"
     )
+  })
+
+  it("distinguishes omitted and zero image indexes and includes registration generation in cache keys", async () => {
+    const sourceA = source("a", "source-a", "item-a", 2)
+    const fixture = makeFixture({
+      sources: [sourceA],
+      eligible: [{ ...eligible("a", 0), serverGeneration: 2 }],
+      versions: [{ ...version("version-a", sourceA.id, "media-a"), serverGeneration: 2 }]
+    })
+    const playback = await fixture.run(Playback)
+    const omitted = await Effect.runPromise(playback.resolveImage({
+      canonicalId: "movie-1",
+      imageType: "Primary"
+    }))
+    const zero = await Effect.runPromise(playback.resolveImage({
+      canonicalId: "movie-1",
+      imageType: "Primary",
+      imageIndex: 0
+    }))
+
+    expect(omitted._tag === "Proxy" && omitted.request.key).toBe(
+      "image:movie-1:Primary:default:version-a:2"
+    )
+    expect(zero._tag === "Proxy" && zero.request.key).toBe(
+      "image:movie-1:Primary:0:version-a:2"
+    )
+  })
+
+  it("opens auxiliary resources through the request-time destination boundary", async () => {
+    let boundaryCalls = 0
+    const fixture = makeFixture({
+      resourceRequest: () => {
+        boundaryCalls++
+        return Effect.fail({ _tag: "DestinationRejected", serverId: "a" })
+      }
+    })
+    const playback = await fixture.run(Playback)
+    const decision = await Effect.runPromise(playback.resolveImage({
+      canonicalId: "movie-1",
+      imageType: "Primary"
+    }))
+    if (decision._tag !== "Proxy") throw new Error("expected proxy")
+
+    await expect(Effect.runPromise(serveRegisteredResource(decision.request, {}))).rejects.toMatchObject({
+      _tag: "ResourceUnavailable"
+    })
+    expect(boundaryCalls).toBe(1)
   })
 
   it("redirects auxiliary resources only when platform composition marks them client-usable", async () => {

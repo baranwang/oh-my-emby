@@ -62,7 +62,6 @@ export interface EmbyServices {
   readonly libraries: Pick<LibraryServiceApi, "list">
   readonly playback: PlaybackBoundary
   readonly resourceCache?: ResourceCacheService
-  readonly resourceFetch?: typeof globalThis.fetch
 }
 
 class InvalidEmbyRequest extends Schema.TaggedError<InvalidEmbyRequest>()("InvalidEmbyRequest", {}) {}
@@ -587,9 +586,9 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
     })
     if (decision._tag === "Redirect") return redirect(decision.location)
     return yield* serveRegisteredResource(decision.request, {
-      fetch: services.resourceFetch ?? globalThis.fetch,
       ...(services.resourceCache === undefined ? {} : { cache: services.resourceCache }),
-      now: services.now
+      now: services.now,
+      signal: request.signal
     })
   }
 
@@ -603,8 +602,8 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
     })
     if (decision._tag === "Redirect") return redirect(decision.location)
     return yield* serveRegisteredResource(decision.request, {
-      fetch: services.resourceFetch ?? globalThis.fetch,
-      now: services.now
+      now: services.now,
+      signal: request.signal
     })
   }
 

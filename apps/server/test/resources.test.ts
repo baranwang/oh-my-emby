@@ -7,6 +7,7 @@ import {
   type RegisteredResourceRequest
 } from "../src/core/playback.js"
 import { ResourceCache, type CachedResource, type CountedResource } from "../src/core/resource-cache.js"
+import { ResourceCacheError } from "../src/core/resource-cache.js"
 
 const request = (
   kind: "image" | "subtitle",
@@ -19,6 +20,9 @@ const request = (
   url: new URL(`https://cdn.example.com/${kind}`),
   maxBytes: kind === "image" ? 20 * 1024 * 1024 : 5 * 1024 * 1024,
   acceptedMimeTypes: kind === "image" ? ["image/png"] : ["text/vtt"],
+  open: () => Effect.succeed(new Response(kind, {
+    headers: { "content-type": kind === "image" ? "image/png" : "text/vtt" }
+  })),
   ...overrides
 })
 
@@ -92,20 +96,22 @@ describe("bounded auxiliary resources", () => {
   it("streams allowlisted images, strips unsafe headers, and caches only the complete body", async () => {
     const responseCache = cache()
     const body = new TextEncoder().encode("png-body")
-    const response = await Effect.runPromise(serveRegisteredResource(request("image"), {
-      cache: responseCache.service,
-      now: () => 1_000,
-      fetch: async () => new Response(body, { headers: {
+    const response = await Effect.runPromise(serveRegisteredResource(request("image", {
+      open: () => Effect.succeed(new Response(body, { headers: {
         "content-type": "image/png",
         "cache-control": "public, max-age=60",
         "set-cookie": "upstream=secret",
         "www-authenticate": "Bearer secret",
         connection: "keep-alive",
         "x-upstream-token": "secret"
-      } })
+      } }))
+    }), {
+      cache: responseCache.service,
+      now: () => 1_000
     }))
 
     expect(response.headers.get("content-type")).toBe("image/png")
+    expect(response.headers.get("cache-control")).toBe("private, no-store")
     expect(response.headers.get("set-cookie")).toBeNull()
     expect(response.headers.get("www-authenticate")).toBeNull()
     expect(response.headers.get("connection")).toBeNull()
@@ -113,41 +119,52 @@ describe("bounded auxiliary resources", () => {
     await expect(response.text()).resolves.toBe("png-body")
     expect(responseCache.puts).toBe(1)
     expect(responseCache.values.get("image:registered")?.expiresAtMs).toBe(21_601_000)
+    responseCache.values.set("image:registered", {
+      ...responseCache.values.get("image:registered")!,
+      headers: [["cache-control", "public, max-age=86400"], ["content-type", "image/png"]]
+    })
 
-    const cached = await Effect.runPromise(serveRegisteredResource(request("image"), {
+    const cached = await Effect.runPromise(serveRegisteredResource(request("image", {
+      open: () => Effect.die("cache miss")
+    }), {
       cache: responseCache.service,
-      now: () => 2_000,
-      fetch: async () => { throw new Error("cache miss") }
+      now: () => 2_000
     }))
+    expect(cached.headers.get("cache-control")).toBe("private, no-store")
     await expect(cached.text()).resolves.toBe("png-body")
   })
 
   it("rejects disallowed MIME and advertised or streamed oversize images without cache entries", async () => {
     const wrongMimeCache = cache()
-    await expect(Effect.runPromise(serveRegisteredResource(request("image"), {
-      cache: wrongMimeCache.service,
-      fetch: async () => new Response("html", { headers: { "content-type": "text/html" } })
+    await expect(Effect.runPromise(serveRegisteredResource(request("image", {
+      open: () => Effect.succeed(new Response("html", { headers: { "content-type": "text/html" } }))
+    }), {
+      cache: wrongMimeCache.service
     }))).rejects.toMatchObject({ _tag: "ResourceInvalidResponse" })
 
     const advertisedCache = cache()
-    await expect(Effect.runPromise(serveRegisteredResource(request("image", { maxBytes: 2 }), {
-      cache: advertisedCache.service,
-      fetch: async () => new Response("abc", { headers: {
+    await expect(Effect.runPromise(serveRegisteredResource(request("image", {
+      maxBytes: 2,
+      open: () => Effect.succeed(new Response("abc", { headers: {
         "content-type": "image/png",
         "content-length": "3"
-      } })
+      } }))
+    }), {
+      cache: advertisedCache.service
     }))).rejects.toMatchObject({ _tag: "ResourceTooLarge" })
 
     const streamedCache = cache()
-    const response = await Effect.runPromise(serveRegisteredResource(request("image", { maxBytes: 2 }), {
-      cache: streamedCache.service,
-      fetch: async () => new Response(new ReadableStream({
+    const response = await Effect.runPromise(serveRegisteredResource(request("image", {
+      maxBytes: 2,
+      open: () => Effect.succeed(new Response(new ReadableStream({
         start(controller) {
           controller.enqueue(new Uint8Array([1, 2]))
           controller.enqueue(new Uint8Array([3]))
           controller.close()
         }
-      }), { headers: { "content-type": "image/png" } })
+      }), { headers: { "content-type": "image/png" } }))
+    }), {
+      cache: streamedCache.service
     }))
     await expect(response.arrayBuffer()).rejects.toMatchObject({ name: "ResourceTooLarge" })
     expect(streamedCache.puts).toBe(0)
@@ -155,16 +172,57 @@ describe("bounded auxiliary resources", () => {
 
   it("cancels a registered resource at the auxiliary deadline", async () => {
     let aborted = false
-    await expect(Effect.runPromise(serveRegisteredResource(request("subtitle"), {
-      deadlineMs: 5,
-      fetch: (_input, init) => new Promise((_resolve, reject) => {
-        init?.signal?.addEventListener("abort", () => {
-          aborted = true
-          reject(new DOMException("aborted", "AbortError"))
-        })
+    await expect(Effect.runPromise(serveRegisteredResource(request("subtitle", {
+      open: () => Effect.tryPromise({
+        try: (signal) => new Promise((_resolve, reject) => {
+          signal.addEventListener("abort", () => {
+            aborted = true
+            reject(new DOMException("aborted", "AbortError"))
+          })
+        }),
+        catch: () => ({ _tag: "ResourceUnavailable" } as any)
       })
+    }), {
+      deadlineMs: 5,
     }))).rejects.toMatchObject({ _tag: "ResourceTimeout" })
     expect(aborted).toBe(true)
+  })
+
+  it("keeps the upstream scope until request cancellation", async () => {
+    let released = false
+    let upstreamCancelled = false
+    const signal = new AbortController()
+    const body = new ReadableStream<Uint8Array>({
+      cancel() {
+        upstreamCancelled = true
+      }
+    })
+    const response = await Effect.runPromise(serveRegisteredResource(request("subtitle", {
+      open: () => Effect.acquireRelease(
+        Effect.succeed(new Response(body, { headers: { "content-type": "text/vtt" } })),
+        () => Effect.sync(() => { released = true })
+      )
+    }), { signal: signal.signal }))
+
+    expect(released).toBe(false)
+    signal.abort()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(upstreamCancelled).toBe(true)
+    expect(released).toBe(true)
+    await expect(response.text()).rejects.toMatchObject({ name: "AbortError" })
+  })
+
+  it("does not fail successful delivery when the optional image cache write fails", async () => {
+    const failingCache = ResourceCache.of({
+      get: () => Effect.succeed(null),
+      put: () => Effect.fail(new ResourceCacheError({ message: "unavailable" })),
+      prune: () => Effect.void
+    })
+    const response = await Effect.runPromise(serveRegisteredResource(request("image", {
+      open: () => Effect.succeed(new Response("image-ok", { headers: { "content-type": "image/png" } }))
+    }), { cache: failingCache }))
+
+    await expect(response.text()).resolves.toBe("image-ok")
   })
 
   it("accepts registered external text subtitles by version and stream index", async () => {

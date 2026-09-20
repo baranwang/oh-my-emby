@@ -1,4 +1,4 @@
-import { Context, Effect, Layer, Schema } from "effect"
+import { Context, Effect, Exit, Layer, Schema, Scope } from "effect"
 
 import type { CanonicalItemView, FederationFailure } from "./federation.js"
 import { Federation } from "./federation.js"
@@ -70,6 +70,7 @@ export interface RegisteredResourceRequest {
   readonly url: URL
   readonly maxBytes: number
   readonly acceptedMimeTypes: ReadonlyArray<string>
+  readonly open: () => Effect.Effect<Response, ResourceFailure, Scope.Scope>
 }
 
 export type ResourceDecision =
@@ -337,13 +338,21 @@ export const makePlaybackLayer = (
         return {
           _tag: "Proxy",
           request: {
-            key: `image:${current.canonical.id}:${input.imageType}:${input.imageIndex ?? 0}:${version.id}`,
+            key: `image:${current.canonical.id}:${input.imageType}:` +
+              `${input.imageIndex === undefined ? "default" : input.imageIndex}:${version.id}:` +
+              `${attempted.success.source.serverGeneration}`,
             kind: "image",
             serverId: attempted.success.source.serverId,
             generation: attempted.success.source.serverGeneration,
             url: attempted.success.resolved,
             maxBytes: MAX_IMAGE_BYTES,
-            acceptedMimeTypes: imageMimeTypes
+            acceptedMimeTypes: imageMimeTypes,
+            open: () => upstream.requestResource({
+              serverId: attempted.success.source.serverId,
+              generation: attempted.success.source.serverGeneration,
+              url: attempted.success.resolved,
+              accept: imageMimeTypes
+            }).pipe(Effect.mapError(() => new ResourceUnavailable()))
           }
         }
       }
@@ -383,13 +392,20 @@ export const makePlaybackLayer = (
       return {
         _tag: "Proxy",
         request: {
-          key: `subtitle:${current.canonical.id}:${version.id}:${input.streamIndex}:${format}`,
+          key: `subtitle:${current.canonical.id}:${version.id}:${input.streamIndex}:${format}:` +
+            `${registered.source.serverGeneration}`,
           kind: "subtitle",
           serverId: registered.source.serverId,
           generation: registered.source.serverGeneration,
           url: registered.resolved,
           maxBytes: MAX_SUBTITLE_BYTES,
-          acceptedMimeTypes
+          acceptedMimeTypes,
+          open: () => upstream.requestResource({
+            serverId: registered.source.serverId,
+            generation: registered.source.serverGeneration,
+            url: registered.resolved,
+            accept: acceptedMimeTypes
+          }).pipe(Effect.mapError(() => new ResourceUnavailable()))
         }
       }
     })
@@ -399,23 +415,24 @@ export const makePlaybackLayer = (
 )
 
 export interface ResourceDeliveryConfig {
-  readonly fetch: typeof globalThis.fetch
   readonly cache?: ResourceCacheService
   readonly now?: () => number
   readonly deadlineMs?: number
+  readonly signal?: AbortSignal
 }
 
 const safeHeaders = (headers: Headers): ReadonlyArray<readonly [string, string]> => [
-  "content-type", "content-disposition", "cache-control", "etag", "last-modified"
+  "content-type", "content-disposition", "etag", "last-modified"
 ].flatMap((name): ReadonlyArray<readonly [string, string]> => {
   const value = headers.get(name)
   return value === null ? [] : [[name, value] as const]
-})
+}).concat([["cache-control", "private, no-store"]])
 
-const responseFromCache = (cached: CachedResource): Response => new Response(cached.body.slice(), {
-  status: cached.status,
-  headers: Object.fromEntries(cached.headers)
-})
+const responseFromCache = (cached: CachedResource): Response => {
+  const headers = new Headers(Object.fromEntries(cached.headers))
+  headers.set("cache-control", "private, no-store")
+  return new Response(cached.body.slice(), { status: cached.status, headers })
+}
 
 const concat = (chunks: ReadonlyArray<Uint8Array>, length: number): Uint8Array => {
   const body = new Uint8Array(length)
@@ -437,36 +454,29 @@ export const serveRegisteredResource = (
     if (cached !== null && cached.expiresAtMs > now()) return responseFromCache(cached)
   }
 
-  const controller = new AbortController()
-  let timedOut = false
-  const timer = setTimeout(() => {
-    timedOut = true
-    controller.abort()
-  }, config.deadlineMs ?? AUXILIARY_PROXY_DEADLINE_MS)
-  const upstream = yield* Effect.tryPromise({
-    try: () => config.fetch(request.url, {
-      method: "GET",
-      redirect: "manual",
-      signal: controller.signal,
-      headers: { accept: request.acceptedMimeTypes.join(", ") }
-    }),
-    catch: () => timedOut ? new ResourceTimeout() : new ResourceUnavailable()
-  }).pipe(Effect.tapError(() => Effect.sync(() => clearTimeout(timer))))
+  const deadlineMs = config.deadlineMs ?? AUXILIARY_PROXY_DEADLINE_MS
+  const startedAtMs = Date.now()
+  const scope = yield* Scope.make()
+  const upstream = yield* request.open().pipe(
+    Scope.provide(scope),
+    Effect.timeout(deadlineMs),
+    Effect.catchTag("TimeoutError", () => Effect.fail(new ResourceTimeout())),
+    Effect.catch((error) => Scope.close(scope, Exit.fail(error)).pipe(
+      Effect.andThen(Effect.fail(error))
+    ))
+  )
   if (upstream.status < 200 || upstream.status >= 300 || upstream.body === null) {
-    clearTimeout(timer)
-    controller.abort()
+    yield* Scope.close(scope, Exit.succeed(undefined))
     return yield* Effect.fail(new ResourceInvalidResponse())
   }
   const mime = upstream.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase()
   if (mime === undefined || !request.acceptedMimeTypes.includes(mime)) {
-    clearTimeout(timer)
-    controller.abort()
+    yield* Scope.close(scope, Exit.succeed(undefined))
     return yield* Effect.fail(new ResourceInvalidResponse())
   }
   const advertised = upstream.headers.get("content-length")
   if (advertised !== null && (!/^\d+$/.test(advertised) || Number(advertised) > request.maxBytes)) {
-    clearTimeout(timer)
-    controller.abort()
+    yield* Scope.close(scope, Exit.succeed(undefined))
     return yield* Effect.fail(new ResourceTooLarge())
   }
 
@@ -474,42 +484,66 @@ export const serveRegisteredResource = (
   const reader = upstream.body.getReader()
   const chunks: Array<Uint8Array> = []
   let length = 0
+  let finished = false
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let abortListener: (() => void) | undefined
+  const finalize = async (exit: Exit.Exit<unknown, unknown>) => {
+    if (finished) return
+    finished = true
+    if (timer !== undefined) clearTimeout(timer)
+    if (abortListener !== undefined) config.signal?.removeEventListener("abort", abortListener)
+    await Effect.runPromise(Scope.close(scope, exit).pipe(Effect.ignore))
+  }
+  const remainingMs = Math.max(0, deadlineMs - (Date.now() - startedAtMs))
   const body = new ReadableStream<Uint8Array>({
+    start(output) {
+      const abort = (error: ResourceTimeout | DOMException) => {
+        void reader.cancel(error)
+        output.error(error)
+        void finalize(Exit.fail(error))
+      }
+      abortListener = () => abort(new DOMException("aborted", "AbortError"))
+      timer = setTimeout(() => abort(new ResourceTimeout()), remainingMs)
+      if (config.signal?.aborted) abortListener()
+      else config.signal?.addEventListener("abort", abortListener, { once: true })
+    },
     async pull(output) {
       try {
         const next = await reader.read()
         if (next.done) {
-          clearTimeout(timer)
           if (request.kind === "image" && config.cache !== undefined) {
             const counted: CountedResource = {
               status: upstream.status,
               headers,
               body: concat(chunks, length)
             }
-            await Effect.runPromise(config.cache.put(request.key, counted, now() + IMAGE_CACHE_TTL_MS))
+            await Effect.runPromise(config.cache.put(request.key, counted, now() + IMAGE_CACHE_TTL_MS).pipe(
+              Effect.ignore
+            ))
           }
           output.close()
+          await finalize(Exit.succeed(undefined))
           return
         }
         length += next.value.byteLength
         if (length > request.maxBytes) {
-          clearTimeout(timer)
-          controller.abort()
           await reader.cancel()
-          output.error(new ResourceTooLarge())
+          const error = new ResourceTooLarge()
+          output.error(error)
+          await finalize(Exit.fail(error))
           return
         }
         if (request.kind === "image") chunks.push(next.value.slice())
         output.enqueue(next.value)
-      } catch {
-        clearTimeout(timer)
-        output.error(timedOut ? new ResourceTimeout() : new ResourceUnavailable())
+      } catch (cause) {
+        const error = cause instanceof ResourceTimeout ? cause : new ResourceUnavailable()
+        output.error(error)
+        await finalize(Exit.fail(error))
       }
     },
     async cancel(reason) {
-      clearTimeout(timer)
-      controller.abort()
       await reader.cancel(reason)
+      await finalize(Exit.succeed(undefined))
     }
   })
   return new Response(body, { status: upstream.status, headers: Object.fromEntries(headers) })

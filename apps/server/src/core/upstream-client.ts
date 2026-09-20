@@ -1,5 +1,5 @@
 import type { SourceLibraryView } from "@oh-my-emby/contracts"
-import { Context, Effect, Layer, Schema } from "effect"
+import { Context, Effect, Layer, Schema, type Scope } from "effect"
 
 import {
   DestinationRejected,
@@ -61,6 +61,19 @@ export interface ResolvedPlayback {
   readonly url: string
 }
 
+export interface RegisteredUpstreamResourceRequest {
+  readonly serverId: string
+  readonly generation: number
+  readonly url: URL
+  readonly accept: ReadonlyArray<string>
+}
+
+export interface RegisteredResourceFetchContext {
+  readonly server: UpstreamServer
+  readonly destinationPolicy: DestinationPolicy
+  readonly isConnectedAddressAllowed: (address: string) => boolean
+}
+
 export interface UpstreamClientService {
   readonly request: <A>(
     request: UpstreamRequest,
@@ -76,6 +89,9 @@ export interface UpstreamClientService {
   readonly resolvePlayback: (
     version: SourceMediaVersion
   ) => Effect.Effect<ResolvedPlayback, UpstreamFailure>
+  readonly requestResource: (
+    request: RegisteredUpstreamResourceRequest
+  ) => Effect.Effect<Response, UpstreamFailure, Scope.Scope>
 }
 
 export class UpstreamClient extends Context.Service<UpstreamClient, UpstreamClientService>()(
@@ -84,6 +100,11 @@ export class UpstreamClient extends Context.Service<UpstreamClient, UpstreamClie
 
 export interface UpstreamClientConfig {
   readonly fetch: typeof globalThis.fetch
+  /** Platform transport that pins or validates the actual connected destination before sending. */
+  readonly fetchRegisteredResource?: (
+    request: Request,
+    context: RegisteredResourceFetchContext
+  ) => Promise<Response>
   readonly destinationPolicy: DestinationPolicy
   readonly observability?: ObservabilityService
   readonly timeoutMs?: number
@@ -127,11 +148,42 @@ const resolveApiUrl = (base: URL, path: string): URL => {
   return url
 }
 
-const isIpLiteral = (hostname: string): boolean => {
+const normalizeIpLiteral = (hostname: string): string | null => {
   const bare = hostname.startsWith("[") && hostname.endsWith("]") ? hostname.slice(1, -1) : hostname
-  if (bare.includes(":")) return true
+  if (bare.includes(":")) {
+    try {
+      const parsed = new URL(`http://[${bare}]/`).hostname
+      return parsed.slice(1, -1).toLowerCase()
+    } catch {
+      return null
+    }
+  }
   const parts = bare.split(".")
-  return parts.length === 4 && parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255)
+  if (parts.length !== 4 || !parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255)) {
+    return null
+  }
+  return parts.map(Number).join(".")
+}
+
+const isIpLiteral = (hostname: string): boolean => normalizeIpLiteral(hostname) !== null
+
+const isPrivateIpLiteral = (hostname: string): boolean => {
+  const address = normalizeIpLiteral(hostname)
+  if (address === null) return false
+  if (!address.includes(":")) {
+    const [a = 0, b = 0] = address.split(".").map(Number)
+    return a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) ||
+      (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168)
+  }
+  if (address === "::" || address === "::1") return true
+  const mapped = /^::ffff:([\da-f]+):([\da-f]+)$/.exec(address)
+  if (mapped !== null) {
+    const high = Number.parseInt(mapped[1]!, 16)
+    const low = Number.parseInt(mapped[2]!, 16)
+    return isPrivateIpLiteral(`${high >> 8}.${high & 0xff}.${low >> 8}.${low & 0xff}`)
+  }
+  const first = Number.parseInt(address.split(":", 1)[0]!, 16)
+  return (first & 0xfe00) === 0xfc00 || (first & 0xffc0) === 0xfe80
 }
 
 const isPrivateHostname = (hostname: string): boolean => {
@@ -139,11 +191,23 @@ const isPrivateHostname = (hostname: string): boolean => {
   if (lower === "localhost" || lower.endsWith(".localhost") || lower.endsWith(".local") || lower.endsWith(".internal")) {
     return true
   }
-  if (!isIpLiteral(lower)) return false
-  const bare = lower.replace(/^\[/, "").replace(/\]$/, "")
-  if (bare.includes(":")) return bare === "::1" || bare.startsWith("fc") || bare.startsWith("fd") || bare.startsWith("fe80:")
-  const [a = 0, b = 0] = bare.split(".").map(Number)
-  return a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168)
+  return isPrivateIpLiteral(lower)
+}
+
+const connectedAddressAllowed = (
+  url: URL,
+  policy: DestinationPolicy
+): ((address: string) => boolean) => {
+  const allowed = new Set((policy.administratorPrivateHosts ?? []).map((item) =>
+    item.toLowerCase().replace(/^\[/, "").replace(/\]$/, "")
+  ))
+  const hostname = url.hostname.toLowerCase().replace(/^\[/, "").replace(/\]$/, "")
+  return (address) => {
+    const normalized = normalizeIpLiteral(address)
+    if (normalized === null) return false
+    if (!isPrivateIpLiteral(normalized)) return true
+    return policy.platform === "docker" && (allowed.has(hostname) || allowed.has(normalized))
+  }
 }
 
 const validateDestination = (
@@ -507,5 +571,74 @@ export const makeUpstreamClientLayer = (
     return { serverId: server.id, generation: server.generation, url: url.href }
   })
 
-  return UpstreamClient.of({ request, authenticate, getServerIdentity, listSourceLibraries, resolvePlayback })
+  const requestResource: UpstreamClientService["requestResource"] = (input) => Effect.gen(function*() {
+    const transport = config.fetchRegisteredResource
+    if (transport === undefined) return yield* Effect.fail(new UpstreamUnavailable({ serverId: input.serverId }))
+    const server = yield* getServer(input.serverId)
+    if (server.generation !== input.generation) {
+      return yield* Effect.fail(new ObsoleteGeneration({ serverId: input.serverId }))
+    }
+    if (!server.enabled || server.health !== "healthy" || server.verifiedBaseUrl === null) {
+      return yield* Effect.fail(new UpstreamUnavailable({ serverId: server.id }))
+    }
+    let current = new URL(input.url)
+    const visited = new Set<string>()
+    for (let redirectCount = 0; ; redirectCount++) {
+      yield* validateDestination(current, server, config.destinationPolicy, "registered-resource")
+      if (visited.has(current.href)) return yield* Effect.fail(new RedirectLoop({ serverId: server.id }))
+      visited.add(current.href)
+      const response = yield* Effect.tryPromise({
+        try: (signal) => transport(new Request(current, {
+          method: "GET",
+          redirect: "manual",
+          signal,
+          headers: {
+            accept: input.accept.join(", "),
+            "user-agent": server.userAgent
+          }
+        }), {
+          server,
+          destinationPolicy: config.destinationPolicy,
+          isConnectedAddressAllowed: connectedAddressAllowed(current, config.destinationPolicy)
+        }),
+        catch: () => new UpstreamUnavailable({ serverId: server.id })
+      })
+      if (!redirects.has(response.status)) {
+        const latest = yield* getServer(server.id)
+        if (latest.generation !== input.generation) {
+          if (response.body !== null) yield* Effect.promise(() => response.body!.cancel()).pipe(Effect.ignore)
+          return yield* Effect.fail(new ObsoleteGeneration({ serverId: server.id }))
+        }
+        return yield* Effect.acquireRelease(
+          Effect.succeed(response),
+          (value) => value.body === null
+            ? Effect.void
+            : Effect.promise(() => value.body!.cancel()).pipe(Effect.ignore)
+        )
+      }
+      if (response.body !== null) yield* Effect.promise(() => response.body!.cancel()).pipe(Effect.ignore)
+      if (redirectCount >= MAX_REDIRECTS) {
+        return yield* Effect.fail(new RedirectLimitExceeded({ serverId: server.id }))
+      }
+      const location = response.headers.get("location")
+      if (location === null) return yield* Effect.fail(new UpstreamInvalidResponse({ serverId: server.id }))
+      const next = yield* Effect.try({
+        try: () => new URL(location, current),
+        catch: () => new InvalidUpstreamUrl()
+      })
+      if (current.protocol === "https:" && next.protocol === "http:") {
+        return yield* Effect.fail(new HttpsDowngrade({ serverId: server.id }))
+      }
+      current = next
+    }
+  })
+
+  return UpstreamClient.of({
+    request,
+    authenticate,
+    getServerIdentity,
+    listSourceLibraries,
+    resolvePlayback,
+    requestResource
+  })
 }))
