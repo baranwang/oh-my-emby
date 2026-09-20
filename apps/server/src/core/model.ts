@@ -31,18 +31,31 @@ export interface UserRecord {
 export interface SessionIssue {
   readonly id: string
   readonly tokenHash: Uint8Array
+  readonly expectedAuthGeneration: number
   readonly createdAtMs: number
   readonly lastSeenAtMs: number
   readonly expiresAtMs: number
 }
 
-export interface SessionRecord extends SessionIssue {
+export interface SessionRecord extends Omit<SessionIssue, "expectedAuthGeneration"> {
   readonly authGeneration: number
+}
+
+export interface DashboardSessionLookup {
+  readonly tokenHash: Uint8Array
+  readonly nowMs: number
+  readonly idleMs: number
+  readonly refreshAfterMs: number
+}
+
+export interface DashboardSessionRecord extends SessionRecord {
+  readonly username: string
 }
 
 export interface TokenIssue {
   readonly id: string
   readonly tokenHash: Uint8Array
+  readonly expectedAuthGeneration: number
   readonly deviceId: string
   readonly deviceName: string
   readonly createdAtMs: number
@@ -50,13 +63,31 @@ export interface TokenIssue {
   readonly expiresAtMs: number
 }
 
-export interface TokenRecord extends TokenIssue {
+export interface TokenRecord extends Omit<TokenIssue, "expectedAuthGeneration"> {
   readonly authGeneration: number
+}
+
+export interface TokenLookup {
+  readonly tokenHash: Uint8Array
+  readonly nowMs: number
+}
+
+export interface AuthenticatedTokenRecord extends TokenRecord {
+  readonly username: string
 }
 
 export interface PasswordReplacement {
   readonly password: PasswordRecord
+  readonly expectedAuthGeneration: number
   readonly updatedAtMs: number
+}
+
+export interface AuthAttempt {
+  readonly scopeKey: string
+  readonly nowMs: number
+  readonly windowMs: number
+  readonly maxAttempts: number
+  readonly blockMs: number
 }
 
 export type ServerHealth = ServerView["health"]

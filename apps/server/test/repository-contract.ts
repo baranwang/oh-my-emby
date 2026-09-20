@@ -94,6 +94,7 @@ export const repositoryContract = (makeHarness: () => Promise<RepositoryHarness>
         const token = yield* repo.issueEmbyToken({
           id: "token-1",
           tokenHash: new Uint8Array([7, 8, 9]),
+          expectedAuthGeneration: 1,
           deviceId: "device-1",
           deviceName: "SenPlayer",
           createdAtMs: 2_000,

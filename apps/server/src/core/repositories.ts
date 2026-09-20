@@ -5,6 +5,10 @@ import type {
   CanonicalItem,
   ClaimRequest,
   ClaimUserInput,
+  AuthAttempt,
+  AuthenticatedTokenRecord,
+  DashboardSessionLookup,
+  DashboardSessionRecord,
   EligibleSource,
   IdentityResolution,
   MaintenanceResult,
@@ -20,6 +24,7 @@ import type {
   SessionRecord,
   StateWrite,
   TokenIssue,
+  TokenLookup,
   TokenRecord,
   UpstreamServer,
   UserRecord,
@@ -29,9 +34,22 @@ import type {
 
 export interface RepositoriesService {
   readonly claimUser: (input: ClaimUserInput) => Effect.Effect<UserRecord, ClaimError>
+  readonly getUser: () => Effect.Effect<UserRecord | null, RepositoryError>
   readonly getUserByName: (username: string) => Effect.Effect<UserRecord | null, RepositoryError>
   readonly issueDashboardSession: (input: SessionIssue) => Effect.Effect<SessionRecord, AuthError>
   readonly issueEmbyToken: (input: TokenIssue) => Effect.Effect<TokenRecord, AuthError>
+  readonly lookupDashboardSession: (
+    input: DashboardSessionLookup
+  ) => Effect.Effect<DashboardSessionRecord | null, RepositoryError>
+  readonly lookupEmbyToken: (
+    input: TokenLookup
+  ) => Effect.Effect<AuthenticatedTokenRecord | null, RepositoryError>
+  readonly deleteDashboardSession: (
+    id: string,
+    authGeneration: number
+  ) => Effect.Effect<void, RepositoryError>
+  readonly consumeAuthAttempt: (input: AuthAttempt) => Effect.Effect<boolean, RepositoryError>
+  readonly clearAuthAttempts: (scopeKey: string) => Effect.Effect<void, RepositoryError>
   readonly revokeAuthentication: (input: PasswordReplacement) => Effect.Effect<void, AuthError>
   readonly listServers: () => Effect.Effect<ReadonlyArray<UpstreamServer>, RepositoryError>
   readonly saveServer: (input: SaveServerCommand) => Effect.Effect<UpstreamServer, RepositoryError>

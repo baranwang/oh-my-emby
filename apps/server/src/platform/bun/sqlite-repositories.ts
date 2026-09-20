@@ -7,7 +7,7 @@ import {
 import { Effect, Layer, Schema } from "effect"
 
 import { OUTBOX_BATCH_SIZE } from "../../core/limits.js"
-import { AlreadyInitialized, RepositoryError } from "../../core/errors.js"
+import { AlreadyInitialized, AuthenticationChanged, RepositoryError } from "../../core/errors.js"
 import type {
   DesiredUserState,
   EligibleSource,
@@ -38,6 +38,11 @@ const failure = (operation: string, cause: unknown) => new RepositoryError({
 
 const database = <A, E, R>(operation: string, effect: Effect.Effect<A, E, R>) =>
   effect.pipe(Effect.mapError((cause) => failure(operation, cause)))
+
+const authDatabase = <A, E, R>(operation: string, effect: Effect.Effect<A, E, R>) =>
+  effect.pipe(Effect.mapError((cause) =>
+    cause instanceof AuthenticationChanged ? cause : failure(operation, cause)
+  ))
 
 const decode = <A>(operation: string, evaluate: () => A) => Effect.try({
   try: evaluate,
@@ -131,6 +136,36 @@ interface UserRow {
   readonly auth_generation: unknown
   readonly created_at_ms: unknown
   readonly updated_at_ms: unknown
+}
+
+interface DashboardSessionRow {
+  readonly id: string
+  readonly token_hash: unknown
+  readonly auth_generation: unknown
+  readonly created_at_ms: unknown
+  readonly last_seen_at_ms: unknown
+  readonly expires_at_ms: unknown
+  readonly username: string
+  readonly current_auth_generation: unknown
+}
+
+interface EmbyTokenRow {
+  readonly id: string
+  readonly token_hash: unknown
+  readonly auth_generation: unknown
+  readonly device_id: string
+  readonly device_name: string
+  readonly created_at_ms: unknown
+  readonly last_used_at_ms: unknown
+  readonly expires_at_ms: unknown
+  readonly username: string
+  readonly current_auth_generation: unknown
+}
+
+interface AuthRateLimitRow {
+  readonly window_started_at_ms: unknown
+  readonly attempt_count: unknown
+  readonly blocked_until_ms: unknown | null
 }
 
 const userRecord = (row: UserRow): UserRecord => ({
@@ -247,60 +282,221 @@ const makeRepositories = Effect.gen(function*() {
       Effect.flatMap((rows) => decode("getUserByName", () => rows[0] ? userRecord(rows[0]) : null))
     )
 
+  const getUser: RepositoriesService["getUser"] = () =>
+    database("getUser", sql.unsafe<UserRow>("SELECT * FROM users WHERE singleton = 1")).pipe(
+      Effect.flatMap((rows) => decode("getUser", () => rows[0] ? userRecord(rows[0]) : null))
+    )
+
   const issueDashboardSession: RepositoriesService["issueDashboardSession"] = (input) =>
-    database("issueDashboardSession", sql.withTransaction(Effect.gen(function*() {
-      const users = yield* sql.unsafe<{ auth_generation: number }>(
-        "SELECT auth_generation FROM users WHERE singleton = 1"
-      )
-      if (!users[0]) return yield* Effect.fail(failure("issueDashboardSession", "user is not initialized"))
-      yield* sql.unsafe(`
+    authDatabase("issueDashboardSession", sql.withTransaction(Effect.gen(function*() {
+      const rows = yield* sql.unsafe<{ auth_generation: unknown }>(`
         INSERT INTO dashboard_sessions (
           id, user_singleton, token_hash, auth_generation, created_at_ms,
           last_seen_at_ms, expires_at_ms
-        ) VALUES (?, 1, ?, ?, ?, ?, ?)
+        )
+        SELECT ?, 1, ?, auth_generation, ?, ?, ?
+        FROM users
+        WHERE singleton = 1 AND auth_generation = ?
+        RETURNING auth_generation
       `, [
         input.id,
         input.tokenHash,
-        users[0].auth_generation,
         input.createdAtMs,
         input.lastSeenAtMs,
-        input.expiresAtMs
+        input.expiresAtMs,
+        input.expectedAuthGeneration
       ])
-      return { ...input, authGeneration: users[0].auth_generation }
+      if (!rows[0]) return yield* Effect.fail(new AuthenticationChanged())
+      return {
+        id: input.id,
+        tokenHash: input.tokenHash,
+        authGeneration: integer(rows[0].auth_generation, "auth_generation"),
+        createdAtMs: input.createdAtMs,
+        lastSeenAtMs: input.lastSeenAtMs,
+        expiresAtMs: input.expiresAtMs
+      }
     })))
 
   const issueEmbyToken: RepositoriesService["issueEmbyToken"] = (input) =>
-    database("issueEmbyToken", sql.withTransaction(Effect.gen(function*() {
-      const users = yield* sql.unsafe<{ auth_generation: number }>(
-        "SELECT auth_generation FROM users WHERE singleton = 1"
-      )
-      if (!users[0]) return yield* Effect.fail(failure("issueEmbyToken", "user is not initialized"))
-      yield* sql.unsafe(`
+    authDatabase("issueEmbyToken", sql.withTransaction(Effect.gen(function*() {
+      const rows = yield* sql.unsafe<{ auth_generation: unknown }>(`
         INSERT INTO emby_tokens (
           id, user_singleton, token_hash, auth_generation, device_id, device_name,
           created_at_ms, last_used_at_ms, expires_at_ms
-        ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?)
+        )
+        SELECT ?, 1, ?, auth_generation, ?, ?, ?, ?, ?
+        FROM users
+        WHERE singleton = 1 AND auth_generation = ?
+        RETURNING auth_generation
       `, [
         input.id,
         input.tokenHash,
-        users[0].auth_generation,
         input.deviceId,
         input.deviceName,
         input.createdAtMs,
         input.lastUsedAtMs,
-        input.expiresAtMs
+        input.expiresAtMs,
+        input.expectedAuthGeneration
       ])
-      return { ...input, authGeneration: users[0].auth_generation }
+      if (!rows[0]) return yield* Effect.fail(new AuthenticationChanged())
+      return {
+        id: input.id,
+        tokenHash: input.tokenHash,
+        authGeneration: integer(rows[0].auth_generation, "auth_generation"),
+        deviceId: input.deviceId,
+        deviceName: input.deviceName,
+        createdAtMs: input.createdAtMs,
+        lastUsedAtMs: input.lastUsedAtMs,
+        expiresAtMs: input.expiresAtMs
+      }
     })))
 
-  const revokeAuthentication: RepositoriesService["revokeAuthentication"] = (input) =>
-    database("revokeAuthentication", sql.withTransaction(Effect.gen(function*() {
+  const lookupDashboardSession: RepositoriesService["lookupDashboardSession"] = (input) =>
+    database("lookupDashboardSession", sql.withTransaction(Effect.gen(function*() {
+      const rows = yield* sql.unsafe<DashboardSessionRow>(`
+        SELECT s.*, u.username, u.auth_generation AS current_auth_generation
+        FROM dashboard_sessions s
+        JOIN users u ON u.singleton = s.user_singleton
+        WHERE s.token_hash = ?
+        LIMIT 1
+      `, [input.tokenHash])
+      const row = rows[0]
+      if (!row) return null
+      const authGeneration = integer(row.auth_generation, "auth_generation")
+      const currentAuthGeneration = integer(row.current_auth_generation, "current_auth_generation")
+      const expiresAtMs = integer(row.expires_at_ms, "expires_at_ms")
+      if (authGeneration !== currentAuthGeneration || expiresAtMs <= input.nowMs) return null
+      let lastSeenAtMs = integer(row.last_seen_at_ms, "last_seen_at_ms")
+      let nextExpiresAtMs = expiresAtMs
+      if (input.nowMs - lastSeenAtMs >= input.refreshAfterMs) {
+        const refreshed = yield* sql.unsafe<{ id: string }>(`
+          UPDATE dashboard_sessions
+          SET last_seen_at_ms = ?, expires_at_ms = ?
+          WHERE id = ? AND auth_generation = ? AND expires_at_ms > ?
+            AND auth_generation = (SELECT auth_generation FROM users WHERE singleton = 1)
+          RETURNING id
+        `, [
+          input.nowMs,
+          input.nowMs + input.idleMs,
+          row.id,
+          authGeneration,
+          input.nowMs
+        ])
+        if (!refreshed[0]) return null
+        lastSeenAtMs = input.nowMs
+        nextExpiresAtMs = input.nowMs + input.idleMs
+      }
+      return {
+        id: row.id,
+        tokenHash: bytes(row.token_hash, "token_hash"),
+        authGeneration,
+        username: row.username,
+        createdAtMs: integer(row.created_at_ms, "created_at_ms"),
+        lastSeenAtMs,
+        expiresAtMs: nextExpiresAtMs
+      }
+    })))
+
+  const lookupEmbyToken: RepositoriesService["lookupEmbyToken"] = (input) =>
+    database("lookupEmbyToken", sql.withTransaction(Effect.gen(function*() {
+      const rows = yield* sql.unsafe<EmbyTokenRow>(`
+        SELECT t.*, u.username, u.auth_generation AS current_auth_generation
+        FROM emby_tokens t
+        JOIN users u ON u.singleton = t.user_singleton
+        WHERE t.token_hash = ?
+        LIMIT 1
+      `, [input.tokenHash])
+      const row = rows[0]
+      if (!row) return null
+      const authGeneration = integer(row.auth_generation, "auth_generation")
+      if (
+        authGeneration !== integer(row.current_auth_generation, "current_auth_generation") ||
+        integer(row.expires_at_ms, "expires_at_ms") <= input.nowMs
+      ) return null
+      yield* sql.unsafe(
+        "UPDATE emby_tokens SET last_used_at_ms = ? WHERE id = ? AND auth_generation = ?",
+        [input.nowMs, row.id, authGeneration]
+      )
+      return {
+        id: row.id,
+        tokenHash: bytes(row.token_hash, "token_hash"),
+        authGeneration,
+        username: row.username,
+        deviceId: row.device_id,
+        deviceName: row.device_name,
+        createdAtMs: integer(row.created_at_ms, "created_at_ms"),
+        lastUsedAtMs: input.nowMs,
+        expiresAtMs: integer(row.expires_at_ms, "expires_at_ms")
+      }
+    })))
+
+  const deleteDashboardSession: RepositoriesService["deleteDashboardSession"] = (id, authGeneration) =>
+    database("deleteDashboardSession", sql.unsafe(
+      "DELETE FROM dashboard_sessions WHERE id = ? AND auth_generation = ?",
+      [id, authGeneration]
+    )).pipe(Effect.asVoid)
+
+  const consumeAuthAttempt: RepositoriesService["consumeAuthAttempt"] = (input) =>
+    database("consumeAuthAttempt", sql.withTransaction(Effect.gen(function*() {
+      const rows = yield* sql.unsafe<AuthRateLimitRow>(`
+        SELECT window_started_at_ms, attempt_count, blocked_until_ms
+        FROM auth_rate_limits
+        WHERE scope_key = ?
+        ORDER BY window_started_at_ms DESC
+        LIMIT 1
+      `, [input.scopeKey])
+      const row = rows[0]
+      if (row) {
+        const blockedUntilMs = row.blocked_until_ms === null
+          ? null
+          : integer(row.blocked_until_ms, "blocked_until_ms")
+        if (blockedUntilMs !== null && blockedUntilMs > input.nowMs) return false
+        const windowStartedAtMs = integer(row.window_started_at_ms, "window_started_at_ms")
+        if (input.nowMs - windowStartedAtMs < input.windowMs) {
+          const attempts = integer(row.attempt_count, "attempt_count") + 1
+          yield* sql.unsafe(`
+            UPDATE auth_rate_limits
+            SET attempt_count = ?, blocked_until_ms = ?
+            WHERE scope_key = ? AND window_started_at_ms = ?
+          `, [
+            attempts,
+            attempts >= input.maxAttempts ? input.nowMs + input.blockMs : null,
+            input.scopeKey,
+            windowStartedAtMs
+          ])
+          return true
+        }
+      }
       yield* sql.unsafe(`
+        INSERT INTO auth_rate_limits (
+          scope_key, window_started_at_ms, attempt_count, blocked_until_ms
+        ) VALUES (?, ?, 1, NULL)
+      `, [input.scopeKey, input.nowMs])
+      return true
+    })))
+
+  const clearAuthAttempts: RepositoriesService["clearAuthAttempts"] = (scopeKey) =>
+    database(
+      "clearAuthAttempts",
+      sql.unsafe("DELETE FROM auth_rate_limits WHERE scope_key = ?", [scopeKey])
+    ).pipe(Effect.asVoid)
+
+  const revokeAuthentication: RepositoriesService["revokeAuthentication"] = (input) =>
+    authDatabase("revokeAuthentication", sql.withTransaction(Effect.gen(function*() {
+      const updated = yield* sql.unsafe<{ singleton: number }>(`
         UPDATE users
         SET password_hash = ?, password_salt = ?, pbkdf2_iterations = ?,
             auth_generation = auth_generation + 1, updated_at_ms = ?
-        WHERE singleton = 1
-      `, [input.password.hash, input.password.salt, input.password.iterations, input.updatedAtMs])
+        WHERE singleton = 1 AND auth_generation = ?
+        RETURNING singleton
+      `, [
+        input.password.hash,
+        input.password.salt,
+        input.password.iterations,
+        input.updatedAtMs,
+        input.expectedAuthGeneration
+      ])
+      if (!updated[0]) return yield* Effect.fail(new AuthenticationChanged())
       yield* sql.unsafe("DELETE FROM dashboard_sessions")
       yield* sql.unsafe("DELETE FROM emby_tokens")
     })))
@@ -907,9 +1103,15 @@ const makeRepositories = Effect.gen(function*() {
 
   return Repositories.of({
     claimUser,
+    getUser,
     getUserByName,
     issueDashboardSession,
     issueEmbyToken,
+    lookupDashboardSession,
+    lookupEmbyToken,
+    deleteDashboardSession,
+    consumeAuthAttempt,
+    clearAuthAttempts,
     revokeAuthentication,
     listServers,
     saveServer,
