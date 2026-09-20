@@ -34,7 +34,8 @@ const services = (overrides: Partial<EmbyServices> = {}): EmbyServices => ({
   federation: {
     list: () => Effect.succeed({ items: [], totalRecordCount: 0, exhausted: true, incompleteSourceIds: [] }),
     search: () => Effect.succeed({ items: [], totalRecordCount: 0, exhausted: true, incompleteSourceIds: [] }),
-    detail: () => Effect.succeed(null)
+    detail: () => Effect.succeed(null),
+    lookupMembership: () => Effect.succeed(null)
   },
   userState: {
     write: () => Effect.die("unused"),

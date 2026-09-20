@@ -14,9 +14,13 @@ import type { JsonValue, PlaybackEvent, UserStatePatch, UserStateRecord } from "
 import type { UserStateService } from "../core/user-state.js"
 import {
   EmbyClient,
+  type EmbyItemDto as EmbyItemDtoValue,
   EmbyItemsQuery,
   EmbyLoginBody,
+  type EmbyMediaSourceDto as EmbyMediaSourceDtoValue,
+  type EmbyMediaStreamDto as EmbyMediaStreamDtoValue,
   EmbyPlaybackEvent,
+  type EmbyPlaybackInfoDto as EmbyPlaybackInfoDtoValue,
   EmbyUserDataPatch,
   type EmbyItemsQuery as EmbyItemsQueryValue,
   type EmbyPlaybackEvent as EmbyPlaybackEventValue,
@@ -41,7 +45,7 @@ export interface EmbyServices {
   }
   readonly now: () => number
   readonly auth: Pick<AuthService, "loginEmby" | "authenticateEmby">
-  readonly federation: Pick<FederationService, "list" | "search" | "detail">
+  readonly federation: Pick<FederationService, "list" | "search" | "detail" | "lookupMembership">
   readonly userState: Pick<UserStateService, "write" | "recordPlaybackEvent">
   readonly libraries: Pick<LibraryServiceApi, "list">
   readonly playback: PlaybackBoundary
@@ -117,7 +121,6 @@ const decodeItemsQuery = (url: URL) => decode(EmbyItemsQuery, compact({
   if ((query.SortOrder?.length ?? 0) > 1 && query.SortOrder?.length !== query.SortBy?.length) {
     return Effect.fail(new InvalidEmbyRequest())
   }
-  if ((query.IncludeItemTypes?.length ?? 0) > 1) return Effect.fail(new InvalidEmbyRequest())
   return Effect.succeed(query)
 }))
 
@@ -173,43 +176,92 @@ const userData = (state: UserStateRecord | null, itemId: string) => ({
   PlaybackPositionTicks: state?.positionTicks ?? 0
 })
 
-const itemDto = (item: CanonicalItemView) => {
-  const {
-    Id: _id,
-    Type: _type,
-    UserData: _userData,
-    MediaSources: _mediaSources,
-    Path: _path,
-    ServerId: _serverId,
-    DirectPlayUrl: _directPlayUrl,
-    DirectStreamUrl: _directStreamUrl,
-    TranscodingUrl: _transcodingUrl,
-    ...metadata
-  } = object(item.displayMetadata)
-  const mediaSources = item.mediaVersions.map((version) => {
-    const capabilities = object(version.capabilities)
-    const safe = Object.fromEntries([
-      "Container",
-      "Size",
-      "RunTimeTicks",
-      "Bitrate",
-      "VideoType"
-    ].flatMap((key) => capabilities[key] === undefined ? [] : [[key, capabilities[key]]]))
-    return {
-      ...safe,
-      Id: version.id,
-      Name: version.label,
-      MediaStreams: version.streams
-    }
-  })
+const scalar = (value: JsonValue | undefined): value is string | number | boolean =>
+  typeof value === "string" || typeof value === "boolean" ||
+  (typeof value === "number" && Number.isFinite(value))
+
+const pickScalars = (
+  source: Readonly<Record<string, JsonValue>>,
+  keys: ReadonlyArray<string>
+): Record<string, string | number | boolean> => Object.fromEntries(keys.flatMap((key) => {
+  const value = source[key]
+  return scalar(value) ? [[key, value]] : []
+}))
+
+const itemScalarFields = [
+  "Name", "OriginalTitle", "SortName", "Overview", "ProductionYear", "PremiereDate",
+  "DateCreated", "EndDate", "CommunityRating", "CriticRating", "OfficialRating",
+  "RunTimeTicks", "IndexNumber", "ParentIndexNumber", "ChildCount", "IsFolder", "IsHD"
+] as const
+
+const mediaSourceScalarFields = [
+  "Protocol", "Container", "Size", "RunTimeTicks", "Bitrate", "VideoType",
+  "SupportsDirectPlay", "SupportsDirectStream", "SupportsTranscoding", "IsRemote"
+] as const
+
+const mediaStreamScalarFields = [
+  "Index", "Type", "Codec", "CodecTag", "Language", "DisplayTitle", "Title", "Profile",
+  "Level", "AspectRatio", "PixelFormat", "VideoRange", "ChannelLayout", "SampleRate",
+  "Channels", "BitRate", "BitDepth", "Width", "Height", "AverageFrameRate",
+  "RealFrameRate", "IsDefault", "IsForced", "IsExternal", "IsTextSubtitleStream",
+  "IsInterlaced", "IsAVC", "IsAnamorphic", "SupportsExternalStream"
+] as const
+
+const mediaStreamDto = (value: JsonValue): EmbyMediaStreamDtoValue | null => {
+  const stream = pickScalars(object(value), mediaStreamScalarFields)
+  return Object.keys(stream).length === 0 ? null : stream as EmbyMediaStreamDtoValue
+}
+
+const mediaSourceDto = (
+  value: JsonValue,
+  identity?: { readonly id: string; readonly name: string; readonly streams: JsonValue }
+): EmbyMediaSourceDtoValue | null => {
+  const source = object(value)
+  const id = identity?.id ?? (typeof source.Id === "string" ? source.Id : "")
+  if (!id) return null
+  const name = identity?.name ?? (typeof source.Name === "string" ? source.Name : undefined)
+  const streams = identity?.streams ?? source.MediaStreams
   return {
-    ...metadata,
+    ...pickScalars(source, mediaSourceScalarFields),
+    Id: id,
+    ...(name ? { Name: name } : {}),
+    MediaStreams: Array.isArray(streams)
+      ? streams.flatMap((entry) => {
+          const mapped = mediaStreamDto(entry)
+          return mapped === null ? [] : [mapped]
+        })
+      : []
+  } as EmbyMediaSourceDtoValue
+}
+
+const itemDto = (item: CanonicalItemView): EmbyItemDtoValue => {
+  const metadata = object(item.displayMetadata)
+  return {
+    ...pickScalars(metadata, itemScalarFields),
     Id: item.id,
     Type: item.itemType,
+    ...(Array.isArray(metadata.Genres) && metadata.Genres.every((entry) => typeof entry === "string" && entry.length > 0)
+      ? { Genres: metadata.Genres }
+      : {}),
     UserData: userData(item.userState, item.id),
-    MediaSources: mediaSources
-  }
+    MediaSources: item.mediaVersions.flatMap((version) => {
+      const mapped = mediaSourceDto(version.capabilities, {
+        id: version.id,
+        name: version.label,
+        streams: version.streams
+      })
+      return mapped === null ? [] : [mapped]
+    })
+  } as EmbyItemDtoValue
 }
+
+const playbackInfoDto = (info: PlaybackInfoBoundary): EmbyPlaybackInfoDtoValue => ({
+  PlaySessionId: info.playSessionId,
+  MediaSources: info.mediaSources.flatMap((source) => {
+    const mapped = mediaSourceDto(source)
+    return mapped === null ? [] : [mapped]
+  })
+})
 
 const filter = (name: NonNullable<EmbyItemsQueryValue["Filters"]>[number]): CatalogFilter => {
   switch (name) {
@@ -237,11 +289,9 @@ const query = (
     limit: input.Limit ?? 100,
     sort,
     filters: [
-      ...(input.Filters ?? []).map(filter),
-      ...(input.IncludeItemTypes?.[0]
-        ? [{ field: "itemType", value: input.IncludeItemTypes[0] } satisfies CatalogFilter]
-        : [])
+      ...(input.Filters ?? []).map(filter)
     ],
+    itemTypes: [...new Set(input.IncludeItemTypes ?? [])],
     ...(input.Fields === undefined ? {} : { fields: input.Fields })
   }
 }
@@ -274,13 +324,15 @@ const statePatch = (body: EmbyUserDataPatchValue): Effect.Effect<UserStatePatch,
 const playbackEvent = (
   kind: PlaybackEvent["kind"],
   body: EmbyPlaybackEventValue,
+  canonicalId: string,
+  versionId: string,
   now: number,
   played: boolean
 ): PlaybackEvent => ({
   kind,
   localSessionId: body.PlaySessionId,
-  canonicalId: body.ItemId,
-  versionId: body.MediaSourceId,
+  canonicalId,
+  versionId,
   positionTicks: body.PositionTicks ?? 0,
   occurredAtMs: now,
   ...(kind === "stop" ? { played } : {})
@@ -401,46 +453,64 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
     yield* requireUser(principal, userDataRoute[1]!)
     const canonicalId = yield* pathSegment(userDataRoute[2]!)
     const body = yield* readJson(request).pipe(
-      Effect.flatMap((value) => decode(EmbyUserDataPatch, value)),
-      Effect.flatMap(statePatch)
+      Effect.flatMap((value) => decode(EmbyUserDataPatch, value))
     )
-    return json(userData(yield* services.userState.write(canonicalId, body), canonicalId))
+    const patch = yield* statePatch(body)
+    const membership = yield* services.federation.lookupMembership(
+      canonicalId,
+      body.LastPlayedVersionId ?? undefined
+    )
+    if (membership === null) return yield* Effect.fail(new EmbyNotFound())
+    return json(userData(
+      yield* services.userState.write(membership.item.id, patch),
+      membership.item.id
+    ))
   }
 
   if (favorite && (method === "POST" || method === "DELETE")) {
     yield* requireUser(principal, favorite[1]!)
     const canonicalId = yield* pathSegment(favorite[2]!)
-    return json(userData(yield* services.userState.write(canonicalId, {
+    const membership = yield* services.federation.lookupMembership(canonicalId)
+    if (membership === null) return yield* Effect.fail(new EmbyNotFound())
+    return json(userData(yield* services.userState.write(membership.item.id, {
       favorite: method === "POST"
-    }), canonicalId))
+    }), membership.item.id))
   }
 
   if (played && (method === "POST" || method === "DELETE")) {
     yield* requireUser(principal, played[1]!)
     const canonicalId = yield* pathSegment(played[2]!)
+    const membership = yield* services.federation.lookupMembership(canonicalId)
+    if (membership === null) return yield* Effect.fail(new EmbyNotFound())
     const patch: UserStatePatch = method === "POST"
       ? { played: true, positionTicks: 0 }
       : { played: false, playCount: 0, positionTicks: 0 }
-    return json(userData(yield* services.userState.write(canonicalId, patch), canonicalId))
+    return json(userData(
+      yield* services.userState.write(membership.item.id, patch),
+      membership.item.id
+    ))
   }
 
   if (playbackInfo) {
     const canonicalId = yield* pathSegment(playbackInfo[1]!)
     const info = yield* services.playback.getInfo(canonicalId)
-    return json({ PlaySessionId: info.playSessionId, MediaSources: info.mediaSources })
+    return json(playbackInfoDto(info))
   }
 
   if (playbackKind) {
     const body = yield* readJson(request).pipe(Effect.flatMap((value) => decode(EmbyPlaybackEvent, value)))
+    const membership = yield* services.federation.lookupMembership(body.ItemId, body.MediaSourceId)
+    if (membership === null || membership.version === null) return yield* Effect.fail(new EmbyNotFound())
     let completed = false
     if (playbackKind === "stop") {
-      const item = yield* services.federation.detail(body.ItemId)
-      const runtime = item === null ? undefined : object(item.displayMetadata).RunTimeTicks
+      const runtime = object(membership.item.displayMetadata).RunTimeTicks
       completed = typeof runtime === "number" && runtime > 0 && (body.PositionTicks ?? 0) >= runtime
     }
     yield* services.userState.recordPlaybackEvent(playbackEvent(
       playbackKind,
       body,
+      membership.item.id,
+      membership.version.id,
       services.now(),
       completed
     ))

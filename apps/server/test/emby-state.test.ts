@@ -24,6 +24,24 @@ const state = (canonicalId: string, patch: UserStatePatch = {}): UserStateRecord
   updatedAtMs: 5_000
 })
 
+const catalogItem = (id: string) => ({
+  id,
+  itemType: "Movie",
+  displayMetadata: { RunTimeTicks: 321 },
+  mediaVersions: [{
+    id: "version-a",
+    sourceItemId: "source-a",
+    serverGeneration: 1,
+    upstreamMediaSourceId: "upstream-a",
+    label: "Version A",
+    capabilities: {},
+    streams: [],
+    updatedAtMs: 1_000
+  }],
+  userState: null,
+  incompleteSourceIds: []
+})
+
 const services = (
   write: (canonicalId: string, patch: UserStatePatch) => Effect.Effect<UserStateRecord, any>,
   record: (event: PlaybackEvent) => Effect.Effect<UserStateRecord | null, any>
@@ -37,14 +55,14 @@ const services = (
   federation: {
     list: () => Effect.succeed({ items: [], totalRecordCount: 0, exhausted: true, incompleteSourceIds: [] }),
     search: () => Effect.succeed({ items: [], totalRecordCount: 0, exhausted: true, incompleteSourceIds: [] }),
-    detail: (id) => Effect.succeed({
-      id,
-      itemType: "Movie",
-      displayMetadata: { RunTimeTicks: 321 },
-      mediaVersions: [],
-      userState: null,
-      incompleteSourceIds: []
-    })
+    detail: (id) => Effect.succeed(catalogItem(id)),
+    lookupMembership: (id, versionId) => {
+      const item = catalogItem(id)
+      const version = versionId === undefined
+        ? null
+        : item.mediaVersions.find(({ id }) => id === versionId) ?? null
+      return Effect.succeed(versionId !== undefined && version === null ? null : { item, version })
+    }
   },
   userState: { write, recordPlaybackEvent: record },
   libraries: { list: () => Effect.succeed([]) },
@@ -113,6 +131,50 @@ describe("Emby local state and playback reports", () => {
   })
 
   it.each([
+    ["POST", "/Users/owner/FavoriteItems/missing", undefined],
+    ["DELETE", "/Users/owner/FavoriteItems/missing", undefined],
+    ["POST", "/Users/owner/PlayedItems/missing", undefined],
+    ["DELETE", "/Users/owner/PlayedItems/missing", undefined],
+    ["POST", "/Users/owner/Items/missing/UserData", { IsFavorite: true }]
+  ] as const)("returns 404 before %s %s writes unknown canonical state", async (method, path, body) => {
+    let writes = 0
+    const base = services((id, patch) => {
+      writes++
+      return Effect.succeed(state(id, patch))
+    }, () => Effect.die("unused"))
+    const app = makeEmbyHandler({
+      ...base,
+      federation: {
+        ...base.federation,
+        detail: () => Effect.succeed(null),
+        lookupMembership: () => Effect.succeed(null)
+      }
+    })
+
+    const response = await Effect.runPromise(app(request(path, method, body)))
+
+    expect(response.status).toBe(404)
+    expect(writes).toBe(0)
+  })
+
+  it("returns 404 when UserData selects a version from another canonical item", async () => {
+    let writes = 0
+    const app = makeEmbyHandler(services((id, patch) => {
+      writes++
+      return Effect.succeed(state(id, patch))
+    }, () => Effect.die("unused")))
+
+    const response = await Effect.runPromise(app(request(
+      "/Users/owner/Items/movie-1/UserData",
+      "POST",
+      { LastPlayedVersionId: "version-other" }
+    )))
+
+    expect(response.status).toBe(404)
+    expect(writes).toBe(0)
+  })
+
+  it.each([
     ["/Sessions/Playing", "start", false],
     ["/emby/Sessions/Playing/Progress", "progress", false],
     ["/Sessions/Playing/Stopped", "stop", true]
@@ -142,6 +204,62 @@ describe("Emby local state and playback reports", () => {
       occurredAtMs: 5_000,
       ...(kind === "stop" ? { played: true } : {})
     }])
+  })
+
+  it.each([
+    ["/Sessions/Playing", "start"],
+    ["/Sessions/Playing/Progress", "progress"],
+    ["/Sessions/Playing/Stopped", "stop"]
+  ] as const)("returns 404 before recording %s for an unknown canonical item", async (path) => {
+    let records = 0
+    const base = services(
+      () => Effect.die("unused"),
+      () => {
+        records++
+        return Effect.succeed(null)
+      }
+    )
+    const app = makeEmbyHandler({
+      ...base,
+      federation: {
+        ...base.federation,
+        detail: () => Effect.succeed(null),
+        lookupMembership: () => Effect.succeed(null)
+      }
+    })
+
+    const response = await Effect.runPromise(app(request(path, "POST", {
+      ItemId: "missing",
+      MediaSourceId: "version-a",
+      PlaySessionId: "session-a"
+    })))
+
+    expect(response.status).toBe(404)
+    expect(records).toBe(0)
+  })
+
+  it.each([
+    "/Sessions/Playing",
+    "/Sessions/Playing/Progress",
+    "/Sessions/Playing/Stopped"
+  ])("returns 404 before recording %s with another item's media version", async (path) => {
+    let records = 0
+    const app = makeEmbyHandler(services(
+      () => Effect.die("unused"),
+      () => {
+        records++
+        return Effect.succeed(null)
+      }
+    ))
+
+    const response = await Effect.runPromise(app(request(path, "POST", {
+      ItemId: "movie-1",
+      MediaSourceId: "version-other",
+      PlaySessionId: "session-a"
+    })))
+
+    expect(response.status).toBe(404)
+    expect(records).toBe(0)
   })
 
   it("defaults an omitted optional playback position to zero", async () => {
@@ -227,7 +345,8 @@ describe("Emby local state and playback reports", () => {
           })
         }),
         search: () => Effect.die("unused"),
-        detail: () => Effect.die("unused")
+        detail: () => Effect.die("unused"),
+        lookupMembership: () => Effect.die("unused")
       }
     })
     const running = Effect.runPromise(app(new Request(

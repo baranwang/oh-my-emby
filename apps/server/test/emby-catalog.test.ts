@@ -22,6 +22,13 @@ const item = (
   displayMetadata: {
     Name: `${type} ${id}`,
     Path: "file:///srv/private/private-token/movie.mkv",
+    SeriesId: "upstream-series-id",
+    SeasonId: "upstream-season-id",
+    SecretEnvelope: {
+      ServerId: "upstream-server-id",
+      Path: "/srv/private/private-token/movie.mkv",
+      Token: "private-token"
+    },
     UserData: { IsFavorite: false, Played: true },
     MediaSources: [{ Id: "untrusted-upstream-version" }]
   },
@@ -38,7 +45,15 @@ const item = (
       Path: "https://upstream.example/video?api_key=private-token",
       DirectStreamUrl: "/Videos/upstream-id/stream?api_key=private-token"
     },
-    streams: [{ Index: 0, Type: "Video" }],
+    streams: [{
+      Index: 0,
+      Type: "Video",
+      Codec: "h264",
+      Path: "/srv/private/private-token/movie.mkv",
+      Url: "https://upstream.example/stream?token=private-token",
+      Token: "private-token",
+      Server: { Id: "upstream-server-id", Token: "private-token" }
+    }],
     updatedAtMs: 1_000
   }],
   userState: {
@@ -70,7 +85,14 @@ const services = (overrides: Partial<EmbyServices> = {}): EmbyServices => ({
       incompleteSourceIds: []
     }),
     search: () => Effect.succeed({ items: [], totalRecordCount: 0, exhausted: true, incompleteSourceIds: [] }),
-    detail: (id) => Effect.succeed(item(id))
+    detail: (id) => Effect.succeed(item(id)),
+    lookupMembership: (id, versionId) => {
+      const value = item(id)
+      const version = versionId === undefined
+        ? null
+        : value.mediaVersions.find(({ id }) => id === versionId) ?? null
+      return Effect.succeed(versionId !== undefined && version === null ? null : { item: value, version })
+    }
   },
   userState: {
     write: () => Effect.die("unused"),
@@ -145,7 +167,44 @@ describe("Emby catalog routes", () => {
     expect(body.Items[0].MediaSources[0]).not.toHaveProperty("Path")
     expect(body.Items[0].MediaSources[0]).not.toHaveProperty("DirectStreamUrl")
     expect(body.Items[0]).not.toHaveProperty("Path")
+    expect(body.Items[0]).not.toHaveProperty("SeriesId")
+    expect(body.Items[0]).not.toHaveProperty("SeasonId")
+    expect(body.Items[0]).not.toHaveProperty("SecretEnvelope")
+    expect(body.Items[0].MediaSources[0].MediaStreams[0]).toEqual({
+      Index: 0,
+      Type: "Video",
+      Codec: "h264"
+    })
     expect(JSON.stringify(body)).not.toContain("private-token")
+  })
+
+  it.each([
+    ["list", ""],
+    ["search", "&SearchTerm=needle"]
+  ] as const)("preserves plural item types as OR input for %s", async (_kind, suffix) => {
+    let observed: FederatedQuery | undefined
+    const page = { items: [], totalRecordCount: 0, exhausted: true, incompleteSourceIds: [] }
+    const app = makeEmbyHandler(services({
+      federation: {
+        list: (input) => {
+          observed = input
+          return Effect.succeed(page)
+        },
+        search: (input) => {
+          observed = input
+          return Effect.succeed(page)
+        },
+        detail: () => Effect.succeed(null),
+        lookupMembership: () => Effect.succeed(null)
+      }
+    }))
+
+    const response = await Effect.runPromise(app(get(
+      `/Users/owner/Items?ParentId=library-1&IncludeItemTypes=Movie,Series${suffix}`
+    )))
+
+    expect(response.status).toBe(200)
+    expect(observed).toMatchObject({ itemTypes: ["Movie", "Series"] })
   })
 
   it("decodes search, sort, fields, and local filters before Federation", async () => {
@@ -179,10 +238,10 @@ describe("Emby catalog routes", () => {
         { field: "ProductionYear", direction: "Descending" }
       ],
       fields: ["Overview", "MediaSources"],
+      itemTypes: ["Movie"],
       filters: [
         { field: "favorite", value: true },
-        { field: "resume", value: true },
-        { field: "itemType", value: "Movie" }
+        { field: "resume", value: true }
       ]
     })
   })
@@ -194,8 +253,9 @@ describe("Emby catalog routes", () => {
       const app = makeEmbyHandler(services({
         federation: {
           list: () => Effect.die("unused"),
-          search: () => Effect.die("unused"),
-          detail: () => Effect.succeed(item(id, type))
+        search: () => Effect.die("unused"),
+        detail: () => Effect.succeed(item(id, type)),
+        lookupMembership: () => Effect.die("unused")
         }
       }))
       const response = await Effect.runPromise(app(get(`/Users/owner/Items/${id}`)))
@@ -220,7 +280,8 @@ describe("Emby catalog routes", () => {
           incompleteSourceIds: []
         }),
         search: () => Effect.die("unused"),
-        detail: () => Effect.succeed(null)
+        detail: () => Effect.succeed(null),
+        lookupMembership: () => Effect.succeed(null)
       }
     }))
     const first = await Effect.runPromise(app(get(
@@ -244,7 +305,8 @@ describe("Emby catalog routes", () => {
           return Effect.die("not reached")
         },
         search: () => Effect.die("unused"),
-        detail: () => Effect.succeed(null)
+        detail: () => Effect.succeed(null),
+        lookupMembership: () => Effect.die("unused")
       }
     }))
 
@@ -274,7 +336,22 @@ describe("Emby catalog routes", () => {
           canonicalId = id
           return Effect.succeed({
             playSessionId: "play-session",
-            mediaSources: [{ Id: "stable-version" }]
+            mediaSources: [{
+              Id: "stable-version",
+              Name: "Server A · 1080p",
+              Container: "mkv",
+              Path: "/srv/private/private-token/movie.mkv",
+              DirectStreamUrl: "/Videos/private-token/stream",
+              Token: "private-token",
+              Server: { Id: "upstream-server-id", Token: "private-token" },
+              MediaStreams: [{
+                Index: 1,
+                Type: "Audio",
+                Codec: "aac",
+                Path: "/srv/private/private-token/audio.aac",
+                Token: "private-token"
+              }]
+            }]
           })
         }
       }
@@ -288,7 +365,12 @@ describe("Emby catalog routes", () => {
     expect(canonicalId).toBe("movie-1")
     await expect(response.json()).resolves.toEqual({
       PlaySessionId: "play-session",
-      MediaSources: [{ Id: "stable-version" }]
+      MediaSources: [{
+        Id: "stable-version",
+        Name: "Server A · 1080p",
+        Container: "mkv",
+        MediaStreams: [{ Index: 1, Type: "Audio", Codec: "aac" }]
+      }]
     })
   })
 })

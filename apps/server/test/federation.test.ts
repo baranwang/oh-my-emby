@@ -68,8 +68,14 @@ const query = (overrides: Partial<FederatedQuery> = {}): FederatedQuery => ({
   limit: 20,
   sort: [{ field: "Name", direction: "Ascending" }],
   filters: [],
+  itemTypes: [],
   ...overrides
 })
+
+const typedQuery = (
+  itemTypes: ReadonlyArray<string>,
+  overrides: Partial<FederatedQuery> = {}
+): FederatedQuery => ({ ...query(overrides), itemTypes })
 
 type RequestHandler = (
   serverId: string,
@@ -187,6 +193,82 @@ describe("Federation", () => {
       const failed = yield* Effect.flip(federation.search({ ...query(), searchTerm: "Needle" }))
       expect(failed._tag).toBe("FederationUnavailable")
     }).pipe(Effect.provide(layer)))
+  })
+
+  it("filters plural item types with OR semantics for list and search", async () => {
+    const layer = await setup(1, () => Effect.succeed({
+      Items: [
+        item("movie-10", "Movie"),
+        item("series-20", "Series", { Type: "Series" }),
+        item("episode-30", "Episode", { Type: "Episode" })
+      ],
+      TotalRecordCount: 3
+    }))
+
+    await Effect.runPromise(Effect.gen(function*() {
+      const federation = yield* Federation
+      const listed = yield* federation.list(typedQuery(["Movie", "Series"], { deviceId: "list-types" }))
+      const searched = yield* federation.search({
+        ...typedQuery(["Movie", "Series"], { deviceId: "search-types" }),
+        searchTerm: "needle"
+      })
+
+      expect(listed.items.map(({ itemType }) => itemType)).toEqual(["Movie", "Series"])
+      expect(searched.items.map(({ itemType }) => itemType)).toEqual(["Movie", "Series"])
+    }).pipe(Effect.provide(layer)))
+  })
+
+  it("keeps single item types distinct in durable query identity", async () => {
+    const layer = await setup(1, () => Effect.succeed({
+      Items: [
+        item("movie-10", "Movie"),
+        item("series-20", "Series", { Type: "Series" })
+      ],
+      TotalRecordCount: 2
+    }))
+
+    await Effect.runPromise(Effect.gen(function*() {
+      const federation = yield* Federation
+      const movie = yield* federation.list(typedQuery(["Movie"]))
+      const series = yield* federation.list(typedQuery(["Series"]))
+
+      expect(movie.items.map(({ itemType }) => itemType)).toEqual(["Movie"])
+      expect(series.items.map(({ itemType }) => itemType)).toEqual(["Series"])
+    }).pipe(Effect.provide(layer)))
+  })
+
+  it("checks canonical and media-version membership without upstream detail enrichment", async () => {
+    const layer = await setup(1, () => Effect.succeed({
+      Items: [item("movie-10", "Movie", {
+        MediaSources: [{ Id: "source-a", Name: "Version A" }]
+      })],
+      TotalRecordCount: 1
+    }))
+    const page = await Effect.runPromise(Effect.gen(function*() {
+      const federation = yield* Federation
+      return yield* federation.list(query())
+    }).pipe(Effect.provide(layer)))
+    const canonicalId = page.items[0]!.id
+    const records = await Effect.runPromise(Effect.gen(function*() {
+      const repo = yield* Repositories
+      return yield* repo.readCatalogItems([canonicalId])
+    }).pipe(Effect.provide(repositories)))
+    const versionId = records[0]!.mediaVersions[0]!.id
+
+    const membership = await Effect.runPromise(Effect.gen(function*() {
+      const federation = yield* Federation
+      return {
+        canonical: yield* federation.lookupMembership(canonicalId),
+        version: yield* federation.lookupMembership(canonicalId, versionId),
+        wrongVersion: yield* federation.lookupMembership(canonicalId, "version-other"),
+        missing: yield* federation.lookupMembership("canonical-missing")
+      }
+    }).pipe(Effect.provide(layer)))
+
+    expect(membership.canonical?.item.id).toBe(canonicalId)
+    expect(membership.version?.version?.id).toBe(versionId)
+    expect(membership.wrongVersion).toBeNull()
+    expect(membership.missing).toBeNull()
   })
 
   it("does not replay arbitrary first-page metadata after a deep-page transient failure", async () => {

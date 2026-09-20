@@ -59,6 +59,7 @@ export interface FederatedQuery {
   readonly limit: number
   readonly sort: ReadonlyArray<SortTerm>
   readonly filters: ReadonlyArray<CatalogFilter>
+  readonly itemTypes: ReadonlyArray<string>
   readonly fields?: ReadonlyArray<string>
 }
 
@@ -82,6 +83,11 @@ export interface FederatedPage {
   readonly incompleteSourceIds: ReadonlyArray<string>
 }
 
+export interface CatalogMembership {
+  readonly item: CanonicalItemView
+  readonly version: SourceMediaVersion | null
+}
+
 export class FederationLimitExceeded extends Schema.TaggedError<FederationLimitExceeded>()(
   "FederationLimitExceeded",
   { requestedEnd: Schema.Int, maximum: Schema.Int }
@@ -102,6 +108,10 @@ export interface FederationService {
   readonly list: (query: FederatedQuery) => Effect.Effect<FederatedPage, FederationFailure>
   readonly search: (query: SearchQuery) => Effect.Effect<FederatedPage, FederationFailure>
   readonly detail: (canonicalId: string) => Effect.Effect<CanonicalItemView | null, FederationFailure>
+  readonly lookupMembership: (
+    canonicalId: string,
+    versionId?: string
+  ) => Effect.Effect<CatalogMembership | null, FederationFailure>
   readonly enrichVersions: (canonicalId: string) => Effect.Effect<CanonicalItemView | null, FederationFailure>
   readonly invalidateStateDependentGenerations: () => Effect.Effect<void, RepositoryError>
 }
@@ -187,6 +197,7 @@ const normalizedQuery = (query: FederatedQuery, searchTerm?: string): JsonValue 
   filters: [...query.filters].sort((left, right) => canonicalJson(left as unknown as JsonValue).localeCompare(
     canonicalJson(right as unknown as JsonValue)
   )) as unknown as JsonValue,
+  itemTypes: [...new Set(query.itemTypes)].sort(),
   searchTerm: searchTerm?.trim() ?? "",
   sort: query.sort as unknown as JsonValue
 })
@@ -300,6 +311,9 @@ const matchesFilters = (record: CatalogItemRecord, filters: ReadonlyArray<Catalo
     return Array.isArray(actual) ? actual.some((entry) => entry === value) : actual === value
   })
 
+const matchesItemTypes = (record: CatalogItemRecord, itemTypes: ReadonlyArray<string>): boolean =>
+  itemTypes.length === 0 || itemTypes.includes(record.canonical.itemType)
+
 const sortValues = (record: CatalogItemRecord, sort: ReadonlyArray<SortTerm>): ReadonlyArray<JsonValue> => {
   const metadata = record.canonical.displayMetadata
   return sort.map(({ field }) => jsonObject(metadata) ? (metadata[field] ?? null) : null)
@@ -352,6 +366,9 @@ const listPath = (
     parameters.set("SortOrder", query.sort.map(({ direction }) => direction).join(","))
   }
   if (searchTerm?.trim()) parameters.set("SearchTerm", searchTerm.trim())
+  if (query.itemTypes.length > 0) {
+    parameters.set("IncludeItemTypes", [...new Set(query.itemTypes)].join(","))
+  }
   return `/Items?${parameters}`
 }
 
@@ -463,7 +480,7 @@ export const makeFederationLayer = (
         if (writeCache) yield* cacheItem(result, projection, raw, observedAtMs)
         const records = yield* repositories.readCatalogItems([result.canonical.id], now())
         const record = records[0]
-        if (record && matchesFilters(record, query.filters)) {
+        if (record && matchesFilters(record, query.filters) && matchesItemTypes(record, query.itemTypes)) {
           resolved.push({ canonicalId: record.canonical.id, sortValues: sortValues(record, query.sort) })
         }
       }
@@ -549,7 +566,7 @@ export const makeFederationLayer = (
               })
               const records = yield* readCatalog(ids)
               state.localBuffer = records
-                .filter((record) => matchesFilters(record, query.filters))
+                .filter((record) => matchesFilters(record, query.filters) && matchesItemTypes(record, query.itemTypes))
                 .map((record) => ({
                   canonicalId: record.canonical.id,
                   sortValues: sortValues(record, query.sort)
@@ -822,10 +839,26 @@ export const makeFederationLayer = (
         return record ? view(record, [...incomplete].sort()) : null
       })
 
+    const lookupMembership = (
+      canonicalId: string,
+      versionId?: string
+    ): Effect.Effect<CatalogMembership | null, FederationFailure> => Effect.gen(function*() {
+      const activeId = yield* identity.lookupCanonicalId(canonicalId)
+      if (activeId === null) return null
+      const record = (yield* repositories.readCatalogItems([activeId]))[0]
+      if (!record) return null
+      const version = versionId === undefined
+        ? null
+        : record.mediaVersions.find(({ id }) => id === versionId) ?? null
+      if (versionId !== undefined && version === null) return null
+      return { item: view(record, []), version }
+    })
+
     return Federation.of({
       list: (query) => runList(query),
       search: (query) => runList(query, query.searchTerm),
       detail: enrichVersions,
+      lookupMembership,
       enrichVersions,
       invalidateStateDependentGenerations: repositories.invalidateStateDependentQueryGenerations
     })

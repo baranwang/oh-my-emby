@@ -28,6 +28,7 @@ const query = (overrides: Partial<FederatedQuery> = {}): FederatedQuery => ({
   limit: 2,
   sort: [{ field: "Name", direction: "Ascending" }],
   filters: [],
+  itemTypes: [],
   ...overrides
 })
 
