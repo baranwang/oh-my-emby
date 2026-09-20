@@ -73,6 +73,8 @@ Vite uses `base: "/dashboard/"` so generated asset URLs work in both deployments
 
 The setup flow creates the only local username and password, then configures the first upstream Emby server. Virtual media library creation remains on its dedicated page rather than being embedded in setup.
 
+The account claim is the atomic initialization boundary. Once it commits, the instance is initialized and the browser receives an authenticated session. If first-server configuration fails, setup resumes as that authenticated user with zero upstreams; the instance never becomes claimable again.
+
 ## Source organization
 
 The structure follows the useful boundaries in aio-proxy while removing package and directory overhead that this smaller Dashboard does not need:
@@ -165,8 +167,9 @@ The contract covers these resource families:
 - login and logout;
 - current user password changes;
 - upstream server create, read, update, delete, health, and connection test;
+- upstream source-library discovery with stable IDs and media types;
 - virtual library create, read, update, and delete;
-- system/runtime status.
+- system/runtime status, outbox depth, and typed read-only outbox failure details safe for display.
 
 ## Router and authentication boundary
 
@@ -182,6 +185,8 @@ The one local username and password are shared product identity. An Emby client 
 
 The session cookie is `HttpOnly`, `Secure`, and `SameSite=Lax`. The database stores only a hash of the random session token. Sessions expire after seven days of inactivity and roll forward while active. Logout revokes the current session; changing the password revokes all sessions. Mutating Dashboard requests also require a valid same-origin `Origin` check.
 
+Production Dashboard access requires the configured public HTTPS origin on both Workers and Docker. Plain HTTP is limited to explicit localhost development. Origin checks and secure-request detection use that configured origin and an explicit trusted-proxy policy, never arbitrary forwarded headers.
+
 The user explicitly accepted unauthenticated first-visitor ownership: while the instance is uninitialized, the first public visitor may create the sole account. This permits hostile takeover of a newly deployed public instance. The setup screen and deployment documentation must state this risk plainly. The implementation must not imply that the flow is protected by a setup secret.
 
 ## Query ownership
@@ -196,9 +201,11 @@ session
 servers
 server(id)
 serverHealth(id)
+serverLibraries(id)
 libraries
 library(id)
 system
+outboxFailures
 ```
 
 Each module service exports stable `queryOptions` factories and mutation functions. Route loaders use `ensureQueryData` only for route prerequisites and initial detail data. Templates consume the same options through Query hooks, allowing Query to deduplicate requests.
@@ -259,21 +266,21 @@ The UI never reports a failed request as an empty collection.
 
 ### Cloudflare Workers
 
-Wrangler binds the Dashboard build output as Static Assets. Requests execute the Worker first so dynamic and Emby-compatible routes retain application control.
+Wrangler binds the Dashboard build output as Static Assets with Worker-first routing and `html_handling: "none"`. Requests execute the Worker first so dynamic and Emby-compatible routes retain application control.
 
 The Worker routing order is:
 
 1. handle `/api/dashboard/*` with `DashboardApi`;
 2. handle Emby-compatible paths with the virtual server;
-3. for `/dashboard/*`, ask the assets binding for the prefix-stripped asset;
-4. when no Dashboard asset matches, return the Dashboard `index.html`;
+3. for `/dashboard/*`, ask the assets binding for the exact prefix-stripped asset with Static Assets HTML canonicalization disabled;
+4. return Dashboard `index.html` only for `GET` or `HEAD` navigation requests that accept HTML and do not target a known static-file extension;
 5. return an ordinary 404 for every other unknown path.
 
-This explicit prefix handling avoids a global `not_found_handling: "single-page-application"` rule that could turn API or Emby 404 responses into HTML.
+Worker-first routing is explicit. Missing JavaScript, CSS, images, maps, fonts, unsupported methods, API routes, and Emby routes never fall back to HTML. The Worker serves the intended index body without exposing an internal prefix-stripped canonical redirect. This avoids a global `not_found_handling: "single-page-application"` rule that could turn API or asset 404 responses into HTML.
 
 ### Docker/Bun
 
-The production image builds the Dashboard first and copies its output into the Bun server image. The Bun platform adapter serves the same files under `/dashboard/*` and applies the same prefix-scoped `index.html` fallback. No Node.js runtime and no second web server are added.
+The production image builds the Dashboard first and copies its output into the Bun server image. The Bun platform adapter serves the same files under `/dashboard/*` and applies the same method-, Accept-, and extension-aware `index.html` fallback. Asset path resolution is traversal-safe. No Node.js runtime and no second web server are added.
 
 Hashed assets are cacheable as immutable. `index.html` is not immutable so a deployment cannot strand clients on obsolete asset names.
 
@@ -283,14 +290,17 @@ The smallest behavior-level test set for this architecture covers:
 
 - shared Dashboard request and response schema decoding;
 - initialization, login, and authenticated-route redirects;
+- atomic first claim and resumable zero-upstream setup;
 - seven-day rolling session expiry and revocation behavior at the server boundary;
 - server form validation through Effect Standard Schema;
 - write-only secret preserve and explicit-clear semantics;
 - separate test-connection and save mutations;
 - targeted Query invalidation after a mutation;
 - visible-page-only health polling;
+- upstream source-library discovery and secret-safe outbox diagnostics;
 - English and Simplified Chinese message-key parity;
 - a `/dashboard/servers` deep-link refresh in Workers and Docker;
+- missing hashed assets and non-navigation methods remaining non-HTML errors;
 - an unknown `/api/dashboard/*` path remaining a non-HTML 404 in Workers and Docker.
 
 The Dashboard build must produce identical public URLs for both deployment artifacts. Runtime verification is separate from a successful build: each deployment target must be started and exercised against its real Server routes.
