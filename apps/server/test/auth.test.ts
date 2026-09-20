@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import {
   Auth,
+  claimAndAttemptFirstServerSetup,
   makeAuthLayer,
   type DashboardSession
 } from "../src/core/auth.js"
@@ -70,8 +71,38 @@ describe("local authentication", () => {
   })
 
   it("keeps the instance initialized when first-server setup fails", async () => {
-    await claim()
-    await expect(run(Effect.fail(new Error("unreachable upstream")))).rejects.toThrow("unreachable upstream")
+    const unreachableServer = {
+      id: "first-server",
+      catalogNamespace: "catalog:first-server",
+      verifiedCatalogId: null,
+      generation: 1,
+      name: "Offline Emby",
+      baseUrl: "https://unreachable.example.com",
+      username: "upstream-owner",
+      password: "upstream-password",
+      accessToken: null,
+      accessTokenExpiresAtMs: null,
+      userAgent: "oh-my-emby-test",
+      enabled: true,
+      health: "unknown" as const,
+      lastSuccessAtMs: null,
+      createdAtMs: nowMs,
+      updatedAtMs: nowMs
+    }
+    let attemptedServerId: string | undefined
+    await expect(run(Effect.gen(function*() {
+      const auth = yield* Auth
+      return yield* claimAndAttemptFirstServerSetup(
+        auth,
+        credentials,
+        { scopeKey: "claim:first-server" },
+        unreachableServer,
+        (server) => Effect.sync(() => {
+          attemptedServerId = server.id
+        }).pipe(Effect.andThen(Effect.fail({ _tag: "UpstreamUnavailable" as const })))
+      )
+    }))).rejects.toEqual({ _tag: "UpstreamUnavailable" })
+    expect(attemptedServerId).toBe("first-server")
     expect(await run(Effect.gen(function*() {
       const auth = yield* Auth
       return yield* auth.bootstrap()

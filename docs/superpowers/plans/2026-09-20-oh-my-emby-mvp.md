@@ -544,7 +544,7 @@ export interface AuthService {
 }
 ```
 
-Generate 16-byte salts and 32-byte random tokens with `crypto.getRandomValues`; hash stored bearer/session tokens with SHA-256; derive passwords with PBKDF2-SHA-256 and constant-time byte comparison. The issuance transaction rechecks `auth_generation`; password change increments it and deletes all token/session rows atomically. Set Dashboard cookies `HttpOnly; Secure; SameSite=Lax; Path=/dashboard` and update rolling expiry only after half the seven-day inactivity window has elapsed to avoid a write on every request.
+Generate 16-byte salts and 32-byte random tokens with `crypto.getRandomValues`; hash stored bearer/session tokens with SHA-256; derive passwords with PBKDF2-SHA-256 and constant-time byte comparison. The issuance transaction rechecks `auth_generation`; password change increments it and deletes all token/session rows atomically. Set Dashboard cookies `HttpOnly; Secure; SameSite=Lax; Path=/api/dashboard`; this is the narrowest path that still covers the typed API rooted at `/api/dashboard`. Update rolling expiry only after half the seven-day inactivity window has elapsed to avoid a write on every request.
 
 - [ ] **Step 4: Build guarded HttpApi handlers and rerun tests**
 

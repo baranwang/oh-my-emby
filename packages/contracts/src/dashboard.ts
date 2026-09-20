@@ -52,12 +52,12 @@ const auth = HttpApiGroup.make("auth").add(
   HttpApiEndpoint.post("claim", "/claim", {
     payload: CredentialsInput,
     success: SessionView,
-    error: [ValidationFailed, Conflict, Internal]
+    error: [ForbiddenOrigin, ValidationFailed, Conflict, Internal]
   }),
   HttpApiEndpoint.post("login", "/login", {
     payload: CredentialsInput,
     success: SessionView,
-    error: [Unauthorized, ValidationFailed, Internal]
+    error: [Unauthorized, ForbiddenOrigin, ValidationFailed, Internal]
   }),
   HttpApiEndpoint.post("logout", "/logout", {
     success: HttpApiSchema.NoContent,

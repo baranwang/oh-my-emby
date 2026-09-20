@@ -7,6 +7,7 @@ import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder"
 import { Auth, type DashboardSession } from "../core/auth.js"
 
 export const DASHBOARD_SESSION_COOKIE = "oh_my_emby_session"
+const dashboardCookiePath = "/api/dashboard"
 
 export interface DashboardRequestPolicyConfig {
   readonly publicOrigin: string
@@ -89,7 +90,7 @@ const cookieOptions = (expiresAtMs: number) => ({
   httpOnly: true,
   secure: true,
   sameSite: "lax" as const,
-  path: "/dashboard"
+  path: dashboardCookiePath
 })
 
 export const dashboardSessionResponse = (session: DashboardSession): HttpServerResponse.HttpServerResponse =>
@@ -105,7 +106,7 @@ const expireDashboardSession = (response: HttpServerResponse.HttpServerResponse)
     httpOnly: true,
     secure: true,
     sameSite: "lax",
-    path: "/dashboard"
+    path: dashboardCookiePath
   }).pipe(Effect.orDie)
 
 const statusFor = (tag: string): number => {
