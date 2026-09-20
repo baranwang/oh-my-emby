@@ -17,7 +17,7 @@ import {
   DASHBOARD_SESSION_IDLE_MS,
   PBKDF2_ITERATIONS
 } from "./limits.js"
-import type { PasswordRecord, SaveServerCommand, UserRecord } from "./model.js"
+import type { PasswordRecord, UserRecord } from "./model.js"
 import { Repositories } from "./repositories.js"
 
 const encoder = new TextEncoder()
@@ -101,18 +101,6 @@ export interface AuthService {
 }
 
 export class Auth extends Context.Service<Auth, AuthService>()("oh-my-emby/Auth") {}
-
-export const claimAndAttemptFirstServerSetup = <A, E, R>(
-  auth: AuthService,
-  credentials: Credentials,
-  options: LoginOptions,
-  server: SaveServerCommand,
-  saveFirstServer: (server: SaveServerCommand) => Effect.Effect<A, E, R>
-): Effect.Effect<DashboardSession, ClaimError | LoginError | E, R> => Effect.gen(function*() {
-  const session = yield* auth.claim(credentials, options)
-  yield* saveFirstServer(server)
-  return session
-})
 
 export interface AuthLayerConfig {
   readonly now?: () => number

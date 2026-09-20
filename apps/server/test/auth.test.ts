@@ -8,10 +8,10 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import {
   Auth,
-  claimAndAttemptFirstServerSetup,
   makeAuthLayer,
   type DashboardSession
 } from "../src/core/auth.js"
+import { claimAndAttemptFirstServerSetup } from "../src/core/first-server-setup.js"
 import { DASHBOARD_SESSION_IDLE_MS, PBKDF2_ITERATIONS } from "../src/core/limits.js"
 import { Repositories } from "../src/core/repositories.js"
 import { makeSqliteRepositoriesLayer } from "../src/platform/bun/sqlite-repositories.js"
@@ -71,13 +71,19 @@ describe("local authentication", () => {
   })
 
   it("keeps the instance initialized when first-server setup fails", async () => {
+    const listener = Bun.serve({
+      port: 0,
+      fetch: () => new Response(null, { status: 204 })
+    })
+    const baseUrl = listener.url.origin
+    await listener.stop(true)
     const unreachableServer = {
       id: "first-server",
       catalogNamespace: "catalog:first-server",
       verifiedCatalogId: null,
       generation: 1,
       name: "Offline Emby",
-      baseUrl: "https://unreachable.example.com",
+      baseUrl,
       username: "upstream-owner",
       password: "upstream-password",
       accessToken: null,
@@ -89,24 +95,72 @@ describe("local authentication", () => {
       createdAtMs: nowMs,
       updatedAtMs: nowMs
     }
-    let attemptedServerId: string | undefined
-    await expect(run(Effect.gen(function*() {
-      const auth = yield* Auth
-      return yield* claimAndAttemptFirstServerSetup(
-        auth,
+    let observedUrl: URL | undefined
+    let observedInit: RequestInit | undefined
+    const platformFetch = (input: URL, init: RequestInit) => {
+      observedUrl = input
+      observedInit = init
+      return globalThis.fetch(input, init)
+    }
+    await expect(run(claimAndAttemptFirstServerSetup(
         credentials,
         { scopeKey: "claim:first-server" },
         unreachableServer,
-        (server) => Effect.sync(() => {
-          attemptedServerId = server.id
-        }).pipe(Effect.andThen(Effect.fail({ _tag: "UpstreamUnavailable" as const })))
-      )
-    }))).rejects.toEqual({ _tag: "UpstreamUnavailable" })
-    expect(attemptedServerId).toBe("first-server")
+        platformFetch
+    ))).rejects.toMatchObject({ _tag: "UpstreamUnavailable", serverId: "first-server" })
+    expect(observedUrl?.pathname).toBe("/System/Info/Public")
+    expect(observedInit).toEqual({ method: "GET", redirect: "error" })
+    expect(await run(Effect.gen(function*() {
+      const repositories = yield* Repositories
+      return yield* repositories.listServers()
+    }))).toContainEqual(expect.objectContaining({ id: "first-server" }))
     expect(await run(Effect.gen(function*() {
       const auth = yield* Auth
       return yield* auth.bootstrap()
     }))).toEqual({ initialized: true })
+  })
+
+  it("maps a rejected first-server reachability probe without rolling back the saved draft", async () => {
+    const listener = Bun.serve({
+      port: 0,
+      fetch: () => new Response("unavailable", { status: 503 })
+    })
+    const server = {
+      id: "rejected-server",
+      catalogNamespace: "catalog:rejected-server",
+      verifiedCatalogId: null,
+      generation: 1,
+      name: "Rejected Emby",
+      baseUrl: listener.url.origin,
+      username: "upstream-owner",
+      password: "upstream-password",
+      accessToken: null,
+      accessTokenExpiresAtMs: null,
+      userAgent: "oh-my-emby-test",
+      enabled: true,
+      health: "unknown" as const,
+      lastSuccessAtMs: null,
+      createdAtMs: nowMs,
+      updatedAtMs: nowMs
+    }
+    try {
+      await expect(run(claimAndAttemptFirstServerSetup(
+        credentials,
+        { scopeKey: "claim:rejected-server" },
+        server,
+        globalThis.fetch
+      ))).rejects.toMatchObject({
+        _tag: "UpstreamRejected",
+        serverId: "rejected-server",
+        status: 503
+      })
+    } finally {
+      await listener.stop(true)
+    }
+    expect(await run(Effect.gen(function*() {
+      const repositories = yield* Repositories
+      return yield* repositories.listServers()
+    }))).toContainEqual(expect.objectContaining({ id: "rejected-server" }))
   })
 
   it("stores PBKDF2 parameters and only hashes of issued tokens", async () => {

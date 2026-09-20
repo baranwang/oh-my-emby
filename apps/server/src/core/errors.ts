@@ -16,6 +16,15 @@ export class InvalidCredentials extends Schema.TaggedError<InvalidCredentials>()
 
 export class RateLimited extends Schema.TaggedError<RateLimited>()("RateLimited", {}) {}
 
+export class UpstreamUnavailable extends Schema.TaggedError<UpstreamUnavailable>()("UpstreamUnavailable", {
+  serverId: Schema.String
+}) {}
+
+export class UpstreamRejected extends Schema.TaggedError<UpstreamRejected>()("UpstreamRejected", {
+  serverId: Schema.String,
+  status: Schema.Int
+}) {}
+
 export class IdentityConflict extends Schema.TaggedError<IdentityConflict>()("IdentityConflict", {
   message: Schema.String
 }) {}
