@@ -18,6 +18,7 @@ export const Route = createFileRoute("/_authenticated/libraries/")({
     return (
       <LibrariesPage
         creating={search.new}
+        onAddServer={() => void navigate({ to: "/servers", search: { new: true } })}
         onCreatingChange={(creating) => void navigate({ search: { new: creating }, replace: true })}
       />
     )

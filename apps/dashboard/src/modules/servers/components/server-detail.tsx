@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react"
 import type { ServerHealthView, SourceLibraryView } from "@oh-my-emby/contracts"
 import { useNavigate } from "@tanstack/react-router"
 
@@ -22,14 +23,25 @@ const healthLabel = (health: ServerHealthView["health"]) => health === "healthy"
 
 export const ServerHealthStatus = ({
   health,
-  nowMs = Date.now()
+  nowMs
 }: {
   readonly health: ServerHealthView
   readonly nowMs?: number
 }) => {
+  const [currentNowMs, setCurrentNowMs] = useState(() => nowMs ?? Date.now())
+  const effectiveNowMs = nowMs ?? currentNowMs
+
+  useEffect(() => {
+    if (nowMs !== undefined || health.lastSuccessAtMs === null) return
+    const delay = health.lastSuccessAtMs + STALE_HEALTH_MS + 1 - Date.now()
+    if (delay <= 0) return
+    const timeoutId = window.setTimeout(() => setCurrentNowMs(Date.now()), delay)
+    return () => window.clearTimeout(timeoutId)
+  }, [health.lastSuccessAtMs, nowMs])
+
   const freshness = health.lastSuccessAtMs === null
     ? m.health_missing()
-    : nowMs - health.lastSuccessAtMs > STALE_HEALTH_MS ? m.health_stale() : m.health_current()
+    : effectiveNowMs - health.lastSuccessAtMs > STALE_HEALTH_MS ? m.health_stale() : m.health_current()
 
   return (
     <div className="space-y-2 rounded-lg border p-4">

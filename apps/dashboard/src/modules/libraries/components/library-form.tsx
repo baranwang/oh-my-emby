@@ -44,51 +44,49 @@ export const SourceBindings = ({ groups, mediaType, bindings, onToggle }: Source
       return (
         <section key={group.server.id} className="space-y-2 rounded-lg border p-4" aria-labelledby={`source-server-${group.server.id}`}>
           <h3 id={`source-server-${group.server.id}`} className="font-medium">{group.server.name}</h3>
-          {group.state === "pending" ? (
+          {group.state === "pending" && (
             <Skeleton aria-label={m.source_libraries_loading()} className="h-10 w-full" />
-          ) : group.state === "error" ? (
+          )}
+          {group.state === "error" && (
             <div role="alert" className="space-y-2">
               <p className="text-sm text-destructive">{m.source_libraries_failed()}</p>
               <Button type="button" variant="outline" onClick={() => void group.retry?.()}>{m.retry()}</Button>
             </div>
+          )}
+          {group.state === "unavailable" && (
+            <p className="text-sm text-muted-foreground">{m.source_libraries_unavailable()}</p>
+          )}
+          {sources.length === 0 ? (
+            group.state === "success" && (
+              <p className="text-sm text-muted-foreground">{m.source_libraries_empty()}</p>
+            )
           ) : (
-            <>
-              {group.state === "unavailable" && (
-                <p className="text-sm text-muted-foreground">{m.source_libraries_unavailable()}</p>
-              )}
-              {sources.length === 0 ? (
-                group.state === "unavailable" ? null : (
-                  <p className="text-sm text-muted-foreground">{m.source_libraries_empty()}</p>
+            <ul className="space-y-2">
+              {sources.map((source) => {
+                const binding = bindings.find((item) =>
+                  item.serverId === source.serverId && item.sourceLibraryId === source.id
                 )
-              ) : (
-                <ul className="space-y-2">
-                  {sources.map((source) => {
-                    const binding = bindings.find((item) =>
-                      item.serverId === source.serverId && item.sourceLibraryId === source.id
-                    )
-                    const enabled = binding?.enabled ?? false
-                    const id = `source-${source.serverId}-${source.id}`
-                    return (
-                      <li key={`${source.serverId}:${source.id}`} className="flex items-center justify-between gap-4">
-                        <div className="flex min-w-0 items-center gap-2">
-                          <input
-                            id={id}
-                            type="checkbox"
-                            className="size-4 shrink-0 accent-primary"
-                            checked={enabled}
-                            onChange={(event) => onToggle(source.serverId, source.id, event.target.checked)}
-                          />
-                          <Label htmlFor={id} className="truncate">{source.name}</Label>
-                        </div>
-                        <span className="shrink-0 text-xs text-muted-foreground">
-                          {enabled ? m.source_binding_enabled() : m.source_binding_disabled()}
-                        </span>
-                      </li>
-                    )
-                  })}
-                </ul>
-              )}
-            </>
+                const enabled = binding?.enabled ?? false
+                const id = `source-${source.serverId}-${source.id}`
+                return (
+                  <li key={`${source.serverId}:${source.id}`} className="flex items-center justify-between gap-4">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <input
+                        id={id}
+                        type="checkbox"
+                        className="size-4 shrink-0 accent-primary"
+                        checked={enabled}
+                        onChange={(event) => onToggle(source.serverId, source.id, event.target.checked)}
+                      />
+                      <Label htmlFor={id} className="truncate">{source.name}</Label>
+                    </div>
+                    <span className="shrink-0 text-xs text-muted-foreground">
+                      {enabled ? m.source_binding_enabled() : m.source_binding_disabled()}
+                    </span>
+                  </li>
+                )
+              })}
+            </ul>
           )}
         </section>
       )
@@ -157,7 +155,7 @@ export const LibraryForm = ({ library, groups, onSave }: LibraryFormProps) => {
           health: "unknown",
           verifiedCatalogId: null
         } as SourceServer,
-        state: "success",
+        state: "unavailable",
         sources: [{
           id: source.sourceLibraryId,
           serverId: source.serverId,
@@ -224,7 +222,11 @@ export const LibraryForm = ({ library, groups, onSave }: LibraryFormProps) => {
         validators={{ onSubmit: ({ value }) => value.some((source) => source.enabled) ? undefined : m.library_sources_required() }}
       >
         {(field) => (
-          <fieldset className="space-y-3">
+          <fieldset
+            className="space-y-3"
+            aria-invalid={field.state.meta.errors.length > 0}
+            aria-describedby={field.state.meta.errors.length > 0 ? "sources-error" : undefined}
+          >
             <legend className="text-sm font-medium">{m.library_sources()}</legend>
             <form.Subscribe selector={(state) => state.values.mediaType}>
               {(mediaType) => (
@@ -243,7 +245,9 @@ export const LibraryForm = ({ library, groups, onSave }: LibraryFormProps) => {
                 />
               )}
             </form.Subscribe>
-            {field.state.meta.errors.length > 0 && <p className="text-sm text-destructive">{m.library_sources_required()}</p>}
+            {field.state.meta.errors.length > 0 && (
+              <p id="sources-error" className="text-sm text-destructive">{m.library_sources_required()}</p>
+            )}
           </fieldset>
         )}
       </form.Field>

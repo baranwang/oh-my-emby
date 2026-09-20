@@ -1,7 +1,16 @@
-import type { ReactNode } from "react"
+import { act, type ReactElement, type ReactNode } from "react"
+import { createRoot, type Root } from "react-dom/client"
 import { renderToStaticMarkup } from "react-dom/server"
-import type { OutboxFailureView, ServerView, SourceLibraryView } from "@oh-my-emby/contracts"
-import { describe, expect, it, vi } from "vitest"
+import type {
+  OutboxFailureView,
+  ServerView,
+  SourceLibraryView,
+  VirtualLibraryView
+} from "@oh-my-emby/contracts"
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
+import { afterEach, describe, expect, it, vi } from "vitest"
+
+globalThis.IS_REACT_ACT_ENVIRONMENT = true
 
 vi.mock("@tanstack/react-router", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@tanstack/react-router")>()
@@ -11,7 +20,9 @@ vi.mock("@tanstack/react-router", async (importOriginal) => {
   }
 })
 
-import { SourceBindings } from "../src/modules/libraries/components/library-form.js"
+import { queryKeys } from "../src/lib/query-keys.js"
+import { LibraryForm, SourceBindings } from "../src/modules/libraries/components/library-form.js"
+import { LibrariesPage } from "../src/modules/libraries/libraries-page.js"
 import { ServerHealthStatus } from "../src/modules/servers/components/server-detail.js"
 import { ServerList } from "../src/modules/servers/components/server-list.js"
 import { OutboxFailures } from "../src/modules/system/components/outbox-failures.js"
@@ -29,6 +40,71 @@ const server = {
   generation: 1,
   health: "healthy"
 } as ServerView
+
+const source = {
+  id: "source-1",
+  serverId: "server-1",
+  name: "Movies",
+  mediaType: "movies"
+} as SourceLibraryView
+
+const library = {
+  id: "library-1",
+  name: "Films",
+  mediaType: "movies",
+  sources: [{
+    serverId: "server-1",
+    sourceLibraryId: "source-1",
+    sourceLibraryName: "Movies",
+    enabled: true
+  }],
+  enabled: true
+} as VirtualLibraryView
+
+const mounted: Array<{ container: HTMLDivElement; root: Root }> = []
+
+const render = async (element: ReactElement) => {
+  const container = document.body.appendChild(document.createElement("div"))
+  const root = createRoot(container)
+  const view = { container, root }
+  mounted.push(view)
+  await act(async () => root.render(element))
+  return view
+}
+
+const unmount = async (view: (typeof mounted)[number]) => {
+  const index = mounted.indexOf(view)
+  if (index !== -1) mounted.splice(index, 1)
+  await act(async () => view.root.unmount())
+  view.container.remove()
+}
+
+const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
+  headers: { "content-type": "application/json" },
+  status
+})
+
+const buttonByName = (container: HTMLElement, name: string) => {
+  const button = [...container.querySelectorAll("button")]
+    .find((candidate) => candidate.textContent?.includes(name))
+  if (!(button instanceof HTMLButtonElement)) throw new Error(`Button not found: ${name}`)
+  return button
+}
+
+const change = async (control: HTMLInputElement, value: string) => {
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(control, value)
+    control.dispatchEvent(new Event("input", { bubbles: true }))
+    control.dispatchEvent(new Event("change", { bubbles: true }))
+  })
+}
+
+afterEach(async () => {
+  while (mounted.length > 0) await unmount(mounted[0]!)
+  vi.useRealTimers()
+  vi.restoreAllMocks()
+  vi.unstubAllGlobals()
+})
 
 describe("server page states", () => {
   it("renders a distinct pending skeleton", () => {
@@ -78,12 +154,6 @@ it("distinguishes missing health from stale health", () => {
 })
 
 it("renders discovered and disabled source bindings explicitly", () => {
-  const source = {
-    id: "source-1",
-    serverId: "server-1",
-    name: "Movies",
-    mediaType: "movies"
-  } as SourceLibraryView
   const markup = renderToStaticMarkup(
     <SourceBindings
       groups={[{ server, state: "success", sources: [source] }]}
@@ -100,12 +170,6 @@ it("renders discovered and disabled source bindings explicitly", () => {
 })
 
 it("keeps configured bindings visible when their source server is unavailable", () => {
-  const source = {
-    id: "source-1",
-    serverId: "server-1",
-    name: "Movies",
-    mediaType: "movies"
-  } as SourceLibraryView
   const markup = renderToStaticMarkup(
     <SourceBindings
       groups={[{ server: { ...server, enabled: false }, state: "unavailable", sources: [source] }]}
@@ -118,6 +182,148 @@ it("keeps configured bindings visible when their source server is unavailable", 
   expect(markup).toContain(m.source_libraries_unavailable())
   expect(markup).toContain("Movies")
   expect(markup).toContain(m.source_binding_enabled())
+})
+
+describe("library create prerequisites", () => {
+  const renderPage = async (
+    queryClient: QueryClient,
+    props: Partial<React.ComponentProps<typeof LibrariesPage>> = {}
+  ) => render(
+    <QueryClientProvider client={queryClient}>
+      <LibrariesPage
+        creating
+        onAddServer={vi.fn()}
+        onCreatingChange={vi.fn()}
+        {...props}
+      />
+    </QueryClientProvider>
+  )
+
+  const queryClientWithLibraries = () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } })
+    queryClient.setQueryData(queryKeys.libraries, [])
+    return queryClient
+  }
+
+  it("shows server loading without silently rendering an empty form", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>(() => {})))
+    const view = await renderPage(queryClientWithLibraries())
+
+    expect(view.container.querySelector('[data-slot="skeleton"]')?.getAttribute("aria-label"))
+      .toBe(m.servers_loading())
+    expect(view.container.querySelector("form")).toBeNull()
+  })
+
+  it("shows a server error with retry without rendering the form", async () => {
+    const fetch = vi.fn(async () => json({ _tag: "Internal", requestId: "request-1" }, 500))
+    vi.stubGlobal("fetch", fetch)
+    const view = await renderPage(queryClientWithLibraries())
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+    expect(view.container.textContent).toContain(m.servers_load_failed())
+    expect(view.container.querySelector("form")).toBeNull()
+
+    await act(async () => {
+      buttonByName(view.container, m.retry()).click()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+    expect(fetch).toHaveBeenCalledTimes(2)
+  })
+
+  it("shows an actionable zero-server state without rendering the form", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => json([])))
+    const onAddServer = vi.fn()
+    const view = await renderPage(queryClientWithLibraries(), { onAddServer })
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+    expect(view.container.textContent).toContain(m.servers_empty())
+    expect(view.container.querySelector("form")).toBeNull()
+    await act(async () => buttonByName(view.container, m.add_server()).click())
+    expect(onAddServer).toHaveBeenCalledOnce()
+  })
+
+  it("does not discover source libraries while the create form is closed", async () => {
+    const fetch = vi.fn(async () => json([]))
+    vi.stubGlobal("fetch", fetch)
+    const queryClient = queryClientWithLibraries()
+    queryClient.setQueryData(queryKeys.servers, [server])
+
+    await renderPage(queryClient, { creating: false })
+    await act(async () => { await Promise.resolve() })
+
+    expect(fetch).not.toHaveBeenCalled()
+  })
+})
+
+it("keeps configured bindings visible and disable-able during discovery errors", async () => {
+  const retry = vi.fn()
+  const view = await render(
+    <LibraryForm
+      library={library}
+      groups={[{ server, state: "error", sources: [], retry }]}
+      onSave={vi.fn()}
+    />
+  )
+
+  expect(view.container.textContent).toContain(m.source_libraries_failed())
+  expect(view.container.textContent).toContain("Movies")
+  const checkbox = view.container.querySelector('input[type="checkbox"]')
+  expect(checkbox).toBeInstanceOf(HTMLInputElement)
+  expect((checkbox as HTMLInputElement).checked).toBe(true)
+
+  await act(async () => (checkbox as HTMLInputElement).click())
+  expect((checkbox as HTMLInputElement).checked).toBe(false)
+  expect(view.container.textContent).toContain(m.source_binding_disabled())
+})
+
+it("marks bindings from missing servers unavailable", async () => {
+  const view = await render(<LibraryForm library={library} groups={[]} onSave={vi.fn()} />)
+
+  expect(view.container.textContent).toContain("Movies")
+  expect(view.container.textContent).toContain(m.source_libraries_unavailable())
+})
+
+it("associates the required-source error with its fieldset", async () => {
+  const view = await render(
+    <LibraryForm
+      groups={[{ server, state: "success", sources: [source] }]}
+      onSave={vi.fn()}
+    />
+  )
+  const name = view.container.querySelector('input[name="name"]')
+  if (!(name instanceof HTMLInputElement)) throw new Error("Library name input not found")
+  await change(name, "Films")
+  await act(async () => buttonByName(view.container, m.save()).click())
+
+  const fieldset = view.container.querySelector("fieldset")
+  await vi.waitFor(() => expect(fieldset?.getAttribute("aria-invalid")).toBe("true"))
+  const descriptionId = fieldset?.getAttribute("aria-describedby")
+  expect(descriptionId).toBe("sources-error")
+  expect(view.container.querySelector(`#${descriptionId}`)?.textContent).toBe(m.library_sources_required())
+})
+
+it("ages current health into stale without a replacement payload and cleans up its timer", async () => {
+  vi.useFakeTimers()
+  vi.setSystemTime(100_000)
+  const clearTimeout = vi.spyOn(window, "clearTimeout")
+  const view = await render(
+    <ServerHealthStatus
+      health={{ serverId: server.id, health: "healthy", lastSuccessAtMs: 50_000 }}
+    />
+  )
+
+  expect(view.container.textContent).toContain(m.health_current())
+  expect(vi.getTimerCount()).toBe(1)
+  await act(async () => { await vi.advanceTimersByTimeAsync(10_001) })
+  expect(view.container.textContent).toContain(m.health_stale())
+
+  await unmount(view)
+  expect(clearTimeout).toHaveBeenCalled()
+  expect(vi.getTimerCount()).toBe(0)
 })
 
 it("renders only typed, non-secret outbox failure diagnostics", () => {
