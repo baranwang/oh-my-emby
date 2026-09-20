@@ -1,0 +1,10 @@
+.git
+.github
+.superpowers
+node_modules
+**/node_modules
+**/dist
+**/coverage
+**/test
+*.log
+.DS_Store

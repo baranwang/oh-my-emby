@@ -1,4 +1,7 @@
 import * as SqliteClient from "@effect/sql-sqlite-bun/SqliteClient"
+import { Database } from "bun:sqlite"
+import { readdir } from "node:fs/promises"
+import { join } from "node:path"
 import {
   ServerView as ServerViewSchema,
   SourceLibraryView as SourceLibraryViewSchema,
@@ -2813,3 +2816,57 @@ export const makeSqliteRepositoriesLayer = (
 ): Layer.Layer<Repositories> => Layer.effect(Repositories, makeRepositories).pipe(
   Layer.provide(SqliteClient.layer(config))
 )
+
+export const applySqliteMigrations = async (
+  filename: string,
+  migrationsDirectory: string
+): Promise<void> => {
+  const migrations = (await readdir(migrationsDirectory))
+    .flatMap((name) => {
+      const match = /^(\d+)_([a-z0-9_-]+)\.sql$/.exec(name)
+      return match === null ? [] : [{ version: Number(match[1]), name: match[2]!, file: name }]
+    })
+    .sort((left, right) => left.version - right.version)
+  if (migrations.length === 0) throw new Error("no SQLite migrations found")
+  if (new Set(migrations.map(({ version }) => version)).size !== migrations.length) {
+    throw new Error("duplicate SQLite migration version")
+  }
+
+  const database = new Database(filename, { create: true })
+  try {
+    database.exec("PRAGMA foreign_keys = ON")
+    for (const migration of migrations) {
+      const hasTable = database.query<{ count: number }, []>(
+        "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'"
+      ).get()?.count === 1
+      const applied = hasTable
+        ? database.query<{ name: string }, [number]>(
+          "SELECT name FROM schema_migrations WHERE version = ?"
+        ).get(migration.version)
+        : null
+      if (applied !== null) {
+        if (applied.name !== migration.name) {
+          throw new Error(`SQLite migration ${migration.version} name mismatch`)
+        }
+        continue
+      }
+
+      const sql = await Bun.file(join(migrationsDirectory, migration.file)).text()
+      database.transaction(() => {
+        database.exec(sql)
+        const recorded = database.query<{ name: string }, [number]>(
+          "SELECT name FROM schema_migrations WHERE version = ?"
+        ).get(migration.version)
+        if (recorded === null) {
+          database.query(
+            "INSERT INTO schema_migrations(version, name, applied_at_ms) VALUES (?, ?, ?)"
+          ).run(migration.version, migration.name, Date.now())
+        } else if (recorded.name !== migration.name) {
+          throw new Error(`SQLite migration ${migration.version} recorded the wrong name`)
+        }
+      })()
+    }
+  } finally {
+    database.close()
+  }
+}
