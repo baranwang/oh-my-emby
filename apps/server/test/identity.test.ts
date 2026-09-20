@@ -250,7 +250,7 @@ describe("exact canonical identity", () => {
     expect(refreshed.claims[0]?.namespace).toBe("fallback:episode")
   })
 
-  it("keeps the oldest canonical, resolves its alias, and preserves the highest state revision", async () => {
+  it("keeps the oldest canonical and preserves the newest state and playback watermark", async () => {
     const oldest = await resolve(source("a", "oldest", "Movie", { tmdbMovie: "10" }, { observedAtMs: 1_000 }))
     const newest = await resolve(source("b", "newest", "Movie", { imdbTitle: "tt1" }, { observedAtMs: 2_000 }))
     withDatabase((database) => {
@@ -259,6 +259,10 @@ describe("exact canonical identity", () => {
           canonical_id, revision, played, favorite, play_count, position_ticks,
           last_played_version_id, updated_at_ms
         ) VALUES (?, 2, 0, 0, 1, 10, NULL, 2000), (?, 5, 1, 1, 4, 50, NULL, 3000)
+      `, [oldest.canonical.id, newest.canonical.id])
+      database.run(`
+        INSERT INTO playback_watermarks (canonical_id, started_at_ms, session_id)
+        VALUES (?, 2500, 'old-session'), (?, 3500, 'new-session')
       `, [oldest.canonical.id, newest.canonical.id])
     })
 
@@ -283,6 +287,17 @@ describe("exact canonical identity", () => {
       favorite: 1,
       play_count: 4,
       position_ticks: 50
+    })
+    expect(withDatabase((database) => database.query<{
+      canonical_id: string
+      started_at_ms: number
+      session_id: string
+    }, [string]>(
+      "SELECT * FROM playback_watermarks WHERE canonical_id = ?"
+    ).get(oldest.canonical.id))).toEqual({
+      canonical_id: oldest.canonical.id,
+      started_at_ms: 3500,
+      session_id: "new-session"
     })
     expect(withDatabase((database) => database.query(
       "SELECT id FROM canonical_items WHERE id = ?"

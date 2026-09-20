@@ -67,6 +67,31 @@ describe("revisioned outbox", () => {
     })
   })
 
+  it("does not make a new revision uncertain after the previous revision was acknowledged", async () => {
+    await Effect.runPromise(Effect.gen(function*() {
+      yield* write()
+      const outbox = yield* Outbox
+      const [first] = yield* outbox.claimDue()
+      expect(yield* outbox.deliverClaimed(first!)).toBe("delivered")
+
+      nowMs += 1
+      yield* write(true)
+      expect(harness.database((database) => database.query<{
+        dispatched_at_ms: number | null
+        uncertain_since_ms: number | null
+      }, []>("SELECT dispatched_at_ms, uncertain_since_ms FROM state_outbox").get())).toEqual({
+        dispatched_at_ms: null,
+        uncertain_since_ms: null
+      })
+
+      const [second] = yield* outbox.claimDue()
+      expect(yield* outbox.deliverClaimed(second!)).toBe("delivered")
+      nowMs += UNCERTAINTY_REAPPLY_MS
+      expect(yield* outbox.claimDue()).toEqual([])
+    }).pipe(Effect.provide(layer)))
+    expect(requests).toHaveLength(2)
+  })
+
   it("guards acknowledgement by owner, revision, and an unexpired lease", async () => {
     await Effect.runPromise(Effect.gen(function*() {
       yield* write()

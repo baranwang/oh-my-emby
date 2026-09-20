@@ -120,6 +120,41 @@ describe("bounded maintenance", () => {
     expect(requests).toBe(0)
   })
 
+  it("rejects a stale playback start after maintenance removes the newer session row", async () => {
+    await Effect.runPromise(Effect.gen(function*() {
+      const state = yield* UserState
+      yield* state.recordPlaybackEvent({
+        kind: "start",
+        localSessionId: "new-session",
+        canonicalId: "canonical-1",
+        versionId: "new-version",
+        positionTicks: 200,
+        occurredAtMs: 10_000
+      })
+      yield* runMaintenance(nowMs)
+      expect(harness.database((database) => database.query<{ count: number }, []>(
+        "SELECT COUNT(*) AS count FROM playback_sessions"
+      ).get()?.count)).toBe(0)
+
+      expect(yield* state.recordPlaybackEvent({
+        kind: "start",
+        localSessionId: "old-session",
+        canonicalId: "canonical-1",
+        versionId: "old-version",
+        positionTicks: 999,
+        occurredAtMs: 9_000
+      })).toBeNull()
+    }).pipe(Effect.provide(layer)))
+
+    expect(harness.database((database) => database.query<{
+      position_ticks: number
+      last_played_version_id: string
+    }, []>("SELECT position_ticks, last_played_version_id FROM user_state").get())).toEqual({
+      position_ticks: 200,
+      last_played_version_id: "new-version"
+    })
+  })
+
   it("cancels removed targets and safely overlaps workers", async () => {
     await Effect.runPromise(Effect.gen(function*() {
       const state = yield* UserState

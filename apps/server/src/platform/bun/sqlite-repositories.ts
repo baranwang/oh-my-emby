@@ -1173,6 +1173,13 @@ const makeRepositories = Effect.gen(function*() {
           OR state_outbox.payload_json <> excluded.payload_json THEN NULL
         ELSE state_outbox.lease_expires_at_ms
       END,
+      dispatched_at_ms = CASE
+        WHEN state_outbox.desired_revision <> excluded.desired_revision
+          OR state_outbox.canonical_id <> excluded.canonical_id
+          OR state_outbox.server_generation <> excluded.server_generation
+          OR state_outbox.payload_json <> excluded.payload_json THEN NULL
+        ELSE state_outbox.dispatched_at_ms
+      END,
       uncertain_since_ms = CASE
         WHEN (
           state_outbox.desired_revision <> excluded.desired_revision
@@ -1180,6 +1187,7 @@ const makeRepositories = Effect.gen(function*() {
           OR state_outbox.server_generation <> excluded.server_generation
           OR state_outbox.payload_json <> excluded.payload_json
         ) AND state_outbox.dispatched_at_ms IS NOT NULL
+          AND state_outbox.lease_owner IS NOT NULL
           THEN COALESCE(state_outbox.uncertain_since_ms, excluded.updated_at_ms)
         ELSE state_outbox.uncertain_since_ms
       END,
@@ -1197,6 +1205,7 @@ const makeRepositories = Effect.gen(function*() {
           OR state_outbox.server_generation <> excluded.server_generation
           OR state_outbox.payload_json <> excluded.payload_json
         ) AND state_outbox.dispatched_at_ms IS NOT NULL
+          AND state_outbox.lease_owner IS NOT NULL
           THEN 'superseded_after_dispatch'
         WHEN state_outbox.desired_revision <> excluded.desired_revision
           OR state_outbox.canonical_id <> excluded.canonical_id
@@ -1211,6 +1220,7 @@ const makeRepositories = Effect.gen(function*() {
           OR state_outbox.server_generation <> excluded.server_generation
           OR state_outbox.payload_json <> excluded.payload_json
         ) AND state_outbox.dispatched_at_ms IS NOT NULL
+          AND state_outbox.lease_owner IS NOT NULL
           THEN excluded.updated_at_ms
         WHEN state_outbox.desired_revision <> excluded.desired_revision
           OR state_outbox.canonical_id <> excluded.canonical_id
@@ -1543,6 +1553,21 @@ const makeRepositories = Effect.gen(function*() {
           UPDATE state_outbox SET canonical_id = ?
           WHERE canonical_id IN (${retiredPlaceholders})
         `, [survivorId, ...retiredIds])
+        yield* sql.unsafe(`
+          INSERT INTO playback_watermarks (canonical_id, started_at_ms, session_id)
+          SELECT ?, started_at_ms, session_id
+          FROM playback_watermarks
+          WHERE canonical_id IN (${[survivorId, ...retiredIds].map(() => "?").join(", ")})
+          ORDER BY started_at_ms DESC, session_id DESC
+          LIMIT 1
+          ON CONFLICT(canonical_id) DO UPDATE SET
+            started_at_ms = excluded.started_at_ms,
+            session_id = excluded.session_id
+        `, [survivorId, survivorId, ...retiredIds])
+        yield* sql.unsafe(`
+          DELETE FROM playback_watermarks
+          WHERE canonical_id IN (${retiredPlaceholders})
+        `, retiredIds)
         yield* sql.unsafe(`
           UPDATE playback_sessions SET canonical_id = ?
           WHERE canonical_id IN (${retiredPlaceholders})
@@ -2200,6 +2225,11 @@ const makeRepositories = Effect.gen(function*() {
     readonly state_revision: unknown
   }
 
+  interface PlaybackWatermarkRow {
+    readonly started_at_ms: unknown
+    readonly session_id: string
+  }
+
   const recordPlaybackEventAndTargets: RepositoriesService["recordPlaybackEventAndTargets"] = (input) =>
     database("recordPlaybackEventAndTargets", sql.withTransaction(Effect.gen(function*() {
       if (
@@ -2213,16 +2243,24 @@ const makeRepositories = Effect.gen(function*() {
         [input.localSessionId]
       )
       const session = sessions[0]
-      const latestRows = yield* sql.unsafe<PlaybackSessionRow>(`
-        SELECT * FROM playback_sessions
-        WHERE canonical_id = ?
-        ORDER BY started_at_ms DESC, id DESC
-        LIMIT 1
-      `, [input.canonicalId])
-      const latest = latestRows[0]
 
       if (input.kind === "start") {
-        if (session || (latest && integer(latest.started_at_ms, "started_at_ms") > input.occurredAtMs)) return null
+        const watermarks = yield* sql.unsafe<PlaybackWatermarkRow>(
+          "SELECT started_at_ms, session_id FROM playback_watermarks WHERE canonical_id = ?",
+          [input.canonicalId]
+        )
+        const watermark = watermarks[0]
+        const watermarkStartedAtMs = watermark
+          ? integer(watermark.started_at_ms, "started_at_ms")
+          : null
+        const staleWatermark = watermark !== undefined && watermarkStartedAtMs !== null && (
+          watermarkStartedAtMs > input.occurredAtMs ||
+          (watermarkStartedAtMs === input.occurredAtMs && watermark.session_id >= input.localSessionId)
+        )
+        if (
+          session ||
+          staleWatermark
+        ) return null
         const state = yield* persistUserState(input.canonicalId, {
           played: false,
           positionTicks: input.positionTicks,
@@ -2242,9 +2280,23 @@ const makeRepositories = Effect.gen(function*() {
           input.positionTicks,
           state.revision
         ])
+        yield* sql.unsafe(`
+          INSERT INTO playback_watermarks (canonical_id, started_at_ms, session_id)
+          VALUES (?, ?, ?)
+          ON CONFLICT(canonical_id) DO UPDATE SET
+            started_at_ms = excluded.started_at_ms,
+            session_id = excluded.session_id
+        `, [input.canonicalId, input.occurredAtMs, input.localSessionId])
         return state
       }
 
+      const latestRows = yield* sql.unsafe<PlaybackSessionRow>(`
+        SELECT * FROM playback_sessions
+        WHERE canonical_id = ?
+        ORDER BY started_at_ms DESC, id DESC
+        LIMIT 1
+      `, [input.canonicalId])
+      const latest = latestRows[0]
       if (
         !session || session.canonical_id !== input.canonicalId ||
         (latest && latest.id !== session.id) ||
@@ -2330,6 +2382,7 @@ const makeRepositories = Effect.gen(function*() {
             next_attempt_at_ms = MIN(next_attempt_at_ms, ?),
             lease_owner = NULL,
             lease_expires_at_ms = NULL,
+            dispatched_at_ms = NULL,
             updated_at_ms = ?
         WHERE target_id IN (
           SELECT target_id
@@ -2425,6 +2478,7 @@ const makeRepositories = Effect.gen(function*() {
       SET delivered_revision = ?,
           lease_owner = NULL,
           lease_expires_at_ms = NULL,
+          dispatched_at_ms = NULL,
           next_attempt_at_ms = CASE
             WHEN uncertain_since_ms IS NULL THEN next_attempt_at_ms
             ELSE ?
@@ -2491,6 +2545,7 @@ const makeRepositories = Effect.gen(function*() {
           next_attempt_at_ms = ?,
           lease_owner = NULL,
           lease_expires_at_ms = NULL,
+          dispatched_at_ms = NULL,
           updated_at_ms = ?
       WHERE target_id = ?
         AND desired_revision = ?
@@ -2542,6 +2597,7 @@ const makeRepositories = Effect.gen(function*() {
             END,
             lease_owner = NULL,
             lease_expires_at_ms = NULL,
+            dispatched_at_ms = NULL,
             last_failure_code = CASE
               WHEN dispatched_at_ms IS NULL THEN last_failure_code
               ELSE COALESCE(last_failure_code, 'lease_expired_after_dispatch')

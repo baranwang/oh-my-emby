@@ -213,6 +213,12 @@ CREATE TABLE playback_sessions (
   state_revision INTEGER NOT NULL CHECK (state_revision > 0)
 ) STRICT;
 
+CREATE TABLE playback_watermarks (
+  canonical_id TEXT PRIMARY KEY REFERENCES canonical_items(id),
+  started_at_ms INTEGER NOT NULL,
+  session_id TEXT NOT NULL
+) STRICT;
+
 CREATE TABLE maintenance_status (
   singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
   last_run_at_ms INTEGER NOT NULL

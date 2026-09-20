@@ -466,6 +466,39 @@ describe("UpstreamClient", () => {
     ])
   })
 
+  it("rebuilds a replay-safe user path when authentication returns a different user id", async () => {
+    const calls: Array<Request> = []
+    await expect(run(async (input, init) => {
+      const request = new Request(input, init)
+      calls.push(request)
+      if (request.url.endsWith("/Users/AuthenticateByName")) {
+        return Response.json({
+          AccessToken: "token-1-new",
+          User: { Id: "new-user-id" }
+        })
+      }
+      return request.headers.get("x-emby-token") === "token-1-new"
+        ? new Response(null, { status: 200 })
+        : new Response(null, { status: 401 })
+    }, Effect.gen(function*() {
+      const client = yield* UpstreamClient
+      return yield* client.request({
+        serverId: "server-1",
+        generation: 1,
+        path: "/Users/upstream-user-id/Items/item-1/UserData",
+        method: "POST",
+        body: new TextEncoder().encode("{}"),
+        replaySafe: true,
+        replayPath: (upstreamUserId) => `/Users/${upstreamUserId}/Items/item-1/UserData`
+      }, Schema.Void)
+    }))).resolves.toBeUndefined()
+    expect(calls.map((request) => new URL(request.url).pathname)).toEqual([
+      "/Users/upstream-user-id/Items/item-1/UserData",
+      "/Users/AuthenticateByName",
+      "/Users/new-user-id/Items/item-1/UserData"
+    ])
+  })
+
   it("retries one transient GET but never retries POST or explicit not-found", async () => {
     let attempts = 0
     await expect(run(async () => {

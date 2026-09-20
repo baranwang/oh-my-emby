@@ -94,6 +94,8 @@ export const makeOutboxLayer = (
         path: `/Users/${encodeURIComponent(claim.upstreamUserId)}/Items/${encodeURIComponent(claim.upstreamItemId)}/UserData`,
         method: "POST",
         replaySafe: true,
+        replayPath: (upstreamUserId) =>
+          `/Users/${encodeURIComponent(upstreamUserId)}/Items/${encodeURIComponent(claim.upstreamItemId)}/UserData`,
         body: new TextEncoder().encode(JSON.stringify({
           Played: claim.payload.played,
           IsFavorite: claim.payload.favorite,

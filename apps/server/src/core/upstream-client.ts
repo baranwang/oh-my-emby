@@ -43,12 +43,14 @@ export interface UpstreamRequest {
   readonly method: "GET" | "POST" | "DELETE"
   readonly body?: Uint8Array
   readonly replaySafe?: boolean
+  readonly replayPath?: (upstreamUserId: string) => string
   readonly resourcePolicy?: "control" | "registered-resource"
 }
 
 export interface AuthenticatedServer {
   readonly server: UpstreamServer
   readonly catalogId: string | null
+  readonly upstreamUserId: string
 }
 
 export type SourceLibrary = SourceLibraryView
@@ -392,7 +394,8 @@ export const makeUpstreamClientLayer = (
     if (saved === null) return yield* Effect.fail(new ObsoleteGeneration({ serverId: server.id }))
     return {
       server: saved,
-      catalogId: authenticated.ServerId?.trim() || null
+      catalogId: authenticated.ServerId?.trim() || null,
+      upstreamUserId: authenticated.User.Id
     }
   }), server.id)
 
@@ -415,7 +418,10 @@ export const makeUpstreamClientLayer = (
     if (response.status === 401 && (input.method === "GET" || input.replaySafe === true) && server.password !== null) {
       trace.retried = true
       const refreshed = yield* authenticate(server)
-      response = yield* fetchWithRedirects(refreshed.server, input, refreshed.server.accessToken, false, trace)
+      const replay = input.replayPath === undefined
+        ? input
+        : { ...input, path: input.replayPath(refreshed.upstreamUserId) }
+      response = yield* fetchWithRedirects(refreshed.server, replay, refreshed.server.accessToken, false, trace)
     }
     const decoded = yield* decodeResponse(response, input.serverId, schema)
     const current = yield* getServer(input.serverId)
