@@ -5,7 +5,11 @@ const decodeUrl = Schema.decodeUnknownSync(Schema.URLFromString)
 const isHttpUrl = (value: string): value is string => {
   try {
     const url = decodeUrl(value)
-    return url.protocol === "http:" || url.protocol === "https:"
+    return (url.protocol === "http:" || url.protocol === "https:") &&
+      url.username === "" &&
+      url.password === "" &&
+      !value.includes("?") &&
+      !value.includes("#")
   } catch {
     return false
   }

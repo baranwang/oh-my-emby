@@ -40,4 +40,19 @@ describe("Dashboard contracts", () => {
       enabled: true
     })).rejects.toBeDefined()
   })
+
+  it.each([
+    "https://alice:secret@emby.example.com",
+    "https://emby.example.com/?api_key=secret",
+    "https://emby.example.com/#secret"
+  ])("rejects secret-bearing upstream URL %s", async (baseUrl) => {
+    await expect(Schema.decodeUnknownPromise(ServerInput)({
+      name: "Home",
+      baseUrl,
+      username: "alice",
+      password: { _tag: "Preserve" },
+      userAgent: "SenPlayer/1",
+      enabled: true
+    })).rejects.toBeDefined()
+  })
 })
