@@ -47,7 +47,8 @@ const plan = (pathPrefix?: string) => {
   }
 }
 
-type RemoteScenario = "existing" | "ambiguous" | "deploy-failure" | "missing-ownership" | "wrong-ownership" | "verified"
+type RemoteScenario = "existing" | "ambiguous" | "mixed-not-found" | "duplicate-not-found" | "empty-not-found" |
+  "malformed-not-found" | "deploy-failure" | "missing-ownership" | "wrong-ownership" | "verified"
 
 interface FakeState {
   readonly deploys?: ReadonlyArray<string>
@@ -83,6 +84,14 @@ const runRemoteScenario = async (scenario: RemoteScenario) => {
       if (request.method === "GET" && url.pathname.startsWith(`/client/v4/accounts/${accountId}/workers/scripts/`)) {
         if (scenario === "existing") return Response.json({ success: true, result: { id: "pre-existing" } })
         if (scenario === "ambiguous") return Response.json({ success: false, errors: [{ code: 10000 }] }, { status: 500 })
+        if (scenario === "mixed-not-found") {
+          return Response.json({ success: false, errors: [{ code: 10007 }, { code: 10000 }] }, { status: 404 })
+        }
+        if (scenario === "duplicate-not-found") {
+          return Response.json({ success: false, errors: [{ code: 10007 }, { code: 10007 }] }, { status: 404 })
+        }
+        if (scenario === "empty-not-found") return Response.json({ success: false, errors: [] }, { status: 404 })
+        if (scenario === "malformed-not-found") return Response.json({ success: false, errors: {} }, { status: 404 })
         return Response.json({ success: false, errors: [{ code: 10007, message: "script not found" }], result: null }, { status: 404 })
       }
       if (request.method === "DELETE" && url.pathname.startsWith(`/client/v4/accounts/${accountId}/workers/scripts/`)) {
@@ -236,7 +245,14 @@ const d1Deletes = (requests: ReadonlyArray<string>) => requests.filter((value) =
   value === `DELETE /client/v4/accounts/${accountId}/d1/database/${databaseId}`)
 
 describe.sequential("Workers remote smoke ownership", () => {
-  it.each(["existing", "ambiguous"] as const)("aborts on %s preflight without deploy or cleanup", async (scenario) => {
+  it.each([
+    "existing",
+    "ambiguous",
+    "mixed-not-found",
+    "duplicate-not-found",
+    "empty-not-found",
+    "malformed-not-found"
+  ] as const)("aborts on %s preflight without deploy or cleanup", async (scenario) => {
     const result = await runRemoteScenario(scenario)
 
     expect(result.exitCode).not.toBe(0)

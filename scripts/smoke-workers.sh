@@ -273,8 +273,8 @@ if [[ "$PREFLIGHT_STATUS" == 200 ]]; then
 fi
 if [[ "$PREFLIGHT_STATUS" != 404 ]] || ! API_BODY="$TEMP_DIR/worker-preflight.json" bun -e '
   const body = await Bun.file(process.env.API_BODY).json().catch(() => null)
-  if (body?.success !== false || !Array.isArray(body.errors) ||
-    !body.errors.some((error) => error?.code === 10007)) process.exit(1)
+  if (body?.success !== false || !Array.isArray(body.errors) || body.errors.length !== 1 ||
+    body.errors[0]?.code !== 10007) process.exit(1)
 '; then
   echo "Worker ownership preflight was ambiguous; refusing to deploy or delete $REMOTE_WORKER" >&2
   exit 1
