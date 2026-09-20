@@ -11,6 +11,15 @@ import type {
 } from "../core/federation.js"
 import type { LibraryServiceApi } from "../core/library-service.js"
 import type { JsonValue, PlaybackEvent, UserStatePatch, UserStateRecord } from "../core/model.js"
+import {
+  serveRegisteredResource,
+  type ImageSelection,
+  type PlaybackInfo,
+  type ResourceDecision,
+  type SubtitleSelection,
+  type VideoSelection
+} from "../core/playback.js"
+import type { ResourceCacheService } from "../core/resource-cache.js"
 import type { UserStateService } from "../core/user-state.js"
 import {
   EmbyClient,
@@ -35,6 +44,9 @@ export interface PlaybackInfoBoundary {
 /** Task 10 supplies this service. This protocol layer only delegates and maps casing. */
 export interface PlaybackBoundary {
   readonly getInfo: (canonicalId: string) => Effect.Effect<PlaybackInfoBoundary, unknown>
+  readonly resolveVideoRedirect?: (input: VideoSelection) => Effect.Effect<URL, unknown>
+  readonly resolveImage?: (input: ImageSelection) => Effect.Effect<ResourceDecision, unknown>
+  readonly resolveSubtitle?: (input: SubtitleSelection) => Effect.Effect<ResourceDecision, unknown>
 }
 
 export interface EmbyServices {
@@ -49,6 +61,8 @@ export interface EmbyServices {
   readonly userState: Pick<UserStateService, "write" | "recordPlaybackEvent">
   readonly libraries: Pick<LibraryServiceApi, "list">
   readonly playback: PlaybackBoundary
+  readonly resourceCache?: ResourceCacheService
+  readonly resourceFetch?: typeof globalThis.fetch
 }
 
 class InvalidEmbyRequest extends Schema.TaggedError<InvalidEmbyRequest>()("InvalidEmbyRequest", {}) {}
@@ -75,6 +89,8 @@ const publicFailure = (error: unknown): Response => {
     case "InvalidCredentials": return failure(401, "Unauthorized", "Authentication required")
     case "EmbyForbidden": return failure(403, "Forbidden", "Forbidden")
     case "EmbyNotFound":
+    case "PlaybackNotFound":
+    case "ResourceRejected":
     case "LibraryNotFound":
     case "ServerNotFound": return notFound()
     case "RateLimited": return failure(429, "RateLimited", "Too many authentication attempts")
@@ -82,6 +98,12 @@ const publicFailure = (error: unknown): Response => {
     case "UpstreamUnavailable":
     case "UpstreamTimeout":
     case "UpstreamRejected": return failure(503, "Unavailable", "Service unavailable")
+    case "PlaybackUnavailable":
+    case "ResourceCacheError":
+    case "ResourceUnavailable": return failure(503, "Unavailable", "Service unavailable")
+    case "ResourceTimeout": return failure(504, "Timeout", "Upstream request timed out")
+    case "ResourceTooLarge": return failure(413, "TooLarge", "Resource is too large")
+    case "ResourceInvalidResponse": return failure(502, "InvalidResponse", "Invalid upstream response")
     default: return failure(500, "Internal", "Internal server error")
   }
 }
@@ -255,12 +277,43 @@ const itemDto = (item: CanonicalItemView): EmbyItemDtoValue => {
   } as EmbyItemDtoValue
 }
 
-const playbackInfoDto = (info: PlaybackInfoBoundary): EmbyPlaybackInfoDtoValue => ({
+const safeVideoPath = (value: JsonValue | undefined): string | null =>
+  typeof value === "string" && /^\/Videos\/[^/?#]+\/stream\?MediaSourceId=[^&#]+$/.test(value)
+    ? value
+    : null
+
+const safeSubtitlePath = (value: JsonValue | undefined): string | null =>
+  typeof value === "string" &&
+    /^\/Videos\/[^/?#]+\/[^/?#]+\/Subtitles\/\d+\/Stream\.(?:srt|vtt|ass|ssa|ttml)$/.test(value)
+    ? value
+    : null
+
+const playbackInfoDto = (info: PlaybackInfoBoundary | PlaybackInfo): EmbyPlaybackInfoDtoValue => ({
   PlaySessionId: info.playSessionId,
   MediaSources: info.mediaSources.flatMap((source) => {
     const mapped = mediaSourceDto(source)
-    return mapped === null ? [] : [mapped]
+    if (mapped === null) return []
+    const raw = object(source)
+    const path = safeVideoPath(raw.Path) ?? safeVideoPath(raw.DirectStreamUrl)
+    const streams = Array.isArray(raw.MediaStreams)
+      ? raw.MediaStreams.flatMap((entry) => {
+          const publicStream = mediaStreamDto(entry)
+          if (publicStream === null) return []
+          const deliveryUrl = safeSubtitlePath(object(entry).DeliveryUrl)
+          return [{ ...publicStream, ...(deliveryUrl === null ? {} : { DeliveryUrl: deliveryUrl }) }]
+        })
+      : []
+    return [{
+      ...mapped,
+      ...(path === null ? {} : { Path: path, DirectStreamUrl: path }),
+      MediaStreams: streams
+    } as EmbyMediaSourceDtoValue]
   })
+})
+
+const redirect = (location: URL): Response => new Response(null, {
+  status: 302,
+  headers: { location: location.href, "cache-control": "private, no-store" }
 })
 
 const filter = (name: NonNullable<EmbyItemsQueryValue["Filters"]>[number]): CatalogFilter => {
@@ -400,6 +453,18 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
   const favorite = path.match(/^\/Users\/([^/]+)\/FavoriteItems\/([^/]+)$/)
   const played = path.match(/^\/Users\/([^/]+)\/PlayedItems\/([^/]+)$/)
   const playbackInfo = method === "POST" ? path.match(/^\/Items\/([^/]+)\/PlaybackInfo$/) : null
+  const videoStream = method === "GET" || method === "HEAD"
+    ? path.match(/^\/Videos\/([^/]+)\/stream(?:\.[^/]+)?$/)
+    : null
+  const videoDownload = method === "GET" || method === "HEAD"
+    ? path.match(/^\/Items\/([^/]+)\/Download$/)
+    : null
+  const image = method === "GET"
+    ? path.match(/^\/Items\/([^/]+)\/Images\/([^/]+)(?:\/(\d+))?$/)
+    : null
+  const subtitle = method === "GET"
+    ? path.match(/^\/Videos\/([^/]+)\/([^/]+)\/Subtitles\/(\d+)\/Stream\.([^/]+)$/)
+    : null
   const playbackKind = method === "POST"
     ? path === "/Sessions/Playing" ? "start"
       : path === "/Sessions/Playing/Progress" ? "progress"
@@ -408,7 +473,8 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
     : null
 
   if (!system && !views && !userItems && !allItems && !userDetail && !itemDetail && !userDataRoute &&
-    !favorite && !played && !playbackInfo && !playbackKind) return notFound()
+    !favorite && !played && !playbackInfo && !videoStream && !videoDownload && !image && !subtitle &&
+    !playbackKind) return notFound()
 
   const principal = yield* principalFor(services, request, url)
   if (system) return json(serverInfo(services))
@@ -497,6 +563,49 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
     if (membership === null) return yield* Effect.fail(new EmbyNotFound())
     const info = yield* services.playback.getInfo(membership.item.id)
     return json(playbackInfoDto(info))
+  }
+
+  if (videoStream || videoDownload) {
+    if (services.playback.resolveVideoRedirect === undefined) return notFound()
+    const canonicalId = yield* pathSegment((videoStream?.[1] ?? videoDownload?.[1])!)
+    const mediaSourceId = url.searchParams.get("MediaSourceId")?.trim() || undefined
+    const location = yield* services.playback.resolveVideoRedirect({
+      canonicalId,
+      ...(mediaSourceId === undefined ? {} : { mediaSourceId })
+    })
+    return redirect(location)
+  }
+
+  if (image) {
+    if (services.playback.resolveImage === undefined) return notFound()
+    const canonicalId = yield* pathSegment(image[1]!)
+    const imageType = yield* pathSegment(image[2]!)
+    const decision = yield* services.playback.resolveImage({
+      canonicalId,
+      imageType,
+      ...(image[3] === undefined ? {} : { imageIndex: Number(image[3]) })
+    })
+    if (decision._tag === "Redirect") return redirect(decision.location)
+    return yield* serveRegisteredResource(decision.request, {
+      fetch: services.resourceFetch ?? globalThis.fetch,
+      ...(services.resourceCache === undefined ? {} : { cache: services.resourceCache }),
+      now: services.now
+    })
+  }
+
+  if (subtitle) {
+    if (services.playback.resolveSubtitle === undefined) return notFound()
+    const decision = yield* services.playback.resolveSubtitle({
+      canonicalId: yield* pathSegment(subtitle[1]!),
+      mediaSourceId: yield* pathSegment(subtitle[2]!),
+      streamIndex: Number(subtitle[3]),
+      format: (yield* pathSegment(subtitle[4]!)).toLowerCase()
+    })
+    if (decision._tag === "Redirect") return redirect(decision.location)
+    return yield* serveRegisteredResource(decision.request, {
+      fetch: services.resourceFetch ?? globalThis.fetch,
+      now: services.now
+    })
   }
 
   if (playbackKind) {
