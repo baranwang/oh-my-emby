@@ -23,6 +23,7 @@ import {
   UPSTREAM_LIST_DEADLINE_MS
 } from "./limits.js"
 import type { SourceMediaVersion, UpstreamServer } from "./model.js"
+import { makeObservability, type ObservabilityService } from "./observability.js"
 import { Repositories } from "./repositories.js"
 
 const MAX_REDIRECTS = 3
@@ -81,6 +82,7 @@ export class UpstreamClient extends Context.Service<UpstreamClient, UpstreamClie
 export interface UpstreamClientConfig {
   readonly fetch: typeof globalThis.fetch
   readonly destinationPolicy: DestinationPolicy
+  readonly observability?: ObservabilityService
   readonly timeoutMs?: number
 }
 
@@ -105,6 +107,21 @@ export const normalizeUpstreamBaseUrl = (value: string): string => {
   const url = normalizedBaseUrl(value)
   url.pathname = url.pathname.replace(/\/+$/, "") || "/"
   return url.href.replace(/\/$/, "")
+}
+
+const resolveApiUrl = (base: URL, path: string): URL => {
+  if (/^[a-z][a-z\d+.-]*:/i.test(path) || path.startsWith("//")) {
+    throw new InvalidUpstreamUrl()
+  }
+  const directory = new URL(base)
+  directory.pathname = `${directory.pathname.replace(/\/+$/, "")}/`
+  const url = new URL(path.replace(/^\//, ""), directory)
+  const basePath = base.pathname.replace(/\/+$/, "")
+  const prefix = basePath === "" ? "/" : `${basePath}/`
+  if (url.origin !== base.origin || (url.pathname !== basePath && !url.pathname.startsWith(prefix))) {
+    throw new InvalidUpstreamUrl()
+  }
+  return url
 }
 
 const isIpLiteral = (hostname: string): boolean => {
@@ -143,9 +160,7 @@ const validateDestination = (
     if (isIpLiteral(hostname) || isPrivateHostname(hostname)) {
       return Effect.fail(new DestinationRejected({ serverId: server.id }))
     }
-    return Effect.void
-  }
-  if (isPrivateHostname(hostname) || isIpLiteral(hostname)) {
+  } else if (isPrivateHostname(hostname) || isIpLiteral(hostname)) {
     if (resourcePolicy === "control" && url.origin !== normalizedBaseUrl(server.baseUrl).origin) {
       return Effect.fail(new DestinationRejected({ serverId: server.id }))
     }
@@ -229,6 +244,7 @@ export const makeUpstreamClientLayer = (
 ): Layer.Layer<UpstreamClient, never, Repositories> => Layer.effect(UpstreamClient, Effect.gen(function*() {
   const repositories = yield* Repositories
   const timeoutMs = config.timeoutMs ?? UPSTREAM_DETAIL_DEADLINE_MS
+  const observability = config.observability ?? makeObservability()
 
   const deadline = <A, E, R>(
     effect: Effect.Effect<A, E, R>,
@@ -260,15 +276,16 @@ export const makeUpstreamClientLayer = (
     server: UpstreamServer,
     request: UpstreamRequest,
     token: string | null,
-    transportRetry = true
+    transportRetry = true,
+    trace: { retried: boolean } = { retried: false }
   ): Effect.Effect<Response, UpstreamFailure> => Effect.gen(function*() {
     const base = yield* Effect.try({
       try: () => normalizedBaseUrl(server.baseUrl),
       catch: (error) => error instanceof InvalidUpstreamUrl ? error : new InvalidUpstreamUrl()
     })
     const url = yield* Effect.try({
-      try: () => new URL(request.path, `${base.href.replace(/\/$/, "")}/`),
-      catch: () => new InvalidUpstreamUrl()
+      try: () => resolveApiUrl(base, request.path),
+      catch: (error) => error instanceof InvalidUpstreamUrl ? error : new InvalidUpstreamUrl()
     })
     yield* validateDestination(url, server, config.destinationPolicy, request.resourcePolicy)
 
@@ -289,11 +306,13 @@ export const makeUpstreamClientLayer = (
         ? { method, headers, redirect: "manual" }
         : { method, headers, body: Uint8Array.from(body).buffer, redirect: "manual" }
       const response = yield* fetchOnce(server, current, init).pipe(
-        Effect.catchTag("UpstreamUnavailable", (failure) =>
-          transportRetry && request.method === "GET" && (request.resourcePolicy ?? "control") === "control"
-            ? fetchWithRedirects(server, request, token, false)
-            : Effect.fail(failure)
-        )
+        Effect.catchTag("UpstreamUnavailable", (failure) => {
+          if (transportRetry && request.method === "GET" && (request.resourcePolicy ?? "control") === "control") {
+            trace.retried = true
+            return fetchWithRedirects(server, request, token, false, trace)
+          }
+          return Effect.fail(failure)
+        })
       )
       if (!redirects.has(response.status)) return response
       if (redirectCount >= MAX_REDIRECTS) {
@@ -367,15 +386,23 @@ export const makeUpstreamClientLayer = (
   const request: UpstreamClientService["request"] = <A>(
     input: UpstreamRequest,
     schema: Schema.Schema<A>
-  ) => deadline(Effect.gen(function*() {
+  ) => {
+    const requestId = crypto.randomUUID()
+    const startedAtMs = Date.now()
+    const trace = { retried: false }
+    const route = /^[a-z][a-z\d+.-]*:/i.test(input.path) || input.path.startsWith("//")
+      ? "<invalid>"
+      : (input.path.split(/[?#]/, 1)[0] || "/")
+    const operation = deadline(Effect.gen(function*() {
     const server = yield* getServer(input.serverId)
     if (server.generation !== input.generation) {
       return yield* Effect.fail(new ObsoleteGeneration({ serverId: input.serverId }))
     }
-    let response = yield* fetchWithRedirects(server, input, server.accessToken)
-    if (response.status === 401 && server.password !== null) {
+    let response = yield* fetchWithRedirects(server, input, server.accessToken, true, trace)
+    if (response.status === 401 && input.method === "GET" && server.password !== null) {
+      trace.retried = true
       const refreshed = yield* authenticate(server)
-      response = yield* fetchWithRedirects(refreshed.server, input, refreshed.server.accessToken, false)
+      response = yield* fetchWithRedirects(refreshed.server, input, refreshed.server.accessToken, false, trace)
     }
     const decoded = yield* decodeResponse(response, input.serverId, schema)
     const current = yield* getServer(input.serverId)
@@ -383,9 +410,23 @@ export const makeUpstreamClientLayer = (
       return yield* Effect.fail(new ObsoleteGeneration({ serverId: input.serverId }))
     }
     return decoded
-  }), input.serverId, config.timeoutMs ?? (
-    input.path === "/Library/VirtualFolders" ? UPSTREAM_LIST_DEADLINE_MS : UPSTREAM_DETAIL_DEADLINE_MS
-  ))
+    }), input.serverId, config.timeoutMs ?? (
+      input.path === "/Library/VirtualFolders" ? UPSTREAM_LIST_DEADLINE_MS : UPSTREAM_DETAIL_DEADLINE_MS
+    ))
+    const record = (failureCategory: string) => observability.upstreamRequest({
+      requestId,
+      route,
+      serverId: input.serverId,
+      durationMs: Date.now() - startedAtMs,
+      cacheOutcome: "bypass",
+      retryOutcome: trace.retried ? (failureCategory === "none" ? "retried" : "failed") : "none",
+      failureCategory
+    })
+    return operation.pipe(
+      Effect.tap(() => record("none")),
+      Effect.tapError((error) => record(error._tag))
+    )
+  }
 
   const getServerIdentity: UpstreamClientService["getServerIdentity"] = (serverId) => deadline(Effect.gen(function*() {
     const server = yield* getServer(serverId)
@@ -403,6 +444,9 @@ export const makeUpstreamClientLayer = (
 
   const listSourceLibraries: UpstreamClientService["listSourceLibraries"] = (serverId) => Effect.gen(function*() {
     const server = yield* getServer(serverId)
+    if (!server.enabled || server.health !== "healthy" || server.verifiedBaseUrl === null) {
+      return yield* Effect.fail(new UpstreamUnavailable({ serverId }))
+    }
     const folders = yield* request({
       serverId,
       generation: server.generation,
@@ -432,6 +476,9 @@ export const makeUpstreamClientLayer = (
     const server = yield* getServer(details.serverId)
     if (server.generation !== version.serverGeneration) {
       return yield* Effect.fail(new ObsoleteGeneration({ serverId: server.id }))
+    }
+    if (!server.enabled || server.health !== "healthy" || server.verifiedBaseUrl === null) {
+      return yield* Effect.fail(new UpstreamUnavailable({ serverId: server.id }))
     }
     const url = yield* Effect.try({
       try: () => new URL(details.url as string),

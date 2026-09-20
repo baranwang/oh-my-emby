@@ -4,7 +4,7 @@ import {
   SourceLibraryView as SourceLibraryViewSchema,
   VirtualLibraryView as VirtualLibraryViewSchema
 } from "@oh-my-emby/contracts"
-import { Effect, Layer, Schema } from "effect"
+import { Effect, Layer, Schema, Semaphore } from "effect"
 
 import { OUTBOX_BATCH_SIZE } from "../../core/limits.js"
 import { AlreadyInitialized, AuthenticationChanged, RepositoryError } from "../../core/errors.js"
@@ -250,6 +250,7 @@ const userState = (row: UserStateRow): UserStateRecord => ({
 
 const makeRepositories = Effect.gen(function*() {
   const sql = yield* SqliteClient.SqliteClient
+  const createServerSemaphore = Semaphore.makeUnsafe(1)
   yield* sql.unsafe("PRAGMA foreign_keys = ON").pipe(Effect.orDie)
   const pragma = yield* sql.unsafe<{ foreign_keys: number }>("PRAGMA foreign_keys").pipe(Effect.orDie)
   if (pragma[0]?.foreign_keys !== 1) {
@@ -520,6 +521,40 @@ const makeRepositories = Effect.gen(function*() {
       Effect.flatMap((rows) => decode("getServer", () => rows[0] === undefined ? null : upstreamServer(rows[0])))
     )
 
+  const createServer: RepositoriesService["createServer"] = (input, limit) =>
+    createServerSemaphore.withPermit(database("createServer", sql.unsafe<ServerRow>(`
+      INSERT INTO upstream_servers (
+        id, catalog_namespace, verified_catalog_id, verified_base_url, generation, name, base_url,
+        username, password, access_token, access_token_expires_at_ms, user_agent,
+        enabled, health, last_success_at_ms, deleted_at_ms, created_at_ms, updated_at_ms
+      )
+      SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+      WHERE (SELECT count(*) FROM upstream_servers WHERE deleted_at_ms IS NULL) < ?
+      RETURNING *
+    `, [
+      input.id,
+      input.catalogNamespace,
+      input.verifiedCatalogId,
+      input.verifiedBaseUrl,
+      input.generation,
+      input.name,
+      input.baseUrl,
+      input.username,
+      input.password,
+      input.accessToken,
+      input.accessTokenExpiresAtMs,
+      input.userAgent,
+      input.enabled ? 1 : 0,
+      input.health,
+      input.lastSuccessAtMs,
+      input.deletedAtMs,
+      input.createdAtMs,
+      input.updatedAtMs,
+      limit
+    ])).pipe(
+      Effect.flatMap((rows) => decode("createServer", () => rows[0] === undefined ? null : upstreamServer(rows[0])))
+    ))
+
   const saveServer: RepositoriesService["saveServer"] = (input) =>
     database("saveServer", sql.withTransaction(Effect.gen(function*() {
       yield* sql.unsafe(`
@@ -712,18 +747,36 @@ const makeRepositories = Effect.gen(function*() {
       return Array.from(libraries.values())
     })))
 
-  const saveVirtualLibrary: RepositoriesService["saveVirtualLibrary"] = (input) =>
-    database("saveVirtualLibrary", sql.withTransaction(Effect.gen(function*() {
-      yield* sql.unsafe(`
+  const saveVirtualLibrary: RepositoriesService["saveVirtualLibrary"] = (input, serverFences) => {
+    if (serverFences.length === 0) return Effect.succeed(null)
+    return database("saveVirtualLibrary", sql.withTransaction(Effect.gen(function*() {
+      const eligibility = serverFences.map(() => `EXISTS(
+        SELECT 1 FROM upstream_servers us
+        WHERE us.id = ? AND us.generation = ? AND us.enabled = 1
+          AND us.deleted_at_ms IS NULL AND us.health = 'healthy'
+          AND us.verified_base_url IS NOT NULL
+      )`).join(" AND ")
+      const saved = yield* sql.unsafe<{ readonly id: string }>(`
         INSERT INTO virtual_libraries (
           id, name, media_type, enabled, created_at_ms, updated_at_ms
-        ) VALUES (?, ?, ?, ?, ?, ?)
+        ) SELECT ?, ?, ?, ?, ?, ?
+        WHERE ${eligibility}
         ON CONFLICT(id) DO UPDATE SET
           name = excluded.name,
           media_type = excluded.media_type,
           enabled = excluded.enabled,
           updated_at_ms = excluded.updated_at_ms
-      `, [input.id, input.name, input.mediaType, input.enabled ? 1 : 0, input.createdAtMs, input.updatedAtMs])
+        RETURNING id
+      `, [
+        input.id,
+        input.name,
+        input.mediaType,
+        input.enabled ? 1 : 0,
+        input.createdAtMs,
+        input.updatedAtMs,
+        ...serverFences.flatMap((fence) => [fence.serverId, fence.generation])
+      ])
+      if (saved[0] === undefined) return null
       yield* sql.unsafe("DELETE FROM library_sources WHERE virtual_library_id = ?", [input.id])
       for (const source of input.sources) {
         yield* sql.unsafe(`
@@ -743,6 +796,7 @@ const makeRepositories = Effect.gen(function*() {
       }
       return input
     })))
+  }
 
   const deleteVirtualLibrary: RepositoriesService["deleteVirtualLibrary"] = (id) =>
     database("deleteVirtualLibrary", sql.unsafe("DELETE FROM virtual_libraries WHERE id = ?", [id])).pipe(
@@ -1237,6 +1291,7 @@ const makeRepositories = Effect.gen(function*() {
     revokeAuthentication,
     listServers,
     getServer,
+    createServer,
     saveServer,
     saveServerConfiguration,
     saveServerResult,

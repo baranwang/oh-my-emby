@@ -21,6 +21,7 @@ import type {
   SaveServerCommand,
   SaveServerResultCommand,
   SaveVirtualLibraryCommand,
+  ServerEligibilityFence,
   SessionIssue,
   SessionRecord,
   StateWrite,
@@ -54,6 +55,10 @@ export interface RepositoriesService {
   readonly revokeAuthentication: (input: PasswordReplacement) => Effect.Effect<void, AuthError>
   readonly listServers: () => Effect.Effect<ReadonlyArray<UpstreamServer>, RepositoryError>
   readonly getServer: (id: string) => Effect.Effect<UpstreamServer | null, RepositoryError>
+  readonly createServer: (
+    input: SaveServerCommand,
+    limit: number
+  ) => Effect.Effect<UpstreamServer | null, RepositoryError>
   readonly saveServer: (input: SaveServerCommand) => Effect.Effect<UpstreamServer, RepositoryError>
   readonly saveServerConfiguration: (
     input: SaveServerCommand,
@@ -64,7 +69,10 @@ export interface RepositoriesService {
   ) => Effect.Effect<UpstreamServer | null, RepositoryError>
   readonly deleteServer: (id: string) => Effect.Effect<void, RepositoryError>
   readonly listVirtualLibraries: () => Effect.Effect<ReadonlyArray<VirtualLibrary>, RepositoryError>
-  readonly saveVirtualLibrary: (input: SaveVirtualLibraryCommand) => Effect.Effect<VirtualLibrary, RepositoryError>
+  readonly saveVirtualLibrary: (
+    input: SaveVirtualLibraryCommand,
+    serverFences: ReadonlyArray<ServerEligibilityFence>
+  ) => Effect.Effect<VirtualLibrary | null, RepositoryError>
   readonly deleteVirtualLibrary: (id: string) => Effect.Effect<void, RepositoryError>
   readonly isSourceEligible: (
     serverId: string,

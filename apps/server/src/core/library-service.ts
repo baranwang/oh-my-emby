@@ -8,7 +8,7 @@ import {
   type UpstreamFailure
 } from "./errors.js"
 import { MAX_CONFIGURED_UPSTREAMS } from "./limits.js"
-import type { LibrarySource, VirtualLibrary } from "./model.js"
+import type { LibrarySource, ServerEligibilityFence, VirtualLibrary } from "./model.js"
 import { Repositories } from "./repositories.js"
 import { UpstreamClient, type SourceLibrary } from "./upstream-client.js"
 
@@ -71,7 +71,10 @@ export const makeLibraryServiceLayer: Layer.Layer<LibraryService, never, Reposit
 
     const validateSources = (
       input: VirtualLibraryInput
-    ): Effect.Effect<ReadonlyArray<LibrarySource>, LibraryValidationFailed | RepositoryError | UpstreamFailure> =>
+    ): Effect.Effect<{
+      readonly sources: ReadonlyArray<LibrarySource>
+      readonly serverFences: ReadonlyArray<ServerEligibilityFence>
+    }, LibraryValidationFailed | RepositoryError | UpstreamFailure> =>
       Effect.gen(function*() {
         if (input.sources.length === 0 || !input.sources.some((source) => source.enabled)) {
           return yield* Effect.fail(new LibraryValidationFailed({ field: "sources" }))
@@ -88,11 +91,13 @@ export const makeLibraryServiceLayer: Layer.Layer<LibraryService, never, Reposit
         }
         const servers = yield* repositories.listServers()
         const discovered = new Map<string, SourceLibrary>()
+        const serverFences: Array<ServerEligibilityFence> = []
         for (const serverId of serverIds) {
           const server = servers.find((item) => item.id === serverId)
           if (
             server === undefined || !server.enabled || server.health !== "healthy" || server.verifiedBaseUrl === null
           ) return yield* Effect.fail(new LibraryValidationFailed({ field: "sources" }))
+          serverFences.push({ serverId: server.id, generation: server.generation })
           for (const source of yield* upstream.listSourceLibraries(serverId)) {
             discovered.set(`${serverId}\0${source.id}`, source)
           }
@@ -112,7 +117,7 @@ export const makeLibraryServiceLayer: Layer.Layer<LibraryService, never, Reposit
             enabled: binding.enabled
           })
         }
-        return sources
+        return { sources, serverFences }
       })
 
     const save = (
@@ -120,16 +125,18 @@ export const makeLibraryServiceLayer: Layer.Layer<LibraryService, never, Reposit
       createdAtMs: number,
       input: VirtualLibraryInput
     ) => Effect.gen(function*() {
-      const sources = yield* validateSources(input)
-      return toView(yield* repositories.saveVirtualLibrary({
+      const validated = yield* validateSources(input)
+      const saved = yield* repositories.saveVirtualLibrary({
         id,
         name: input.name,
         mediaType: input.mediaType,
         enabled: input.enabled,
-        sources,
+        sources: validated.sources,
         createdAtMs,
         updatedAtMs: Date.now()
-      }))
+      }, validated.serverFences)
+      if (saved === null) return yield* Effect.fail(new LibraryValidationFailed({ field: "sources" }))
+      return toView(saved)
     })
 
     const create: LibraryServiceApi["create"] = (input) => {

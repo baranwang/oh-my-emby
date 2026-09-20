@@ -134,7 +134,8 @@ const statusFor = (tag: string): number => {
     case "ForbiddenOrigin": return 403
     case "AlreadyInitialized": return 409
     case "ServerNotFound":
-    case "LibraryNotFound": return 404
+    case "LibraryNotFound":
+    case "UpstreamNotFound": return 404
     case "InvalidUpstreamUrl":
     case "LibraryValidationFailed": return 400
     case "CatalogIdentityMismatch":
@@ -157,7 +158,7 @@ const statusFor = (tag: string): number => {
   }
 }
 
-const publicFailure = (error: { readonly _tag?: string }): HttpServerResponse.HttpServerResponse => {
+export const publicFailure = (error: { readonly _tag?: string }): HttpServerResponse.HttpServerResponse => {
   const tag = error._tag ?? "RepositoryError"
   const serverId = "serverId" in error && typeof error.serverId === "string" ? error.serverId : "unknown"
   const body = tag === "AlreadyInitialized"
@@ -180,6 +181,8 @@ const publicFailure = (error: { readonly _tag?: string }): HttpServerResponse.Ht
       : "server_limit_exceeded" }
     : tag === "UpstreamRejected"
     ? { _tag: "UpstreamRejected", serverId, status: "status" in error && typeof error.status === "number" ? error.status : 502 }
+    : tag === "UpstreamNotFound"
+    ? { _tag: "UpstreamRejected", serverId, status: 404 }
     : tag === "UpstreamTimeout"
     ? { _tag: "Timeout" }
     : tag === "UpstreamUnavailable" || tag === "DestinationRejected" || tag === "RedirectLimitExceeded" ||

@@ -108,12 +108,10 @@ export const makeServerServiceLayer: Layer.Layer<ServerService, never, Repositor
     const get: ServerServiceApi["get"] = (serverId) => getRecord(serverId).pipe(Effect.map(toView))
 
     const create: ServerServiceApi["create"] = (input) => Effect.gen(function*() {
-      const servers = yield* repositories.listServers()
-      if (servers.length >= MAX_CONFIGURED_UPSTREAMS) return yield* Effect.fail(new ServerLimitExceeded())
       const id = crypto.randomUUID()
       const nowMs = Date.now()
       const baseUrl = normalizeUpstreamBaseUrl(input.baseUrl)
-      const saved = yield* repositories.saveServer({
+      const saved = yield* repositories.createServer({
         id: id as ServerView["id"],
         catalogNamespace: `catalog:${id}`,
         verifiedCatalogId: null,
@@ -132,7 +130,8 @@ export const makeServerServiceLayer: Layer.Layer<ServerService, never, Repositor
         deletedAtMs: null,
         createdAtMs: nowMs,
         updatedAtMs: nowMs
-      })
+      }, MAX_CONFIGURED_UPSTREAMS)
+      if (saved === null) return yield* Effect.fail(new ServerLimitExceeded())
       return toView(saved)
     })
 
@@ -142,18 +141,20 @@ export const makeServerServiceLayer: Layer.Layer<ServerService, never, Repositor
       const password = nextPassword(current.password, input.password)
       const authenticationChanged = baseUrl !== current.baseUrl ||
         input.username !== current.username || password !== current.password
+      const generationChanged = authenticationChanged || input.enabled !== current.enabled
       const saved = yield* repositories.saveServerConfiguration({
         ...current,
-        generation: authenticationChanged ? current.generation + 1 : current.generation,
+        generation: generationChanged ? current.generation + 1 : current.generation,
         name: input.name,
         baseUrl: baseUrl as ServerView["baseUrl"],
         username: input.username,
         password,
-        accessToken: authenticationChanged ? null : current.accessToken,
-        accessTokenExpiresAtMs: authenticationChanged ? null : current.accessTokenExpiresAtMs,
+        accessToken: generationChanged ? null : current.accessToken,
+        accessTokenExpiresAtMs: generationChanged ? null : current.accessTokenExpiresAtMs,
         userAgent: input.userAgent,
         enabled: input.enabled,
-        health: authenticationChanged ? "unknown" : current.health,
+        health: generationChanged ? "unknown" : current.health,
+        lastSuccessAtMs: generationChanged ? null : current.lastSuccessAtMs,
         updatedAtMs: Date.now()
       }, current.generation)
       if (saved === null) return yield* Effect.fail(new ObsoleteGeneration({ serverId }))

@@ -164,7 +164,10 @@ export const repositoryContract = (makeHarness: () => Promise<RepositoryHarness>
               enabled: true
             }
           ]
-        })
+        }, [
+          { serverId: "server-b", generation: 1 },
+          { serverId: "server-a", generation: 1 }
+        ])
 
         const sources = yield* repo.resolveEligibleSources("library-1")
         expect(sources.map((source) => source.serverId)).toEqual(["server-a", "server-b"])

@@ -56,7 +56,11 @@ describe("LibraryService", () => {
     await rm(directory, { recursive: true, force: true })
   })
 
-  const setup = async (servers: ReadonlyArray<UpstreamServer> = [server("server-1")]) => {
+  const setup = async (
+    servers: ReadonlyArray<UpstreamServer> = [server("server-1")],
+    discover: (serverId: string) => Effect.Effect<ReadonlyArray<(typeof discovered)[number]>> =
+      (serverId) => Effect.succeed(discovered.map((item) => ({ ...item, serverId: serverId as any })))
+  ) => {
     const repositories = makeSqliteRepositoriesLayer({ filename })
     await Effect.runPromise(Effect.gen(function*() {
       const repo = yield* Repositories
@@ -66,7 +70,7 @@ describe("LibraryService", () => {
       request: () => Effect.die("unused") as any,
       authenticate: () => Effect.die("unused") as any,
       getServerIdentity: () => Effect.die("unused") as any,
-      listSourceLibraries: (serverId) => Effect.succeed(discovered.map((item) => ({ ...item, serverId: serverId as any }))),
+      listSourceLibraries: discover,
       resolvePlayback: () => Effect.die("unused") as any
     }))
     const service = makeLibraryServiceLayer.pipe(Layer.provide(Layer.merge(repositories, upstream)))
@@ -192,5 +196,30 @@ describe("LibraryService", () => {
         sources: [{ serverId: "server-1" as any, sourceLibraryId: "movies" as any, enabled: true }]
       })
     }).pipe(Effect.provide(service)))).rejects.toMatchObject({ _tag: "LibraryValidationFailed" })
+  })
+
+  it("rejects a library save when a server changes during discovery", async () => {
+    const { service } = await setup([server("server-1")], (serverId) => Effect.sync(() => {
+      const database = new Database(filename)
+      database.run(`
+        UPDATE upstream_servers
+        SET generation = generation + 1, enabled = 0, health = 'unknown', access_token = NULL
+        WHERE id = ?
+      `, [serverId])
+      database.close()
+      return discovered.map((item) => ({ ...item, serverId: serverId as any }))
+    }))
+    await expect(Effect.runPromise(Effect.gen(function*() {
+      const libraries = yield* LibraryService
+      return yield* libraries.create({
+        name: "Movies",
+        mediaType: "movies",
+        enabled: true,
+        sources: [{ serverId: "server-1" as any, sourceLibraryId: "movies" as any, enabled: true }]
+      })
+    }).pipe(Effect.provide(service)))).rejects.toMatchObject({ _tag: "LibraryValidationFailed" })
+    const database = new Database(filename)
+    expect(database.query("SELECT count(*) AS count FROM virtual_libraries").get()).toEqual({ count: 0 })
+    database.close()
   })
 })

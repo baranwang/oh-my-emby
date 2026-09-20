@@ -106,6 +106,11 @@ export interface UpstreamServer extends Omit<ServerView, "hasPassword"> {
 
 export type SaveServerCommand = UpstreamServer
 
+export interface ServerEligibilityFence {
+  readonly serverId: UpstreamServer["id"]
+  readonly generation: number
+}
+
 export interface SaveServerResultCommand {
   readonly serverId: string
   readonly expectedGeneration: number

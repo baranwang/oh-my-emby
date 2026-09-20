@@ -6,6 +6,9 @@ import { join } from "node:path"
 import { Effect, Layer } from "effect"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
+import * as Dashboard from "../src/api/dashboard.js"
+import { UpstreamNotFound } from "../src/core/errors.js"
+import { Repositories } from "../src/core/repositories.js"
 import { ServerService, makeServerServiceLayer } from "../src/core/server-service.js"
 import { UpstreamClient, makeUpstreamClientLayer } from "../src/core/upstream-client.js"
 import { makeSqliteRepositoriesLayer } from "../src/platform/bun/sqlite-repositories.js"
@@ -66,6 +69,89 @@ describe("ServerService", () => {
       expect((yield* Effect.flip(service.persistResult(request, { health: "healthy" })))._tag)
         .toBe("ObsoleteGeneration")
     }).pipe(Effect.provide(layer(async () => Response.json({ Id: "catalog-id" })))))
+  })
+
+  it("increments generation and clears authentication and health when enabled changes", async () => {
+    await Effect.runPromise(Effect.gen(function*() {
+      const service = yield* ServerService
+      const created = yield* service.create(input)
+      const request = yield* service.beginRequest(created.id)
+      yield* service.persistResult(request, { accessToken: "cached-token", health: "healthy" })
+      const changed = yield* service.update(created.id, { ...input, enabled: false })
+      expect(changed.generation).toBe(2)
+      expect(changed.health).toBe("unknown")
+      const stored = yield* service.getRecord(created.id)
+      expect(stored.accessToken).toBeNull()
+      expect((yield* Effect.flip(service.persistResult(request, { health: "healthy" })))._tag)
+        .toBe("ObsoleteGeneration")
+    }).pipe(Effect.provide(layer(async () => Response.json({ Id: "catalog-id" })))))
+  })
+
+  it("enforces the ten-server ceiling atomically across concurrent creates", async () => {
+    const repositories = makeSqliteRepositoriesLayer({ filename })
+    const upstream = makeUpstreamClientLayer({
+      fetch: async () => Response.json({ Id: "unused" }),
+      destinationPolicy: { platform: "workers" }
+    }).pipe(Layer.provide(repositories))
+    const initialService = makeServerServiceLayer.pipe(Layer.provide(Layer.merge(repositories, upstream)))
+    await Effect.runPromise(Effect.gen(function*() {
+      const service = yield* ServerService
+      for (let index = 0; index < 9; index++) {
+        yield* service.create({ ...input, name: `Server ${index}` })
+      }
+    }).pipe(Effect.provide(initialService)))
+
+    let arrivals = 0
+    let gating = true
+    let release = () => undefined
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const gatedRepositories = Layer.effect(Repositories, Effect.gen(function*() {
+      const base = yield* Repositories
+      return Repositories.of({
+        ...base,
+        listServers: () => base.listServers().pipe(Effect.tap(() => gating
+          ? Effect.promise(() => {
+            arrivals++
+            if (arrivals === 2) release()
+            return gate
+          })
+          : Effect.void))
+      })
+    })).pipe(Layer.provide(repositories))
+    const gatedUpstream = makeUpstreamClientLayer({
+      fetch: async () => Response.json({ Id: "unused" }),
+      destinationPolicy: { platform: "workers" }
+    }).pipe(Layer.provide(gatedRepositories))
+    const concurrentService = makeServerServiceLayer.pipe(
+      Layer.provide(Layer.merge(gatedRepositories, gatedUpstream))
+    )
+    await Effect.runPromise(Effect.gen(function*() {
+      const service = yield* ServerService
+      const outcomes = yield* Effect.all([
+        service.create({ ...input, name: "Concurrent A" }).pipe(Effect.result),
+        service.create({ ...input, name: "Concurrent B" }).pipe(Effect.result)
+      ], { concurrency: "unbounded" })
+      gating = false
+      expect(outcomes.filter((outcome) => outcome._tag === "Success")).toHaveLength(1)
+      expect(outcomes.filter((outcome) =>
+        outcome._tag === "Failure" && outcome.failure._tag === "ServerLimitExceeded"
+      )).toHaveLength(1)
+      expect(yield* service.list()).toHaveLength(10)
+    }).pipe(Effect.provide(concurrentService)))
+  })
+
+  it("maps an upstream 404 to the public upstream rejection shape", () => {
+    const publicFailure = (Dashboard as any).publicFailure
+    expect(publicFailure).toBeTypeOf("function")
+    const response = publicFailure(new UpstreamNotFound({ serverId: "server-1" }))
+    expect(response.status).toBe(404)
+    expect(response.body._tag).toBe("Uint8Array")
+    if (response.body._tag !== "Uint8Array") throw new Error("expected encoded JSON response")
+    expect(JSON.parse(new TextDecoder().decode(response.body.body))).toEqual({
+      _tag: "UpstreamRejected",
+      serverId: "server-1",
+      status: 404
+    })
   })
 
   it("requires both the origin guard and dashboard authentication for control-plane mutations", async () => {

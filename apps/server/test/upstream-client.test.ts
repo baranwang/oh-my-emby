@@ -114,6 +114,45 @@ describe("UpstreamClient", () => {
     }
   })
 
+  it("keeps relative API paths under the configured base path and rejects absolute initial destinations", async () => {
+    const urls: Array<string> = []
+    await run(async (input, init) => {
+      urls.push(new Request(input, init).url)
+      return Response.json({ ok: true })
+    }, Effect.gen(function*() {
+      const client = yield* UpstreamClient
+      return yield* client.request({
+        serverId: "server-1",
+        generation: 1,
+        path: "/System/Info",
+        method: "GET"
+      }, JsonOk)
+    }), {
+      server: server({
+        baseUrl: "https://example.com/emby" as any,
+        verifiedBaseUrl: "https://example.com/emby"
+      })
+    })
+    expect(urls).toEqual(["https://example.com/emby/System/Info"])
+
+    for (const path of ["https://evil.example.net/steal", "//evil.example.net/steal"]) {
+      let called = false
+      await expect(run(async () => {
+        called = true
+        return Response.json({ ok: true })
+      }, Effect.gen(function*() {
+        const client = yield* UpstreamClient
+        return yield* client.request({
+          serverId: "server-1",
+          generation: 1,
+          path,
+          method: "GET"
+        }, JsonOk)
+      }))).rejects.toMatchObject({ _tag: "InvalidUpstreamUrl" })
+      expect(called).toBe(false)
+    }
+  })
+
   it.each([
     ["URL credentials", "https://user:pass@example.com", "InvalidUpstreamUrl"],
     ["unsupported schemes", "ftp://example.com", "InvalidUpstreamUrl"],
@@ -332,6 +371,24 @@ describe("UpstreamClient", () => {
     expect(stored.find((item) => item.id === "server-2")?.accessToken).toBe("token-2")
   })
 
+  it("does not refresh or replay a POST rejected with 401", async () => {
+    const calls: Array<Request> = []
+    await expect(run(async (input, init) => {
+      calls.push(new Request(input, init))
+      return new Response(null, { status: 401 })
+    }, Effect.gen(function*() {
+      const client = yield* UpstreamClient
+      return yield* client.request({
+        serverId: "server-1",
+        generation: 1,
+        path: "/state",
+        method: "POST",
+        body: new TextEncoder().encode("{}")
+      }, JsonOk)
+    }))).rejects.toMatchObject({ _tag: "UpstreamRejected", status: 401 })
+    expect(calls.map((request) => new URL(request.url).pathname)).toEqual(["/state"])
+  })
+
   it("retries one transient GET but never retries POST or explicit not-found", async () => {
     let attempts = 0
     await expect(run(async () => {
@@ -397,5 +454,68 @@ describe("UpstreamClient", () => {
       const client = yield* UpstreamClient
       return yield* client.resolvePlayback({ ...version, serverGeneration: 0 })
     }))).rejects.toMatchObject({ _tag: "ObsoleteGeneration" })
+  })
+
+  it("enforces registered resource origins on Workers", async () => {
+    const version = {
+      id: "version-1",
+      sourceItemId: "source-1",
+      serverGeneration: 1,
+      upstreamMediaSourceId: "media-1",
+      label: "CDN",
+      capabilities: {
+        serverId: "server-1",
+        url: "https://cdn.example.net/Videos/item/stream"
+      },
+      streams: [],
+      updatedAtMs: 1_000
+    }
+    await expect(run(async () => Response.json({ ok: true }), Effect.gen(function*() {
+      const client = yield* UpstreamClient
+      return yield* client.resolvePlayback(version)
+    }))).rejects.toMatchObject({ _tag: "DestinationRejected" })
+    await expect(run(async () => Response.json({ ok: true }), Effect.gen(function*() {
+      const client = yield* UpstreamClient
+      return yield* client.resolvePlayback(version)
+    }), {
+      policy: { platform: "workers", registeredResourceOrigins: ["https://cdn.example.net"] }
+    })).resolves.toMatchObject({ url: "https://cdn.example.net/Videos/item/stream" })
+  })
+
+  it.each([
+    ["disabled", { enabled: false }],
+    ["unhealthy", { health: "degraded" as const }],
+    ["unverified", { verifiedCatalogId: null, verifiedBaseUrl: null }]
+  ])("rejects playback from a %s server", async (_name, overrides) => {
+    const version = {
+      id: "version-1",
+      sourceItemId: "source-1",
+      serverGeneration: 1,
+      upstreamMediaSourceId: "media-1",
+      label: "Home",
+      capabilities: { serverId: "server-1", url: "https://example.com/Videos/item/stream" },
+      streams: [],
+      updatedAtMs: 1_000
+    }
+    await expect(run(async () => Response.json({ ok: true }), Effect.gen(function*() {
+      const client = yield* UpstreamClient
+      return yield* client.resolvePlayback(version)
+    }), { server: server(overrides) })).rejects.toMatchObject({ _tag: "UpstreamUnavailable" })
+  })
+
+  it.each([
+    ["disabled", { enabled: false }],
+    ["unhealthy", { health: "degraded" as const }],
+    ["unverified", { verifiedCatalogId: null, verifiedBaseUrl: null }]
+  ])("does not discover libraries from a %s server", async (_name, overrides) => {
+    let called = false
+    await expect(run(async () => {
+      called = true
+      return Response.json([])
+    }, Effect.gen(function*() {
+      const client = yield* UpstreamClient
+      return yield* client.listSourceLibraries("server-1")
+    }), { server: server(overrides) })).rejects.toMatchObject({ _tag: "UpstreamUnavailable" })
+    expect(called).toBe(false)
   })
 })
