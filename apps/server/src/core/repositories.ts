@@ -49,6 +49,14 @@ export interface MetadataProjection {
   readonly updatedAtMs: number
 }
 
+export interface DetailProjectionSuppression {
+  readonly canonicalId: string
+  readonly serverId: string
+  readonly serverGeneration: number
+  readonly sourceLibraryId: string
+  readonly observedAtMs: number
+}
+
 export interface CatalogItemRecord {
   readonly canonical: CanonicalItem
   readonly claims: ReadonlyArray<IdentityClaim>
@@ -134,6 +142,9 @@ export interface RepositoriesService {
   ) => Effect.Effect<MetadataProjection | null, RepositoryError>
   readonly writeMetadataProjection: (
     input: MetadataProjection
+  ) => Effect.Effect<void, RepositoryError>
+  readonly suppressDetailProjections: (
+    input: DetailProjectionSuppression
   ) => Effect.Effect<void, RepositoryError>
   readonly mergeCanonicalMetadata: (
     canonicalId: string,

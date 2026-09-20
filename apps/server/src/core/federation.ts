@@ -730,21 +730,13 @@ export const makeFederationLayer = (
         const incomplete = new Set<string>()
         yield* Effect.forEach(sources, (source) => Effect.gen(function*() {
           const negativeKey = `exact:${sourceKey(source)}:${claim.namespace}:${claim.value}`
-          const sourceItem = record?.sourceItems.find((item) =>
-            item.serverId === source.serverId &&
-            item.serverGeneration === source.serverGeneration &&
-            item.sourceLibraryId === source.sourceLibraryId
-          )
-          const suppressStaleVersions = (observedAtMs: number) => sourceItem
-            ? repositories.writeMetadataProjection({
-                sourceItemId: sourceItem.id,
-                projectionKey: "detail",
-                payload: { suppressed: true },
-                freshUntilMs: observedAtMs,
-                staleUntilMs: observedAtMs,
-                updatedAtMs: observedAtMs
-              })
-            : Effect.succeed(undefined)
+          const suppressStaleVersions = (observedAtMs: number) => repositories.suppressDetailProjections({
+            canonicalId: activeId,
+            serverId: source.serverId,
+            serverGeneration: source.serverGeneration,
+            sourceLibraryId: source.sourceLibraryId,
+            observedAtMs
+          })
           const cached = yield* repositories.readMetadataProjection(anchor.id, negativeKey)
           if (
             cached && cached.freshUntilMs > now() && jsonObject(cached.payload) &&

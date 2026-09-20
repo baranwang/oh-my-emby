@@ -531,4 +531,44 @@ describe("Federation", () => {
       expect(refreshed?.mediaVersions.map(({ label }) => label)).toEqual(visible ? ["A"] : [])
     }).pipe(Effect.provide(layer)))
   })
+
+  it.each([
+    ["transient", ["A", "B"]],
+    ["auth", []],
+    ["not-found", []],
+    ["invalid", []]
+  ] as const)("classifies %s refreshes across sibling detail projections", async (failure, expected) => {
+    let now = 1_000
+    let mode: "success" | typeof failure = "success"
+    const siblings = (withVersions: boolean) => [
+      item("copy-a", "A", {
+        ProviderIds: { Tmdb: "10" },
+        ...(withVersions ? { MediaSources: [{ Id: "source-a", Name: "A" }] } : {})
+      }),
+      item("copy-b", "B", {
+        ProviderIds: { Tmdb: "10" },
+        ...(withVersions ? { MediaSources: [{ Id: "source-b", Name: "B" }] } : {})
+      })
+    ]
+    const layer = await setup(1, (serverId, path) => {
+      if (!path.includes("AnyProviderIdEquals=")) {
+        return Effect.succeed({ Items: siblings(false), TotalRecordCount: 2 })
+      }
+      if (mode === "transient") return Effect.fail(new UpstreamUnavailable({ serverId }))
+      if (mode === "auth") return Effect.fail(new UpstreamRejected({ serverId, status: 401 }))
+      if (mode === "not-found") return Effect.fail(new UpstreamNotFound({ serverId }))
+      if (mode === "invalid") return Effect.succeed({ invalid: true })
+      return Effect.succeed({ Items: siblings(true), TotalRecordCount: 2 })
+    }, { now: () => now })
+
+    await Effect.runPromise(Effect.gen(function*() {
+      const federation = yield* Federation
+      const page = yield* federation.list(query())
+      expect((yield* federation.detail(page.items[0]!.id))?.mediaVersions.map(({ label }) => label)).toEqual(["A", "B"])
+      now += METADATA_FRESH_MS + 1
+      mode = failure
+      const refreshed = yield* federation.detail(page.items[0]!.id)
+      expect(refreshed?.mediaVersions.map(({ label }) => label)).toEqual(expected)
+    }).pipe(Effect.provide(layer)))
+  })
 })

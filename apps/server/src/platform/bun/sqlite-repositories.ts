@@ -45,6 +45,7 @@ import type {
 import {
   Repositories,
   type CatalogItemRecord,
+  type DetailProjectionSuppression,
   type MetadataProjection,
   type RepositoriesService
 } from "../../core/repositories.js"
@@ -1729,6 +1730,30 @@ const makeRepositories = Effect.gen(function*() {
       input.updatedAtMs
     ])).pipe(Effect.asVoid)
 
+  const suppressDetailProjections: RepositoriesService["suppressDetailProjections"] = (
+    input: DetailProjectionSuppression
+  ) => database("suppressDetailProjections", sql.unsafe(`
+    UPDATE source_metadata_cache
+    SET payload_json = ?, fresh_until_ms = ?, stale_until_ms = ?, updated_at_ms = ?
+    WHERE projection_key = 'detail'
+      AND source_item_id IN (
+        SELECT id FROM source_items
+        WHERE canonical_id = ?
+          AND server_id = ?
+          AND server_generation = ?
+          AND source_library_id = ?
+      )
+  `, [
+    canonicalJson({ suppressed: true }),
+    input.observedAtMs,
+    input.observedAtMs,
+    input.observedAtMs,
+    input.canonicalId,
+    input.serverId,
+    input.serverGeneration,
+    input.sourceLibraryId
+  ])).pipe(Effect.asVoid)
+
   const mergeCanonicalMetadata: RepositoriesService["mergeCanonicalMetadata"] = (
     canonicalId,
     sourceItemId,
@@ -2170,6 +2195,7 @@ const makeRepositories = Effect.gen(function*() {
     appendQueryGenerationItems,
     readMetadataProjection,
     writeMetadataProjection,
+    suppressDetailProjections,
     mergeCanonicalMetadata,
     readCatalogItems,
     resolveEligibleSourcesForCanonical,
