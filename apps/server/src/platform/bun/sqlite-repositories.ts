@@ -1,5 +1,10 @@
 import * as SqliteClient from "@effect/sql-sqlite-bun/SqliteClient"
-import { Effect, Layer } from "effect"
+import {
+  ServerView as ServerViewSchema,
+  SourceLibraryView as SourceLibraryViewSchema,
+  VirtualLibraryView as VirtualLibraryViewSchema
+} from "@oh-my-emby/contracts"
+import { Effect, Layer, Schema } from "effect"
 
 import { OUTBOX_BATCH_SIZE } from "../../core/limits.js"
 import { AlreadyInitialized, RepositoryError } from "../../core/errors.js"
@@ -20,6 +25,11 @@ import type {
   VirtualLibrary
 } from "../../core/model.js"
 import { Repositories, type RepositoriesService } from "../../core/repositories.js"
+
+const decodeServerId = Schema.decodeUnknownSync(ServerViewSchema.fields.id)
+const decodeSourceLibraryId = Schema.decodeUnknownSync(SourceLibraryViewSchema.fields.id)
+const decodeVirtualLibraryId = Schema.decodeUnknownSync(VirtualLibraryViewSchema.fields.id)
+const decodeHttpUrl = Schema.decodeUnknownSync(ServerViewSchema.fields.baseUrl)
 
 const failure = (operation: string, cause: unknown) => new RepositoryError({
   operation,
@@ -155,12 +165,12 @@ interface ServerRow {
 }
 
 const upstreamServer = (row: ServerRow): UpstreamServer => ({
-  id: row.id,
+  id: decodeServerId(row.id),
   catalogNamespace: row.catalog_namespace,
   verifiedCatalogId: row.verified_catalog_id,
   generation: integer(row.generation, "generation"),
   name: row.name,
-  baseUrl: row.base_url,
+  baseUrl: decodeHttpUrl(row.base_url),
   username: row.username,
   password: row.password,
   accessToken: row.access_token,
@@ -379,7 +389,7 @@ const makeRepositories = Effect.gen(function*() {
         let library = libraries.get(row.id)
         if (!library) {
           library = {
-            id: row.id,
+            id: decodeVirtualLibraryId(row.id),
             name: row.name,
             mediaType: mediaType(row.media_type),
             enabled: boolean(row.enabled, "enabled"),
@@ -391,8 +401,8 @@ const makeRepositories = Effect.gen(function*() {
         }
         if (row.server_id !== null && row.source_library_id !== null && row.source_library_name !== null) {
           library.sources.push({
-            serverId: row.server_id,
-            sourceLibraryId: row.source_library_id,
+            serverId: decodeServerId(row.server_id),
+            sourceLibraryId: decodeSourceLibraryId(row.source_library_id),
             sourceLibraryName: row.source_library_name,
             mediaType: mediaType(row.source_media_type),
             sourceOrder: integer(row.source_order, "source_order"),
@@ -488,9 +498,9 @@ const makeRepositories = Effect.gen(function*() {
         AND us.verified_catalog_id IS NOT NULL
       ORDER BY ls.source_order, ls.server_id, ls.source_library_id
     `, [libraryId])).pipe(Effect.flatMap((rows) => decode("resolveEligibleSources", () => rows.map((row): EligibleSource => ({
-      virtualLibraryId: row.virtual_library_id,
-      serverId: row.server_id,
-      sourceLibraryId: row.source_library_id,
+      virtualLibraryId: decodeVirtualLibraryId(row.virtual_library_id),
+      serverId: decodeServerId(row.server_id),
+      sourceLibraryId: decodeSourceLibraryId(row.source_library_id),
       sourceLibraryName: row.source_library_name,
       mediaType: mediaType(row.media_type),
       sourceOrder: integer(row.source_order, "source_order"),
@@ -498,7 +508,7 @@ const makeRepositories = Effect.gen(function*() {
       catalogNamespace: row.catalog_namespace,
       verifiedCatalogId: row.verified_catalog_id,
       serverGeneration: integer(row.generation, "generation"),
-      baseUrl: row.base_url,
+      baseUrl: decodeHttpUrl(row.base_url),
       username: row.username,
       password: row.password,
       accessToken: row.access_token,
@@ -826,6 +836,7 @@ const makeRepositories = Effect.gen(function*() {
     database("acknowledgeOutboxTarget", sql.unsafe<{ target_id: string }>(`
       UPDATE state_outbox
       SET delivered_revision = desired_revision,
+          uncertain_since_ms = NULL,
           lease_owner = NULL,
           lease_expires_at_ms = NULL,
           dispatched_at_ms = ?,

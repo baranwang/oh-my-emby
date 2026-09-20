@@ -240,6 +240,45 @@ export const repositoryContract = (makeHarness: () => Promise<RepositoryHarness>
       }).pipe(Effect.provide(harness.layer)))
     })
 
+    it("stops claiming an uncertain target after its guarded retry is acknowledged", async () => {
+      await harness.seedCanonicalWithEligibleSources(canonicalFixture)
+      await Effect.runPromise(Effect.gen(function*() {
+        const repo = yield* Repositories
+        yield* repo.writeUserStateAndTargets(stateFixture)
+        const [first] = yield* repo.claimOutboxTargets({
+          nowMs: 3_000,
+          leaseOwner: "worker-1",
+          leaseMs: 60_000,
+          limit: 50
+        })
+        expect(first).toBeDefined()
+        yield* repo.markOutboxUncertain({
+          targetId: first!.targetId,
+          leaseOwner: first!.leaseOwner,
+          uncertainAtMs: 3_500
+        })
+        const [retry] = yield* repo.claimOutboxTargets({
+          nowMs: 4_000,
+          leaseOwner: "worker-2",
+          leaseMs: 60_000,
+          limit: 50
+        })
+        expect(retry).toBeDefined()
+        expect(yield* repo.acknowledgeOutboxTarget({
+          targetId: retry!.targetId,
+          desiredRevision: retry!.desiredRevision,
+          leaseOwner: retry!.leaseOwner,
+          acknowledgedAtMs: 4_500
+        })).toBe(true)
+        expect(yield* repo.claimOutboxTargets({
+          nowMs: 5_000,
+          leaseOwner: "worker-3",
+          leaseMs: 60_000,
+          limit: 50
+        })).toEqual([])
+      }).pipe(Effect.provide(harness.layer)))
+    })
+
     it("rejects malformed persisted outbox payloads", async () => {
       await harness.seedCanonicalWithEligibleSources(canonicalFixture)
       await Effect.runPromise(Effect.gen(function*() {

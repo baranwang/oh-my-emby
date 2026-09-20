@@ -1,3 +1,5 @@
+import type { ServerView, SourceLibraryView, VirtualLibraryView } from "@oh-my-emby/contracts"
+
 export type JsonValue =
   | null
   | boolean
@@ -57,44 +59,28 @@ export interface PasswordReplacement {
   readonly updatedAtMs: number
 }
 
-export type ServerHealth = "unknown" | "healthy" | "degraded"
+export type ServerHealth = ServerView["health"]
 
-export interface UpstreamServer {
-  readonly id: string
+export interface UpstreamServer extends Omit<ServerView, "hasPassword"> {
   readonly catalogNamespace: string
-  readonly verifiedCatalogId: string | null
-  readonly generation: number
-  readonly name: string
-  readonly baseUrl: string
-  readonly username: string
   readonly password: string | null
   readonly accessToken: string | null
   readonly accessTokenExpiresAtMs: number | null
-  readonly userAgent: string
-  readonly enabled: boolean
-  readonly health: ServerHealth
   readonly lastSuccessAtMs: number | null
   readonly createdAtMs: number
   readonly updatedAtMs: number
 }
 
 export type SaveServerCommand = UpstreamServer
-export type MediaType = "movies" | "series"
+export type MediaType = SourceLibraryView["mediaType"]
+type ContractLibrarySource = VirtualLibraryView["sources"][number]
 
-export interface LibrarySource {
-  readonly serverId: string
-  readonly sourceLibraryId: string
-  readonly sourceLibraryName: string
+export interface LibrarySource extends ContractLibrarySource {
   readonly mediaType: MediaType
   readonly sourceOrder: number
-  readonly enabled: boolean
 }
 
-export interface VirtualLibrary {
-  readonly id: string
-  readonly name: string
-  readonly mediaType: MediaType
-  readonly enabled: boolean
+export interface VirtualLibrary extends Omit<VirtualLibraryView, "sources"> {
   readonly createdAtMs: number
   readonly updatedAtMs: number
   readonly sources: ReadonlyArray<LibrarySource>
@@ -102,17 +88,14 @@ export interface VirtualLibrary {
 
 export type SaveVirtualLibraryCommand = VirtualLibrary
 
-export interface EligibleSource extends LibrarySource {
-  readonly virtualLibraryId: string
+export interface EligibleSource extends LibrarySource, Pick<ServerView, "baseUrl" | "username" | "userAgent"> {
+  readonly virtualLibraryId: VirtualLibraryView["id"]
   readonly catalogNamespace: string
-  readonly verifiedCatalogId: string
-  readonly serverGeneration: number
-  readonly baseUrl: string
-  readonly username: string
+  readonly verifiedCatalogId: NonNullable<ServerView["verifiedCatalogId"]>
+  readonly serverGeneration: ServerView["generation"]
   readonly password: string | null
   readonly accessToken: string | null
   readonly accessTokenExpiresAtMs: number | null
-  readonly userAgent: string
 }
 
 export interface CanonicalItem {
