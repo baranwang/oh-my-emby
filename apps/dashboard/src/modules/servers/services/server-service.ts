@@ -50,5 +50,11 @@ export const deleteServer = async (id: ServerId, queryClient: QueryClient) => {
   await queryClient.invalidateQueries({ queryKey: queryKeys.servers })
 }
 
-export const testServerConnection = (id: ServerId, queryClient: QueryClient) =>
-  runProtected(apiClient.servers.testServerConnection({ params: { id } }), queryClient)
+export const testServerConnection = async (id: ServerId, queryClient: QueryClient) => {
+  const result = await runProtected(apiClient.servers.testServerConnection({ params: { id } }), queryClient)
+  await Promise.all([
+    queryClient.invalidateQueries({ queryKey: queryKeys.server(id) }),
+    queryClient.invalidateQueries({ queryKey: queryKeys.servers })
+  ])
+  return result
+}

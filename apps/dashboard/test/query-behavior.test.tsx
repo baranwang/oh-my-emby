@@ -11,6 +11,7 @@ import {
   createServer,
   serverHealthRefetchInterval,
   serverLibrariesQueryOptions,
+  testServerConnection,
   updateServer
 } from "../src/modules/servers/services/server-service.js"
 import { useServerHealth } from "../src/modules/servers/hooks/use-servers.js"
@@ -121,6 +122,18 @@ describe("server query behavior", () => {
 
     expect(sources).toEqual([expect.objectContaining({ id: "source-1", name: "Movies" })])
     expect(fetch).toHaveBeenCalledOnce()
+  })
+
+  it("refreshes the server family after a successful connection test", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => json({ reachable: true, catalogId: "catalog-1" })))
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries").mockResolvedValue()
+
+    await testServerConnection("server-1", queryClient)
+
+    expect(invalidate).toHaveBeenCalledTimes(2)
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: queryKeys.server("server-1") })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: queryKeys.servers })
   })
 
   it("invalidates only the created server list without optimistic writes", async () => {
