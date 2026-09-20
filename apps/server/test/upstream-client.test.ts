@@ -31,6 +31,7 @@ const server = (overrides: Partial<UpstreamServer> = {}): UpstreamServer => ({
   password: "password",
   accessToken: "token-1",
   accessTokenExpiresAtMs: null,
+  upstreamUserId: "upstream-user-id",
   userAgent: "Configured-Agent/1",
   enabled: true,
   health: "healthy",
@@ -369,7 +370,11 @@ describe("UpstreamClient", () => {
       const request = new Request(input, init)
       calls.push(request)
       if (request.url.endsWith("/Users/AuthenticateByName")) {
-        return Response.json({ AccessToken: "token-1-new", ServerId: "catalog-id" })
+        return Response.json({
+          AccessToken: "token-1-new",
+          ServerId: "catalog-id",
+          User: { Id: "upstream-user-id" }
+        })
       }
       return request.headers.get("x-emby-token") === "token-1-new"
         ? Response.json({ ok: true })
@@ -394,7 +399,21 @@ describe("UpstreamClient", () => {
       return yield* repo.listServers()
     }).pipe(Effect.provide(repositories)))
     expect(stored.find((item) => item.id === "server-1")?.accessToken).toBe("token-1-new")
+    expect(stored.find((item) => item.id === "server-1")?.upstreamUserId).toBe("upstream-user-id")
     expect(stored.find((item) => item.id === "server-2")?.accessToken).toBe("token-2")
+  })
+
+  it("accepts an empty success response for a void upstream operation", async () => {
+    await expect(run(async () => new Response(null, { status: 200 }), Effect.gen(function*() {
+      const client = yield* UpstreamClient
+      return yield* client.request({
+        serverId: "server-1",
+        generation: 1,
+        path: "/state",
+        method: "POST",
+        body: new TextEncoder().encode("{}")
+      }, Schema.Void)
+    }))).resolves.toBeUndefined()
   })
 
   it("does not refresh or replay a POST rejected with 401", async () => {
@@ -413,6 +432,38 @@ describe("UpstreamClient", () => {
       }, JsonOk)
     }))).rejects.toMatchObject({ _tag: "UpstreamRejected", status: 401 })
     expect(calls.map((request) => new URL(request.url).pathname)).toEqual(["/state"])
+  })
+
+  it("refreshes and replays an explicitly replay-safe POST rejected with 401", async () => {
+    const calls: Array<Request> = []
+    await expect(run(async (input, init) => {
+      const request = new Request(input, init)
+      calls.push(request)
+      if (request.url.endsWith("/Users/AuthenticateByName")) {
+        return Response.json({
+          AccessToken: "token-1-new",
+          User: { Id: "upstream-user-id" }
+        })
+      }
+      return request.headers.get("x-emby-token") === "token-1-new"
+        ? new Response(null, { status: 200 })
+        : new Response(null, { status: 401 })
+    }, Effect.gen(function*() {
+      const client = yield* UpstreamClient
+      return yield* client.request({
+        serverId: "server-1",
+        generation: 1,
+        path: "/state",
+        method: "POST",
+        body: new TextEncoder().encode("{}"),
+        replaySafe: true
+      }, Schema.Void)
+    }))).resolves.toBeUndefined()
+    expect(calls.map((request) => new URL(request.url).pathname)).toEqual([
+      "/state",
+      "/Users/AuthenticateByName",
+      "/state"
+    ])
   })
 
   it("retries one transient GET but never retries POST or explicit not-found", async () => {

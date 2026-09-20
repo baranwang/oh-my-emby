@@ -57,7 +57,11 @@ describe("ServerService", () => {
       const service = yield* ServerService
       const created = yield* service.create(input)
       const request = yield* service.beginRequest(created.id)
-      yield* service.persistResult(request, { accessToken: "cached-token", health: "healthy" })
+      yield* service.persistResult(request, {
+        accessToken: "cached-token",
+        upstreamUserId: "upstream-user-id",
+        health: "healthy"
+      })
       const changed = yield* service.update(created.id, {
         ...input,
         username: "bob",
@@ -66,6 +70,7 @@ describe("ServerService", () => {
       expect(changed.generation).toBe(2)
       const stored = yield* service.getRecord(created.id)
       expect(stored.accessToken).toBeNull()
+      expect(stored.upstreamUserId).toBeNull()
       expect((yield* Effect.flip(service.persistResult(request, { health: "healthy" })))._tag)
         .toBe("ObsoleteGeneration")
     }).pipe(Effect.provide(layer(async () => Response.json({ Id: "catalog-id" })))))
@@ -76,12 +81,17 @@ describe("ServerService", () => {
       const service = yield* ServerService
       const created = yield* service.create(input)
       const request = yield* service.beginRequest(created.id)
-      yield* service.persistResult(request, { accessToken: "cached-token", health: "healthy" })
+      yield* service.persistResult(request, {
+        accessToken: "cached-token",
+        upstreamUserId: "upstream-user-id",
+        health: "healthy"
+      })
       const changed = yield* service.update(created.id, { ...input, enabled: false })
       expect(changed.generation).toBe(2)
       expect(changed.health).toBe("unknown")
       const stored = yield* service.getRecord(created.id)
       expect(stored.accessToken).toBeNull()
+      expect(stored.upstreamUserId).toBeNull()
       expect((yield* Effect.flip(service.persistResult(request, { health: "healthy" })))._tag)
         .toBe("ObsoleteGeneration")
     }).pipe(Effect.provide(layer(async () => Response.json({ Id: "catalog-id" })))))
@@ -194,7 +204,7 @@ describe("ServerService", () => {
       const request = new Request(input, init)
       seen.push(request.url)
       if (request.url.endsWith("/Users/AuthenticateByName")) {
-        return Response.json({ AccessToken: "token" })
+        return Response.json({ AccessToken: "token", User: { Id: "upstream-user-id" } })
       }
       return Response.json({ Id: request.url.includes("two.example.com") ? "different-id" : "stable-id" })
     }
@@ -220,7 +230,7 @@ describe("ServerService", () => {
     }).pipe(Effect.provide(layer(async (input) => {
       const url = new Request(input).url
       return url.endsWith("/Users/AuthenticateByName")
-        ? Response.json({ AccessToken: "token" })
+        ? Response.json({ AccessToken: "token", User: { Id: "upstream-user-id" } })
         : Response.json({ ServerName: "No stable ID" })
     }))))
   })
@@ -230,7 +240,7 @@ describe("ServerService", () => {
     const fetch: typeof globalThis.fetch = async (request) => {
       const url = new Request(request).url
       if (url.endsWith("/Users/AuthenticateByName")) {
-        return Response.json({ AccessToken: "token" })
+        return Response.json({ AccessToken: "token", User: { Id: "upstream-user-id" } })
       }
       if (url.endsWith("/Library/VirtualFolders")) {
         return Response.json([{ ItemId: "library-stable", Name: name, CollectionType: "movies" }])

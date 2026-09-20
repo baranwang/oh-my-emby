@@ -25,6 +25,7 @@ const server = (id: string, overrides: Partial<UpstreamServer> = {}): UpstreamSe
   password: "secret",
   accessToken: "token",
   accessTokenExpiresAtMs: null,
+  upstreamUserId: `${id}-user`,
   userAgent: "Agent/1",
   enabled: true,
   health: "healthy",

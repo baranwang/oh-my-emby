@@ -23,6 +23,7 @@ CREATE TABLE upstream_servers (
   password TEXT,
   access_token TEXT,
   access_token_expires_at_ms INTEGER,
+  upstream_user_id TEXT,
   user_agent TEXT NOT NULL,
   enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
   health TEXT NOT NULL CHECK (health IN ('unknown', 'healthy', 'degraded')),
@@ -195,6 +196,8 @@ CREATE TABLE state_outbox (
   dispatched_at_ms INTEGER,
   uncertain_since_ms INTEGER,
   permanent_failure_code TEXT,
+  last_failure_code TEXT,
+  last_failure_at_ms INTEGER,
   eligible INTEGER NOT NULL CHECK (eligible IN (0, 1)),
   updated_at_ms INTEGER NOT NULL
 ) STRICT;
@@ -208,6 +211,11 @@ CREATE TABLE playback_sessions (
   last_position_ticks INTEGER NOT NULL CHECK (last_position_ticks >= 0),
   stop_applied INTEGER NOT NULL CHECK (stop_applied IN (0, 1)),
   state_revision INTEGER NOT NULL CHECK (state_revision > 0)
+) STRICT;
+
+CREATE TABLE maintenance_status (
+  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+  last_run_at_ms INTEGER NOT NULL
 ) STRICT;
 
 CREATE TABLE schema_migrations (

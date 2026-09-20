@@ -1,3 +1,4 @@
+import type { OutboxFailureView, SystemStatusView } from "@oh-my-emby/contracts"
 import { Context, type Effect } from "effect"
 
 import type { AuthError, ClaimError, IdentityFailure, RepositoryError } from "./errors.js"
@@ -17,8 +18,11 @@ import type {
   MaintenanceResult,
   OutboxAcknowledgement,
   OutboxClaim,
+  OutboxDispatch,
+  OutboxFailureUpdate,
   OutboxUncertainty,
   PasswordReplacement,
+  PlaybackEvent,
   QueryGeneration,
   QueryGenerationAppend,
   QueryGenerationItem,
@@ -165,10 +169,17 @@ export interface RepositoriesService {
   /** Called by the local-state service after a relevant state write commits. */
   readonly invalidateStateDependentQueryGenerations: () => Effect.Effect<void, RepositoryError>
   readonly writeUserStateAndTargets: (input: StateWrite) => Effect.Effect<UserStateRecord, RepositoryError>
+  readonly recordPlaybackEventAndTargets: (
+    input: PlaybackEvent
+  ) => Effect.Effect<UserStateRecord | null, RepositoryError>
   readonly claimOutboxTargets: (input: ClaimRequest) => Effect.Effect<ReadonlyArray<OutboxClaim>, RepositoryError>
+  readonly markOutboxDispatched: (input: OutboxDispatch) => Effect.Effect<boolean, RepositoryError>
   readonly acknowledgeOutboxTarget: (input: OutboxAcknowledgement) => Effect.Effect<boolean, RepositoryError>
   readonly markOutboxUncertain: (input: OutboxUncertainty) => Effect.Effect<void, RepositoryError>
+  readonly recordOutboxFailure: (input: OutboxFailureUpdate) => Effect.Effect<boolean, RepositoryError>
   readonly runMaintenanceBatch: (nowMs: number) => Effect.Effect<MaintenanceResult, RepositoryError>
+  readonly readSystemStatus: () => Effect.Effect<SystemStatusView, RepositoryError>
+  readonly listOutboxFailures: () => Effect.Effect<ReadonlyArray<OutboxFailureView>, RepositoryError>
 }
 
 export class Repositories extends Context.Service<Repositories, RepositoriesService>()(

@@ -42,6 +42,7 @@ export interface UpstreamRequest {
   readonly path: string
   readonly method: "GET" | "POST" | "DELETE"
   readonly body?: Uint8Array
+  readonly replaySafe?: boolean
   readonly resourcePolicy?: "control" | "registered-resource"
 }
 
@@ -200,7 +201,7 @@ const readBoundedJson = (
   if (declared !== null && Number(declared) > MAX_CONTROL_RESPONSE_BYTES) {
     return yield* Effect.fail(new ResponseTooLarge({ serverId }))
   }
-  if (response.body === null) return yield* Effect.fail(new UpstreamInvalidResponse({ serverId }))
+  if (response.body === null) return undefined
   const reader = response.body.getReader()
   const chunks: Array<Uint8Array> = []
   let size = 0
@@ -227,6 +228,7 @@ const readBoundedJson = (
     bytes.set(chunk, offset)
     offset += chunk.byteLength
   }
+  if (size === 0) return undefined
   return yield* Effect.try({
     try: () => JSON.parse(utf8.decode(bytes)) as unknown,
     catch: () => new UpstreamInvalidResponse({ serverId })
@@ -235,7 +237,8 @@ const readBoundedJson = (
 
 const AuthenticationResponse = Schema.Struct({
   AccessToken: Schema.String,
-  ServerId: Schema.optional(Schema.String)
+  ServerId: Schema.optional(Schema.String),
+  User: Schema.Struct({ Id: Schema.String })
 })
 
 const PublicSystemInfo = Schema.Struct({
@@ -383,6 +386,7 @@ export const makeUpstreamClientLayer = (
       expectedGeneration: server.generation,
       accessToken: authenticated.AccessToken,
       accessTokenExpiresAtMs: null,
+      upstreamUserId: authenticated.User.Id,
       updatedAtMs: Date.now()
     })
     if (saved === null) return yield* Effect.fail(new ObsoleteGeneration({ serverId: server.id }))
@@ -408,7 +412,7 @@ export const makeUpstreamClientLayer = (
       return yield* Effect.fail(new ObsoleteGeneration({ serverId: input.serverId }))
     }
     let response = yield* fetchWithRedirects(server, input, server.accessToken, true, trace)
-    if (response.status === 401 && input.method === "GET" && server.password !== null) {
+    if (response.status === 401 && (input.method === "GET" || input.replaySafe === true) && server.password !== null) {
       trace.retried = true
       const refreshed = yield* authenticate(server)
       response = yield* fetchWithRedirects(refreshed.server, input, refreshed.server.accessToken, false, trace)

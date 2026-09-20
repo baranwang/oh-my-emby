@@ -6,7 +6,13 @@ import {
 } from "@oh-my-emby/contracts"
 import { Effect, Layer, Schema, Semaphore } from "effect"
 
-import { DB_BATCH_SIZE, OUTBOX_BATCH_SIZE } from "../../core/limits.js"
+import {
+  AUTH_RATE_WINDOW_MS,
+  DB_BATCH_SIZE,
+  OUTBOX_BATCH_SIZE,
+  OUTBOX_LEASE_MS,
+  UNCERTAINTY_REAPPLY_MS
+} from "../../core/limits.js"
 import {
   AlreadyInitialized,
   AuthenticationChanged,
@@ -249,6 +255,7 @@ interface ServerRow {
   readonly password: string | null
   readonly access_token: string | null
   readonly access_token_expires_at_ms: unknown | null
+  readonly upstream_user_id: string | null
   readonly user_agent: string
   readonly enabled: unknown
   readonly health: unknown
@@ -273,6 +280,7 @@ const upstreamServer = (row: ServerRow): UpstreamServer => ({
   accessTokenExpiresAtMs: row.access_token_expires_at_ms === null
     ? null
     : integer(row.access_token_expires_at_ms, "access_token_expires_at_ms"),
+  upstreamUserId: row.upstream_user_id,
   userAgent: row.user_agent,
   enabled: boolean(row.enabled, "enabled"),
   health: health(row.health),
@@ -675,10 +683,10 @@ const makeRepositories = Effect.gen(function*() {
     createServerSemaphore.withPermit(database("createServer", sql.unsafe<ServerRow>(`
       INSERT INTO upstream_servers (
         id, catalog_namespace, verified_catalog_id, verified_base_url, generation, name, base_url,
-        username, password, access_token, access_token_expires_at_ms, user_agent,
+        username, password, access_token, access_token_expires_at_ms, upstream_user_id, user_agent,
         enabled, health, last_success_at_ms, deleted_at_ms, created_at_ms, updated_at_ms
       )
-      SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+      SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
       WHERE (SELECT count(*) FROM upstream_servers WHERE deleted_at_ms IS NULL) < ?
       RETURNING *
     `, [
@@ -693,6 +701,7 @@ const makeRepositories = Effect.gen(function*() {
       input.password,
       input.accessToken,
       input.accessTokenExpiresAtMs,
+      input.upstreamUserId,
       input.userAgent,
       input.enabled ? 1 : 0,
       input.health,
@@ -710,9 +719,9 @@ const makeRepositories = Effect.gen(function*() {
       yield* sql.unsafe(`
         INSERT INTO upstream_servers (
           id, catalog_namespace, verified_catalog_id, verified_base_url, generation, name, base_url,
-          username, password, access_token, access_token_expires_at_ms, user_agent,
+          username, password, access_token, access_token_expires_at_ms, upstream_user_id, user_agent,
           enabled, health, last_success_at_ms, deleted_at_ms, created_at_ms, updated_at_ms
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           catalog_namespace = excluded.catalog_namespace,
           verified_catalog_id = excluded.verified_catalog_id,
@@ -724,6 +733,7 @@ const makeRepositories = Effect.gen(function*() {
           password = excluded.password,
           access_token = excluded.access_token,
           access_token_expires_at_ms = excluded.access_token_expires_at_ms,
+          upstream_user_id = excluded.upstream_user_id,
           user_agent = excluded.user_agent,
           enabled = excluded.enabled,
           health = excluded.health,
@@ -742,6 +752,7 @@ const makeRepositories = Effect.gen(function*() {
         input.password,
         input.accessToken,
         input.accessTokenExpiresAtMs,
+        input.upstreamUserId,
         input.userAgent,
         input.enabled ? 1 : 0,
         input.health,
@@ -768,6 +779,9 @@ const makeRepositories = Effect.gen(function*() {
         accessTokenExpiresAtMs: input.accessTokenExpiresAtMs === undefined
           ? current.accessTokenExpiresAtMs
           : input.accessTokenExpiresAtMs,
+        upstreamUserId: input.upstreamUserId === undefined
+          ? current.upstreamUserId
+          : input.upstreamUserId,
         verifiedCatalogId: input.verifiedCatalogId === undefined
           ? current.verifiedCatalogId
           : input.verifiedCatalogId,
@@ -783,7 +797,7 @@ const makeRepositories = Effect.gen(function*() {
       const saved = yield* sql.unsafe<ServerRow>(`
         UPDATE upstream_servers SET
           verified_catalog_id = ?, verified_base_url = ?, access_token = ?,
-          access_token_expires_at_ms = ?, health = ?, last_success_at_ms = ?, updated_at_ms = ?
+          access_token_expires_at_ms = ?, upstream_user_id = ?, health = ?, last_success_at_ms = ?, updated_at_ms = ?
         WHERE id = ? AND generation = ?
         RETURNING *
       `, [
@@ -791,6 +805,7 @@ const makeRepositories = Effect.gen(function*() {
         updated.verifiedBaseUrl,
         updated.accessToken,
         updated.accessTokenExpiresAtMs,
+        updated.upstreamUserId,
         updated.health,
         updated.lastSuccessAtMs,
         updated.updatedAtMs,
@@ -805,7 +820,7 @@ const makeRepositories = Effect.gen(function*() {
       const rows = yield* sql.unsafe<ServerRow>(`
         UPDATE upstream_servers SET
           verified_catalog_id = ?, verified_base_url = ?, generation = ?, name = ?, base_url = ?,
-          username = ?, password = ?, access_token = ?, access_token_expires_at_ms = ?, user_agent = ?,
+          username = ?, password = ?, access_token = ?, access_token_expires_at_ms = ?, upstream_user_id = ?, user_agent = ?,
           enabled = ?, health = ?, last_success_at_ms = ?, updated_at_ms = ?
         WHERE id = ? AND generation = ?
         RETURNING *
@@ -819,6 +834,7 @@ const makeRepositories = Effect.gen(function*() {
         input.password,
         input.accessToken,
         input.accessTokenExpiresAtMs,
+        input.upstreamUserId,
         input.userAgent,
         input.enabled ? 1 : 0,
         input.health,
@@ -834,7 +850,7 @@ const makeRepositories = Effect.gen(function*() {
     database("deleteServer", sql.unsafe(`
       UPDATE upstream_servers SET
         enabled = 0, health = 'unknown', generation = generation + 1,
-        access_token = NULL, access_token_expires_at_ms = NULL,
+        access_token = NULL, access_token_expires_at_ms = NULL, upstream_user_id = NULL,
         deleted_at_ms = ?, updated_at_ms = ?
       WHERE id = ? AND deleted_at_ms IS NULL
     `, [Date.now(), Date.now(), id])).pipe(Effect.asVoid)
@@ -1088,6 +1104,174 @@ const makeRepositories = Effect.gen(function*() {
     }
   })
 
+  const eligibleTargetConditions = `
+    server.generation = item.server_generation
+    AND server.enabled = 1
+    AND server.deleted_at_ms IS NULL
+    AND (server.verified_catalog_id IS NOT NULL OR server.verified_base_url IS NOT NULL)
+    AND binding.enabled = 1
+    AND library.enabled = 1
+  `
+  const eligibleTargetSql = `item.canonical_id = ? AND ${eligibleTargetConditions}`
+
+  const outboxPayload = (state: UserStateRecord): DesiredUserState => ({
+    played: state.played,
+    favorite: state.favorite,
+    playCount: state.playCount,
+    positionTicks: state.positionTicks,
+    lastPlayedVersionId: state.lastPlayedVersionId
+  })
+
+  const upsertOutboxTarget = (
+    target: {
+      readonly id: string
+      readonly server_id: string
+      readonly server_generation: number
+    },
+    state: UserStateRecord,
+    nowMs: number
+  ) => sql.unsafe(`
+    INSERT INTO state_outbox (
+      target_id, canonical_id, source_item_id, server_id, server_generation,
+      desired_revision, delivered_revision, payload_json, attempt_count,
+      next_attempt_at_ms, lease_owner, lease_expires_at_ms, dispatched_at_ms,
+      uncertain_since_ms, permanent_failure_code, last_failure_code,
+      last_failure_at_ms, eligible, updated_at_ms
+    ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, 0, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 1, ?)
+    ON CONFLICT(target_id) DO UPDATE SET
+      canonical_id = excluded.canonical_id,
+      source_item_id = excluded.source_item_id,
+      server_id = excluded.server_id,
+      server_generation = excluded.server_generation,
+      attempt_count = CASE
+        WHEN state_outbox.desired_revision <> excluded.desired_revision
+          OR state_outbox.canonical_id <> excluded.canonical_id
+          OR state_outbox.server_generation <> excluded.server_generation
+          OR state_outbox.payload_json <> excluded.payload_json THEN 0
+        ELSE state_outbox.attempt_count
+      END,
+      next_attempt_at_ms = CASE
+        WHEN state_outbox.desired_revision <> excluded.desired_revision
+          OR state_outbox.canonical_id <> excluded.canonical_id
+          OR state_outbox.server_generation <> excluded.server_generation
+          OR state_outbox.payload_json <> excluded.payload_json
+          OR state_outbox.eligible = 0
+          THEN excluded.next_attempt_at_ms
+        ELSE state_outbox.next_attempt_at_ms
+      END,
+      lease_owner = CASE
+        WHEN state_outbox.desired_revision <> excluded.desired_revision
+          OR state_outbox.canonical_id <> excluded.canonical_id
+          OR state_outbox.server_generation <> excluded.server_generation
+          OR state_outbox.payload_json <> excluded.payload_json THEN NULL
+        ELSE state_outbox.lease_owner
+      END,
+      lease_expires_at_ms = CASE
+        WHEN state_outbox.desired_revision <> excluded.desired_revision
+          OR state_outbox.canonical_id <> excluded.canonical_id
+          OR state_outbox.server_generation <> excluded.server_generation
+          OR state_outbox.payload_json <> excluded.payload_json THEN NULL
+        ELSE state_outbox.lease_expires_at_ms
+      END,
+      uncertain_since_ms = CASE
+        WHEN (
+          state_outbox.desired_revision <> excluded.desired_revision
+          OR state_outbox.canonical_id <> excluded.canonical_id
+          OR state_outbox.server_generation <> excluded.server_generation
+          OR state_outbox.payload_json <> excluded.payload_json
+        ) AND state_outbox.dispatched_at_ms IS NOT NULL
+          THEN COALESCE(state_outbox.uncertain_since_ms, excluded.updated_at_ms)
+        ELSE state_outbox.uncertain_since_ms
+      END,
+      permanent_failure_code = CASE
+        WHEN state_outbox.desired_revision <> excluded.desired_revision
+          OR state_outbox.canonical_id <> excluded.canonical_id
+          OR state_outbox.server_generation <> excluded.server_generation
+          OR state_outbox.payload_json <> excluded.payload_json THEN NULL
+        ELSE state_outbox.permanent_failure_code
+      END,
+      last_failure_code = CASE
+        WHEN (
+          state_outbox.desired_revision <> excluded.desired_revision
+          OR state_outbox.canonical_id <> excluded.canonical_id
+          OR state_outbox.server_generation <> excluded.server_generation
+          OR state_outbox.payload_json <> excluded.payload_json
+        ) AND state_outbox.dispatched_at_ms IS NOT NULL
+          THEN 'superseded_after_dispatch'
+        WHEN state_outbox.desired_revision <> excluded.desired_revision
+          OR state_outbox.canonical_id <> excluded.canonical_id
+          OR state_outbox.server_generation <> excluded.server_generation
+          OR state_outbox.payload_json <> excluded.payload_json THEN NULL
+        ELSE state_outbox.last_failure_code
+      END,
+      last_failure_at_ms = CASE
+        WHEN (
+          state_outbox.desired_revision <> excluded.desired_revision
+          OR state_outbox.canonical_id <> excluded.canonical_id
+          OR state_outbox.server_generation <> excluded.server_generation
+          OR state_outbox.payload_json <> excluded.payload_json
+        ) AND state_outbox.dispatched_at_ms IS NOT NULL
+          THEN excluded.updated_at_ms
+        WHEN state_outbox.desired_revision <> excluded.desired_revision
+          OR state_outbox.canonical_id <> excluded.canonical_id
+          OR state_outbox.server_generation <> excluded.server_generation
+          OR state_outbox.payload_json <> excluded.payload_json THEN NULL
+        ELSE state_outbox.last_failure_at_ms
+      END,
+      desired_revision = excluded.desired_revision,
+      payload_json = excluded.payload_json,
+      eligible = 1,
+      updated_at_ms = excluded.updated_at_ms
+  `, [
+    target.id,
+    state.canonicalId,
+    target.id,
+    target.server_id,
+    target.server_generation,
+    state.revision,
+    canonicalJson(outboxPayload(state)),
+    nowMs,
+    nowMs
+  ])
+
+  const syncOutboxTargets = (state: UserStateRecord, nowMs: number) => Effect.gen(function*() {
+    yield* sql.unsafe(`
+      UPDATE state_outbox
+      SET eligible = 0, lease_owner = NULL, lease_expires_at_ms = NULL, updated_at_ms = ?
+      WHERE canonical_id = ? AND eligible = 1 AND NOT EXISTS (
+        SELECT 1
+        FROM source_items item
+        JOIN upstream_servers server ON server.id = item.server_id
+        JOIN library_sources binding
+          ON binding.server_id = item.server_id
+          AND binding.source_library_id = item.source_library_id
+        JOIN virtual_libraries library ON library.id = binding.virtual_library_id
+        WHERE item.id = state_outbox.source_item_id AND ${eligibleTargetSql}
+      )
+    `, [nowMs, state.canonicalId, state.canonicalId])
+    const targets = yield* sql.unsafe<{
+      readonly id: string
+      readonly server_id: string
+      readonly server_generation: number
+    }>(`
+      SELECT DISTINCT item.id, item.server_id, item.server_generation
+      FROM source_items item
+      JOIN upstream_servers server ON server.id = item.server_id
+      JOIN library_sources binding
+        ON binding.server_id = item.server_id
+        AND binding.source_library_id = item.source_library_id
+      JOIN virtual_libraries library ON library.id = binding.virtual_library_id
+      WHERE ${eligibleTargetSql}
+      ORDER BY item.id
+    `, [state.canonicalId])
+    for (const target of targets) yield* upsertOutboxTarget(target, state, nowMs)
+  })
+
+  const syncExistingState = (canonicalId: string, nowMs: number) => Effect.gen(function*() {
+    const rows = yield* sql.unsafe<UserStateRow>("SELECT * FROM user_state WHERE canonical_id = ?", [canonicalId])
+    if (rows[0]) yield* syncOutboxTargets(userState(rows[0]), nowMs)
+  })
+
   const resolveIdentity: RepositoriesService["resolveIdentity"] = (candidate) =>
     identityDatabase("resolveIdentity", sql.withTransaction(Effect.gen(function*() {
       yield* assertIdentityFence(candidate, true)
@@ -1312,6 +1496,7 @@ const makeRepositories = Effect.gen(function*() {
         }
         yield* saveVersions
         yield* assertIdentityFence(candidate, false)
+        yield* syncExistingState(canonicalId, candidate.observedAtMs)
         return yield* readResolution(canonicalId)
       }
 
@@ -1447,6 +1632,7 @@ const makeRepositories = Effect.gen(function*() {
       `, [retainedIdentityState, candidate.observedAtMs, survivorId])
       yield* saveVersions
       yield* assertIdentityFence(candidate, false)
+      yield* syncExistingState(survivorId, candidate.observedAtMs)
       return yield* readResolution(survivorId)
     })))
 
@@ -1539,6 +1725,7 @@ const makeRepositories = Effect.gen(function*() {
           version.updatedAtMs
         ])
       }
+      yield* syncExistingState(canonical.id, canonical.updatedAtMs)
       return canonical
     })))
 
@@ -1939,106 +2126,169 @@ const makeRepositories = Effect.gen(function*() {
       sql.unsafe("DELETE FROM query_generations WHERE state_dependent = 1")
     ).pipe(Effect.asVoid)
 
+  const persistUserState = (
+    canonicalId: string,
+    patch: import("../../core/model.js").UserStatePatch,
+    updatedAtMs: number
+  ) => Effect.gen(function*() {
+    const previousRows = yield* sql.unsafe<UserStateRow>(
+      "SELECT * FROM user_state WHERE canonical_id = ?",
+      [canonicalId]
+    )
+    const previous = previousRows[0] ? userState(previousRows[0]) : null
+    const state: UserStateRecord = {
+      canonicalId,
+      revision: (previous?.revision ?? 0) + 1,
+      played: patch.played ?? previous?.played ?? false,
+      favorite: patch.favorite ?? previous?.favorite ?? false,
+      playCount: patch.playCount ?? previous?.playCount ?? 0,
+      positionTicks: patch.positionTicks ?? previous?.positionTicks ?? 0,
+      lastPlayedVersionId: "lastPlayedVersionId" in patch
+        ? patch.lastPlayedVersionId ?? null
+        : previous?.lastPlayedVersionId ?? null,
+      updatedAtMs
+    }
+    if (
+      !Number.isSafeInteger(updatedAtMs) ||
+      !Number.isSafeInteger(state.playCount) || state.playCount < 0 ||
+      !Number.isSafeInteger(state.positionTicks) || state.positionTicks < 0 ||
+      typeof state.played !== "boolean" || typeof state.favorite !== "boolean" ||
+      (state.lastPlayedVersionId !== null && typeof state.lastPlayedVersionId !== "string")
+    ) return yield* Effect.fail(failure("writeUserStateAndTargets", "invalid desired user state"))
+
+    yield* sql.unsafe(`
+      INSERT INTO user_state (
+        canonical_id, revision, played, favorite, play_count, position_ticks,
+        last_played_version_id, updated_at_ms
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(canonical_id) DO UPDATE SET
+        revision = excluded.revision,
+        played = excluded.played,
+        favorite = excluded.favorite,
+        play_count = excluded.play_count,
+        position_ticks = excluded.position_ticks,
+        last_played_version_id = excluded.last_played_version_id,
+        updated_at_ms = excluded.updated_at_ms
+    `, [
+      state.canonicalId,
+      state.revision,
+      state.played ? 1 : 0,
+      state.favorite ? 1 : 0,
+      state.playCount,
+      state.positionTicks,
+      state.lastPlayedVersionId,
+      state.updatedAtMs
+    ])
+    yield* syncOutboxTargets(state, updatedAtMs)
+    return state
+  })
+
   const writeUserStateAndTargets: RepositoriesService["writeUserStateAndTargets"] = (input) =>
-    database("writeUserStateAndTargets", sql.withTransaction(Effect.gen(function*() {
-      const previous = yield* sql.unsafe<{ revision: number }>(
-        "SELECT revision FROM user_state WHERE canonical_id = ?",
+    database(
+      "writeUserStateAndTargets",
+      sql.withTransaction(persistUserState(input.canonicalId, input.patch, input.updatedAtMs))
+    )
+
+  interface PlaybackSessionRow {
+    readonly id: string
+    readonly canonical_id: string
+    readonly version_id: string
+    readonly started_at_ms: unknown
+    readonly last_event_at_ms: unknown
+    readonly last_position_ticks: unknown
+    readonly stop_applied: unknown
+    readonly state_revision: unknown
+  }
+
+  const recordPlaybackEventAndTargets: RepositoriesService["recordPlaybackEventAndTargets"] = (input) =>
+    database("recordPlaybackEventAndTargets", sql.withTransaction(Effect.gen(function*() {
+      if (
+        input.localSessionId.length === 0 || input.canonicalId.length === 0 || input.versionId.length === 0 ||
+        !Number.isSafeInteger(input.positionTicks) || input.positionTicks < 0 ||
+        !Number.isSafeInteger(input.occurredAtMs)
+      ) return yield* Effect.fail(failure("recordPlaybackEventAndTargets", "invalid playback event"))
+
+      const sessions = yield* sql.unsafe<PlaybackSessionRow>(
+        "SELECT * FROM playback_sessions WHERE id = ?",
+        [input.localSessionId]
+      )
+      const session = sessions[0]
+      const latestRows = yield* sql.unsafe<PlaybackSessionRow>(`
+        SELECT * FROM playback_sessions
+        WHERE canonical_id = ?
+        ORDER BY started_at_ms DESC, id DESC
+        LIMIT 1
+      `, [input.canonicalId])
+      const latest = latestRows[0]
+
+      if (input.kind === "start") {
+        if (session || (latest && integer(latest.started_at_ms, "started_at_ms") > input.occurredAtMs)) return null
+        const state = yield* persistUserState(input.canonicalId, {
+          played: false,
+          positionTicks: input.positionTicks,
+          lastPlayedVersionId: input.versionId
+        }, input.occurredAtMs)
+        yield* sql.unsafe(`
+          INSERT INTO playback_sessions (
+            id, canonical_id, version_id, started_at_ms, last_event_at_ms,
+            last_position_ticks, stop_applied, state_revision
+          ) VALUES (?, ?, ?, ?, ?, ?, 0, ?)
+        `, [
+          input.localSessionId,
+          input.canonicalId,
+          input.versionId,
+          input.occurredAtMs,
+          input.occurredAtMs,
+          input.positionTicks,
+          state.revision
+        ])
+        return state
+      }
+
+      if (
+        !session || session.canonical_id !== input.canonicalId ||
+        (latest && latest.id !== session.id) ||
+        boolean(session.stop_applied, "stop_applied") ||
+        input.occurredAtMs < integer(session.last_event_at_ms, "last_event_at_ms")
+      ) return null
+
+      const currentRows = yield* sql.unsafe<UserStateRow>(
+        "SELECT * FROM user_state WHERE canonical_id = ?",
         [input.canonicalId]
       )
-      const revision = (previous[0]?.revision ?? 0) + 1
+      const current = currentRows[0] ? userState(currentRows[0]) : null
+      const played = input.kind === "stop" ? input.played : false
+      const state = yield* persistUserState(input.canonicalId, {
+        played,
+        playCount: (current?.playCount ?? 0) + (input.kind === "stop" && played ? 1 : 0),
+        positionTicks: played ? 0 : input.positionTicks,
+        lastPlayedVersionId: input.versionId
+      }, input.occurredAtMs)
       yield* sql.unsafe(`
-        INSERT INTO user_state (
-          canonical_id, revision, played, favorite, play_count, position_ticks,
-          last_played_version_id, updated_at_ms
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(canonical_id) DO UPDATE SET
-          revision = excluded.revision,
-          played = excluded.played,
-          favorite = excluded.favorite,
-          play_count = excluded.play_count,
-          position_ticks = excluded.position_ticks,
-          last_played_version_id = excluded.last_played_version_id,
-          updated_at_ms = excluded.updated_at_ms
+        UPDATE playback_sessions
+        SET last_event_at_ms = ?, last_position_ticks = ?, stop_applied = ?, state_revision = ?
+        WHERE id = ?
       `, [
-        input.canonicalId,
-        revision,
-        input.played ? 1 : 0,
-        input.favorite ? 1 : 0,
-        input.playCount,
+        input.occurredAtMs,
         input.positionTicks,
-        input.lastPlayedVersionId,
-        input.updatedAtMs
+        input.kind === "stop" ? 1 : 0,
+        state.revision,
+        input.localSessionId
       ])
-
-      const targets = yield* sql.unsafe<Pick<SourceItemRecord, "id" | "serverId" | "serverGeneration"> & {
-        readonly server_id: string
-        readonly server_generation: number
-      }>(`
-        SELECT DISTINCT si.id, si.server_id, si.server_generation
-        FROM source_items si
-        JOIN upstream_servers us ON us.id = si.server_id
-        JOIN library_sources ls
-          ON ls.server_id = si.server_id
-          AND ls.source_library_id = si.source_library_id
-        JOIN virtual_libraries vl ON vl.id = ls.virtual_library_id
-        WHERE si.canonical_id = ?
-          AND us.enabled = 1
-          AND us.verified_catalog_id IS NOT NULL
-          AND ls.enabled = 1
-          AND vl.enabled = 1
-      `, [input.canonicalId])
-
-      const payload: DesiredUserState = {
-        played: input.played,
-        favorite: input.favorite,
-        playCount: input.playCount,
-        positionTicks: input.positionTicks,
-        lastPlayedVersionId: input.lastPlayedVersionId
-      }
-      for (const target of targets) {
-        yield* sql.unsafe(`
-          INSERT INTO state_outbox (
-            target_id, canonical_id, source_item_id, server_id, server_generation,
-            desired_revision, delivered_revision, payload_json, attempt_count,
-            next_attempt_at_ms, lease_owner, lease_expires_at_ms, dispatched_at_ms,
-            uncertain_since_ms, permanent_failure_code, eligible, updated_at_ms
-          ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, 0, ?, NULL, NULL, NULL, NULL, NULL, 1, ?)
-          ON CONFLICT(target_id) DO UPDATE SET
-            canonical_id = excluded.canonical_id,
-            server_generation = excluded.server_generation,
-            desired_revision = excluded.desired_revision,
-            payload_json = excluded.payload_json,
-            next_attempt_at_ms = excluded.next_attempt_at_ms,
-            permanent_failure_code = NULL,
-            eligible = 1,
-            updated_at_ms = excluded.updated_at_ms
-        `, [
-          target.id,
-          input.canonicalId,
-          target.id,
-          target.server_id,
-          target.server_generation,
-          revision,
-          canonicalJson(payload),
-          input.updatedAtMs,
-          input.updatedAtMs
-        ])
-      }
-
-      yield* sql.unsafe("DELETE FROM query_generations WHERE state_dependent = 1")
-
-      const rows = yield* sql.unsafe<UserStateRow>("SELECT * FROM user_state WHERE canonical_id = ?", [input.canonicalId])
-      return yield* decode("writeUserStateAndTargets", () => userState(rows[0]!))
+      return state
     })))
 
   interface OutboxRow {
     readonly target_id: string
     readonly canonical_id: string
     readonly source_item_id: string
+    readonly upstream_item_id: string
+    readonly upstream_user_id: string
     readonly server_id: string
     readonly server_generation: unknown
     readonly desired_revision: unknown
     readonly payload_json: unknown
+    readonly attempt_count: unknown
     readonly lease_owner: string
     readonly lease_expires_at_ms: unknown
   }
@@ -2047,92 +2297,240 @@ const makeRepositories = Effect.gen(function*() {
     targetId: row.target_id,
     canonicalId: row.canonical_id,
     sourceItemId: row.source_item_id,
+    upstreamItemId: row.upstream_item_id,
+    upstreamUserId: row.upstream_user_id,
     serverId: row.server_id,
     serverGeneration: integer(row.server_generation, "server_generation"),
     desiredRevision: integer(row.desired_revision, "desired_revision"),
     payload: desiredUserState(row.payload_json),
+    attemptCount: integer(row.attempt_count, "attempt_count"),
     leaseOwner: row.lease_owner,
     leaseExpiresAtMs: integer(row.lease_expires_at_ms, "lease_expires_at_ms")
   })
 
   const claimOutboxTargets: RepositoriesService["claimOutboxTargets"] = (input) => {
-    const limit = Math.min(Math.max(Math.trunc(input.limit), 0), OUTBOX_BATCH_SIZE)
-    if (limit === 0 || !Number.isSafeInteger(input.nowMs) || !Number.isSafeInteger(input.leaseMs) || input.leaseMs <= 0) {
+    if (!Number.isSafeInteger(input.nowMs) || input.leaseOwner.length === 0) {
       return Effect.fail(failure("claimOutboxTargets", "invalid claim request"))
     }
     return database("claimOutboxTargets", sql.withTransaction(Effect.gen(function*() {
+      yield* sql.unsafe(`
+        UPDATE state_outbox
+        SET uncertain_since_ms = CASE
+              WHEN dispatched_at_ms IS NULL THEN uncertain_since_ms
+              ELSE COALESCE(uncertain_since_ms, ?)
+            END,
+            last_failure_code = CASE
+              WHEN dispatched_at_ms IS NULL THEN last_failure_code
+              ELSE COALESCE(last_failure_code, 'lease_expired_after_dispatch')
+            END,
+            last_failure_at_ms = CASE
+              WHEN dispatched_at_ms IS NULL THEN last_failure_at_ms
+              ELSE COALESCE(last_failure_at_ms, ?)
+            END,
+            next_attempt_at_ms = MIN(next_attempt_at_ms, ?),
+            lease_owner = NULL,
+            lease_expires_at_ms = NULL,
+            updated_at_ms = ?
+        WHERE target_id IN (
+          SELECT target_id
+          FROM state_outbox
+          WHERE lease_expires_at_ms IS NOT NULL AND lease_expires_at_ms <= ?
+          ORDER BY lease_expires_at_ms, target_id
+          LIMIT ${OUTBOX_BATCH_SIZE}
+        )
+      `, [input.nowMs, input.nowMs, input.nowMs, input.nowMs, input.nowMs])
       const candidates = yield* sql.unsafe<{ target_id: string }>(`
-        SELECT target_id
-        FROM state_outbox
-        WHERE eligible = 1
+        SELECT outbox.target_id
+        FROM state_outbox outbox
+        WHERE outbox.eligible = 1
           AND permanent_failure_code IS NULL
           AND next_attempt_at_ms <= ?
-          AND (lease_expires_at_ms IS NULL OR lease_expires_at_ms <= ?)
+          AND lease_expires_at_ms IS NULL
           AND (delivered_revision < desired_revision OR uncertain_since_ms IS NOT NULL)
-        ORDER BY next_attempt_at_ms, target_id
+          AND EXISTS (
+            SELECT 1
+            FROM source_items item
+            JOIN upstream_servers server ON server.id = item.server_id
+            JOIN library_sources binding
+              ON binding.server_id = item.server_id
+              AND binding.source_library_id = item.source_library_id
+            JOIN virtual_libraries library ON library.id = binding.virtual_library_id
+            WHERE item.id = outbox.source_item_id
+              AND item.canonical_id = outbox.canonical_id
+              AND server.upstream_user_id IS NOT NULL
+              AND ${eligibleTargetConditions}
+          )
+        ORDER BY next_attempt_at_ms, outbox.target_id
         LIMIT ?
-      `, [input.nowMs, input.nowMs, limit])
+      `, [input.nowMs, OUTBOX_BATCH_SIZE])
       if (candidates.length === 0) return []
       const claimed: Array<OutboxClaim> = []
       for (const candidate of candidates) {
         const rows = yield* sql.unsafe<OutboxRow>(`
           UPDATE state_outbox
-          SET lease_owner = ?, lease_expires_at_ms = ?, attempt_count = attempt_count + 1
+          SET lease_owner = ?, lease_expires_at_ms = ?, dispatched_at_ms = NULL,
+              attempt_count = attempt_count + 1
           WHERE target_id = ?
-            AND (lease_expires_at_ms IS NULL OR lease_expires_at_ms <= ?)
+            AND next_attempt_at_ms <= ?
+            AND lease_expires_at_ms IS NULL
           RETURNING
             target_id, canonical_id, source_item_id, server_id, server_generation,
-            desired_revision, payload_json, lease_owner, lease_expires_at_ms
-        `, [input.leaseOwner, input.nowMs + input.leaseMs, candidate.target_id, input.nowMs])
+            (SELECT upstream_item_id FROM source_items WHERE id = source_item_id) AS upstream_item_id,
+            (SELECT upstream_user_id FROM upstream_servers WHERE id = server_id) AS upstream_user_id,
+            desired_revision, payload_json, attempt_count, lease_owner, lease_expires_at_ms
+        `, [
+          input.leaseOwner,
+          input.nowMs + OUTBOX_LEASE_MS,
+          candidate.target_id,
+          input.nowMs
+        ])
         if (rows[0]) claimed.push(yield* decode("claimOutboxTargets", () => outboxClaim(rows[0]!)))
       }
       return claimed
     })))
   }
 
+  const markOutboxDispatched: RepositoriesService["markOutboxDispatched"] = (input) =>
+    database("markOutboxDispatched", sql.unsafe<{ target_id: string }>(`
+      UPDATE state_outbox
+      SET dispatched_at_ms = ?, updated_at_ms = ?
+      WHERE target_id = ?
+        AND desired_revision = ?
+        AND server_generation = ?
+        AND lease_owner = ?
+        AND lease_expires_at_ms > ?
+        AND eligible = 1
+        AND EXISTS (
+          SELECT 1 FROM upstream_servers server
+          WHERE server.id = state_outbox.server_id
+            AND server.generation = ?
+            AND server.enabled = 1
+            AND server.deleted_at_ms IS NULL
+        )
+      RETURNING target_id
+    `, [
+      input.dispatchedAtMs,
+      input.dispatchedAtMs,
+      input.targetId,
+      input.desiredRevision,
+      input.serverGeneration,
+      input.leaseOwner,
+      input.dispatchedAtMs,
+      input.serverGeneration
+    ])).pipe(Effect.map((rows) => rows.length === 1))
+
   const acknowledgeOutboxTarget: RepositoriesService["acknowledgeOutboxTarget"] = (input) =>
     database("acknowledgeOutboxTarget", sql.unsafe<{ target_id: string }>(`
       UPDATE state_outbox
-      SET delivered_revision = desired_revision,
-          uncertain_since_ms = NULL,
+      SET delivered_revision = ?,
           lease_owner = NULL,
           lease_expires_at_ms = NULL,
-          dispatched_at_ms = ?,
+          next_attempt_at_ms = CASE
+            WHEN uncertain_since_ms IS NULL THEN next_attempt_at_ms
+            ELSE ?
+          END,
+          permanent_failure_code = NULL,
+          last_failure_code = CASE WHEN uncertain_since_ms IS NULL THEN NULL ELSE last_failure_code END,
+          last_failure_at_ms = CASE WHEN uncertain_since_ms IS NULL THEN NULL ELSE last_failure_at_ms END,
           updated_at_ms = ?
       WHERE target_id = ?
         AND desired_revision = ?
+        AND server_generation = ?
         AND lease_owner = ?
+        AND lease_expires_at_ms > ?
+        AND eligible = 1
+        AND EXISTS (
+          SELECT 1 FROM upstream_servers server
+          WHERE server.id = state_outbox.server_id
+            AND server.generation = ?
+            AND server.enabled = 1
+            AND server.deleted_at_ms IS NULL
+        )
       RETURNING target_id
     `, [
-      input.acknowledgedAtMs,
+      input.desiredRevision,
+      input.acknowledgedAtMs + UNCERTAINTY_REAPPLY_MS,
       input.acknowledgedAtMs,
       input.targetId,
       input.desiredRevision,
-      input.leaseOwner
+      input.serverGeneration,
+      input.leaseOwner,
+      input.acknowledgedAtMs,
+      input.serverGeneration
     ])).pipe(Effect.map((rows) => rows.length === 1))
 
   const markOutboxUncertain: RepositoriesService["markOutboxUncertain"] = (input) =>
     database("markOutboxUncertain", sql.unsafe(`
       UPDATE state_outbox
       SET uncertain_since_ms = COALESCE(uncertain_since_ms, ?),
+          last_failure_code = ?,
+          last_failure_at_ms = ?,
+          next_attempt_at_ms = CASE
+            WHEN delivered_revision < desired_revision THEN MIN(next_attempt_at_ms, ?)
+            ELSE ?
+          END,
+          updated_at_ms = ?
+      WHERE target_id = ? AND desired_revision >= ?
+    `, [
+      input.uncertainAtMs,
+      input.code,
+      input.uncertainAtMs,
+      input.uncertainAtMs,
+      input.nextAttemptAtMs,
+      input.uncertainAtMs,
+      input.targetId,
+      input.desiredRevision
+    ])).pipe(Effect.asVoid)
+
+  const recordOutboxFailure: RepositoriesService["recordOutboxFailure"] = (input) =>
+    database("recordOutboxFailure", sql.unsafe<{ target_id: string }>(`
+      UPDATE state_outbox
+      SET permanent_failure_code = CASE WHEN ? THEN ? ELSE NULL END,
+          last_failure_code = ?,
+          last_failure_at_ms = ?,
+          next_attempt_at_ms = ?,
           lease_owner = NULL,
           lease_expires_at_ms = NULL,
           updated_at_ms = ?
-      WHERE target_id = ? AND lease_owner = ?
-    `, [input.uncertainAtMs, input.uncertainAtMs, input.targetId, input.leaseOwner])).pipe(Effect.asVoid)
+      WHERE target_id = ?
+        AND desired_revision = ?
+        AND server_generation = ?
+        AND lease_owner = ?
+        AND lease_expires_at_ms > ?
+      RETURNING target_id
+    `, [
+      input.permanent ? 1 : 0,
+      input.code,
+      input.code,
+      input.failedAtMs,
+      input.nextAttemptAtMs,
+      input.failedAtMs,
+      input.targetId,
+      input.desiredRevision,
+      input.serverGeneration,
+      input.leaseOwner,
+      input.failedAtMs
+    ])).pipe(Effect.map((rows) => rows.length === 1))
 
   const runMaintenanceBatch: RepositoriesService["runMaintenanceBatch"] = (nowMs) =>
     database("runMaintenanceBatch", sql.withTransaction(Effect.gen(function*() {
-      const remove = (table: string, predicate: string) => sql.unsafe<{ rowid: number }>(`
+      const remove = (table: string, predicate: string, parameters: ReadonlyArray<number> = [nowMs]) =>
+        sql.unsafe<{ rowid: number }>(`
         DELETE FROM ${table}
         WHERE rowid IN (SELECT rowid FROM ${table} WHERE ${predicate} LIMIT 100)
         RETURNING rowid
-      `, [nowMs])
+      `, parameters)
       const sessions = yield* remove("dashboard_sessions", "expires_at_ms <= ?")
       const tokens = yield* remove("emby_tokens", "expires_at_ms <= ?")
       const rateLimits = yield* remove(
         "auth_rate_limits",
-        "COALESCE(blocked_until_ms, window_started_at_ms) <= ?"
+        "(blocked_until_ms IS NOT NULL AND blocked_until_ms <= ?) OR (blocked_until_ms IS NULL AND window_started_at_ms <= ?)",
+        [nowMs, nowMs - AUTH_RATE_WINDOW_MS]
+      )
+      const playbackSessions = yield* remove(
+        "playback_sessions",
+        "last_event_at_ms <= ?",
+        [nowMs - 24 * 60 * 60_000]
       )
       const generations = yield* remove("query_generations", "expires_at_ms <= ?")
       const cacheRows = yield* remove("source_metadata_cache", "stale_until_ms <= ?")
@@ -2144,6 +2542,15 @@ const makeRepositories = Effect.gen(function*() {
             END,
             lease_owner = NULL,
             lease_expires_at_ms = NULL,
+            last_failure_code = CASE
+              WHEN dispatched_at_ms IS NULL THEN last_failure_code
+              ELSE COALESCE(last_failure_code, 'lease_expired_after_dispatch')
+            END,
+            last_failure_at_ms = CASE
+              WHEN dispatched_at_ms IS NULL THEN last_failure_at_ms
+              ELSE COALESCE(last_failure_at_ms, ?)
+            END,
+            next_attempt_at_ms = MIN(next_attempt_at_ms, ?),
             updated_at_ms = ?
         WHERE target_id IN (
           SELECT target_id
@@ -2152,16 +2559,147 @@ const makeRepositories = Effect.gen(function*() {
           LIMIT 100
         )
         RETURNING target_id
-      `, [nowMs, nowMs, nowMs])
+      `, [nowMs, nowMs, nowMs, nowMs, nowMs])
+      const cancelled = yield* sql.unsafe<{ target_id: string }>(`
+        UPDATE state_outbox
+        SET eligible = 0, lease_owner = NULL, lease_expires_at_ms = NULL, updated_at_ms = ?
+        WHERE target_id IN (
+          SELECT outbox.target_id
+          FROM state_outbox outbox
+          WHERE outbox.eligible = 1 AND NOT EXISTS (
+            SELECT 1
+            FROM source_items item
+            JOIN upstream_servers server ON server.id = item.server_id
+            JOIN library_sources binding
+              ON binding.server_id = item.server_id
+              AND binding.source_library_id = item.source_library_id
+            JOIN virtual_libraries library ON library.id = binding.virtual_library_id
+            WHERE item.id = outbox.source_item_id
+              AND item.canonical_id = outbox.canonical_id
+              AND ${eligibleTargetConditions}
+          )
+          LIMIT 100
+        )
+        RETURNING target_id
+      `, [nowMs])
+      const missing = yield* sql.unsafe<UserStateRow & {
+        readonly target_id: string
+        readonly server_id: string
+        readonly server_generation: number
+      }>(`
+        SELECT state.*, item.id AS target_id, item.server_id, item.server_generation
+        FROM user_state state
+        JOIN source_items item ON item.canonical_id = state.canonical_id
+        JOIN upstream_servers server ON server.id = item.server_id
+        JOIN library_sources binding
+          ON binding.server_id = item.server_id
+          AND binding.source_library_id = item.source_library_id
+        JOIN virtual_libraries library ON library.id = binding.virtual_library_id
+        LEFT JOIN state_outbox outbox ON outbox.target_id = item.id
+        WHERE item.canonical_id = state.canonical_id
+          AND ${eligibleTargetConditions}
+          AND (outbox.target_id IS NULL OR outbox.eligible = 0 OR outbox.desired_revision <> state.revision)
+        ORDER BY item.id
+        LIMIT 100
+      `)
+      for (const row of missing) {
+        yield* upsertOutboxTarget({
+          id: row.target_id,
+          server_id: row.server_id,
+          server_generation: row.server_generation
+        }, userState(row), nowMs)
+      }
+      yield* sql.unsafe(`
+        INSERT INTO maintenance_status (singleton, last_run_at_ms)
+        VALUES (1, ?)
+        ON CONFLICT(singleton) DO UPDATE SET
+          last_run_at_ms = MAX(maintenance_status.last_run_at_ms, excluded.last_run_at_ms)
+      `, [nowMs])
       return {
         expiredDashboardSessions: sessions.length,
         expiredEmbyTokens: tokens.length,
         expiredRateLimits: rateLimits.length,
+        expiredPlaybackSessions: playbackSessions.length,
         expiredQueryGenerations: generations.length,
         expiredMetadataCacheRows: cacheRows.length,
-        releasedOutboxLeases: leases.length
+        releasedOutboxLeases: leases.length,
+        cancelledOutboxTargets: cancelled.length,
+        createdOutboxTargets: missing.length
       } satisfies MaintenanceResult
     })))
+
+  const readSystemStatus: RepositoriesService["readSystemStatus"] = () =>
+    database("readSystemStatus", Effect.gen(function*() {
+      const cache = yield* sql.unsafe<{ count: number }>("SELECT COUNT(*) AS count FROM source_metadata_cache")
+      const maintenance = yield* sql.unsafe<{ last_run_at_ms: number }>(
+        "SELECT last_run_at_ms FROM maintenance_status WHERE singleton = 1"
+      )
+      const outbox = yield* sql.unsafe<{
+        pending: number
+        failed: number
+        uncertain: number
+      }>(`
+        SELECT
+          SUM(CASE WHEN eligible = 1 AND permanent_failure_code IS NULL AND delivered_revision < desired_revision THEN 1 ELSE 0 END) AS pending,
+          SUM(CASE WHEN last_failure_code IS NOT NULL OR permanent_failure_code IS NOT NULL THEN 1 ELSE 0 END) AS failed,
+          SUM(CASE WHEN uncertain_since_ms IS NOT NULL THEN 1 ELSE 0 END) AS uncertain
+        FROM state_outbox
+      `)
+      const upstream = yield* sql.unsafe<{ health: string; count: number }>(`
+        SELECT health, COUNT(*) AS count
+        FROM upstream_servers
+        WHERE deleted_at_ms IS NULL
+        GROUP BY health
+      `)
+      const counts = new Map(upstream.map((row) => [row.health, integer(row.count, "count")]))
+      return {
+        database: "healthy" as const,
+        cacheEntries: integer(cache[0]?.count ?? 0, "cache count"),
+        maintenanceLastRunAtMs: maintenance[0]?.last_run_at_ms ?? null,
+        outboxPending: integer(outbox[0]?.pending ?? 0, "outbox pending"),
+        outboxFailed: integer(outbox[0]?.failed ?? 0, "outbox failed"),
+        outboxUncertain: integer(outbox[0]?.uncertain ?? 0, "outbox uncertain"),
+        upstreamHealthy: counts.get("healthy") ?? 0,
+        upstreamDegraded: counts.get("degraded") ?? 0,
+        upstreamUnknown: counts.get("unknown") ?? 0
+      }
+    }))
+
+  const listOutboxFailures: RepositoriesService["listOutboxFailures"] = () =>
+    database("listOutboxFailures", sql.unsafe<{
+      readonly server_id: string
+      readonly code: string
+      readonly failed_at_ms: unknown
+      readonly attempt_count: unknown
+      readonly next_attempt_at_ms: unknown | null
+      readonly uncertain_since_ms: unknown | null
+      readonly permanent_failure_code: string | null
+    }>(`
+      SELECT server_id,
+        COALESCE(permanent_failure_code, last_failure_code, 'delivery_uncertain') AS code,
+        COALESCE(last_failure_at_ms, uncertain_since_ms, updated_at_ms) AS failed_at_ms,
+        attempt_count,
+        next_attempt_at_ms,
+        uncertain_since_ms,
+        permanent_failure_code
+      FROM state_outbox
+      WHERE permanent_failure_code IS NOT NULL
+        OR last_failure_code IS NOT NULL
+        OR uncertain_since_ms IS NOT NULL
+      ORDER BY failed_at_ms DESC, target_id
+      LIMIT 100
+    `)).pipe(Effect.flatMap((rows) => decode("listOutboxFailures", () => rows.map((row) => ({
+      serverId: decodeServerId(row.server_id),
+      code: row.code,
+      failedAtMs: integer(row.failed_at_ms, "failed_at_ms"),
+      attemptCount: integer(row.attempt_count, "attempt_count"),
+      nextAttemptAtMs: row.permanent_failure_code === null
+        ? integer(row.next_attempt_at_ms, "next_attempt_at_ms")
+        : null,
+      uncertainSinceMs: row.uncertain_since_ms === null
+        ? null
+        : integer(row.uncertain_since_ms, "uncertain_since_ms")
+    })))))
 
   return Repositories.of({
     claimUser,
@@ -2202,10 +2740,15 @@ const makeRepositories = Effect.gen(function*() {
     listStateMemberCanonicalIds,
     invalidateStateDependentQueryGenerations,
     writeUserStateAndTargets,
+    recordPlaybackEventAndTargets,
     claimOutboxTargets,
+    markOutboxDispatched,
     acknowledgeOutboxTarget,
     markOutboxUncertain,
-    runMaintenanceBatch
+    recordOutboxFailure,
+    runMaintenanceBatch,
+    readSystemStatus,
+    listOutboxFailures
   })
 })
 

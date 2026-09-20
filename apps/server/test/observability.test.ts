@@ -74,6 +74,7 @@ describe("upstream observability", () => {
           password: "secret",
           accessToken: "secret-token",
           accessTokenExpiresAtMs: null,
+          upstreamUserId: "upstream-user-id",
           userAgent: "Agent/1",
           enabled: true,
           health: "healthy",

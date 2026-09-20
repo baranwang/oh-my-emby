@@ -23,6 +23,7 @@ export interface ServerRequestFence {
 export interface ServerResult {
   readonly accessToken?: string | null
   readonly accessTokenExpiresAtMs?: number | null
+  readonly upstreamUserId?: string | null
   readonly verifiedCatalogId?: string | null
   readonly verifiedBaseUrl?: string | null
   readonly health?: UpstreamServer["health"]
@@ -123,6 +124,7 @@ export const makeServerServiceLayer: Layer.Layer<ServerService, never, Repositor
         password: input.password._tag === "Set" ? input.password.value : null,
         accessToken: null,
         accessTokenExpiresAtMs: null,
+        upstreamUserId: null,
         userAgent: input.userAgent,
         enabled: input.enabled,
         health: "unknown",
@@ -151,6 +153,7 @@ export const makeServerServiceLayer: Layer.Layer<ServerService, never, Repositor
         password,
         accessToken: generationChanged ? null : current.accessToken,
         accessTokenExpiresAtMs: generationChanged ? null : current.accessTokenExpiresAtMs,
+        upstreamUserId: generationChanged ? null : current.upstreamUserId,
         userAgent: input.userAgent,
         enabled: input.enabled,
         health: generationChanged ? "unknown" : current.health,
@@ -177,6 +180,7 @@ export const makeServerServiceLayer: Layer.Layer<ServerService, never, Repositor
         updatedAtMs: Date.now(),
         ...(result.accessToken === undefined ? {} : { accessToken: result.accessToken }),
         ...(result.accessTokenExpiresAtMs === undefined ? {} : { accessTokenExpiresAtMs: result.accessTokenExpiresAtMs }),
+        ...(result.upstreamUserId === undefined ? {} : { upstreamUserId: result.upstreamUserId }),
         ...(result.verifiedCatalogId === undefined ? {} : { verifiedCatalogId: result.verifiedCatalogId }),
         ...(result.verifiedBaseUrl === undefined ? {} : { verifiedBaseUrl: result.verifiedBaseUrl }),
         ...(result.health === undefined ? {} : { health: result.health }),
@@ -192,7 +196,7 @@ export const makeServerServiceLayer: Layer.Layer<ServerService, never, Repositor
       const fence = { serverId, generation: server.generation }
       const identity = yield* upstream.getServerIdentity(serverId)
       if (server.verifiedCatalogId !== null && identity !== server.verifiedCatalogId) {
-        yield* persistResult(fence, { accessToken: null, health: "unknown" })
+        yield* persistResult(fence, { accessToken: null, upstreamUserId: null, health: "unknown" })
         return yield* Effect.fail(identity === null
           ? new CatalogIdentityUnverifiable({ serverId })
           : new CatalogIdentityMismatch({ serverId }))
@@ -202,7 +206,7 @@ export const makeServerServiceLayer: Layer.Layer<ServerService, never, Repositor
         server.verifiedBaseUrl !== null &&
         server.verifiedBaseUrl !== server.baseUrl
       ) {
-        yield* persistResult(fence, { accessToken: null, health: "unknown" })
+        yield* persistResult(fence, { accessToken: null, upstreamUserId: null, health: "unknown" })
         return yield* Effect.fail(new CatalogIdentityUnverifiable({ serverId }))
       }
       yield* persistResult(fence, {

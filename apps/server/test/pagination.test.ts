@@ -61,6 +61,7 @@ describe("federated pagination generations", () => {
       password: "password",
       accessToken: "token",
       accessTokenExpiresAtMs: null,
+      upstreamUserId: "upstream-user-id",
       userAgent: "test",
       enabled: true,
       health: "healthy",

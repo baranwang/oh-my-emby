@@ -7,6 +7,7 @@ import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder"
 import { Auth, type AuthService, type DashboardSession } from "../core/auth.js"
 import { InvalidCredentials } from "../core/errors.js"
 import { LibraryService } from "../core/library-service.js"
+import { Repositories } from "../core/repositories.js"
 import { ServerService } from "../core/server-service.js"
 
 export const DASHBOARD_SESSION_COOKIE = "oh_my_emby_session"
@@ -381,5 +382,27 @@ export const makeDashboardControlPlaneLayers = (
       })
     })
   }))
-  return Layer.merge(servers, libraries)
+  return Layer.mergeAll(servers, libraries, makeDashboardSystemLayer(config))
+}
+
+export const makeDashboardSystemLayer = (
+  config: DashboardRequestPolicyConfig
+) => {
+  const policy = makeDashboardRequestPolicy(config)
+  return HttpApiBuilder.group(DashboardApi, "system", (handlers) => Effect.gen(function*() {
+    const auth = yield* Auth
+    const repositories = yield* Repositories
+    return handlers.handleAll({
+      getSystemStatus: ({ request }) => Effect.gen(function*() {
+        const access = yield* authorized(policy, request, auth).pipe(Effect.result)
+        if (Result.isFailure(access)) return publicFailure(access.failure)
+        return yield* resultOrFailure(repositories.readSystemStatus())
+      }),
+      listOutboxFailures: ({ request }) => Effect.gen(function*() {
+        const access = yield* authorized(policy, request, auth).pipe(Effect.result)
+        if (Result.isFailure(access)) return publicFailure(access.failure)
+        return yield* resultOrFailure(repositories.listOutboxFailures())
+      })
+    })
+  }))
 }

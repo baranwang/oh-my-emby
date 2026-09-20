@@ -98,6 +98,7 @@ export interface UpstreamServer extends Omit<ServerView, "hasPassword"> {
   readonly password: string | null
   readonly accessToken: string | null
   readonly accessTokenExpiresAtMs: number | null
+  readonly upstreamUserId: string | null
   readonly lastSuccessAtMs: number | null
   readonly deletedAtMs: number | null
   readonly createdAtMs: number
@@ -116,6 +117,7 @@ export interface SaveServerResultCommand {
   readonly expectedGeneration: number
   readonly accessToken?: string | null
   readonly accessTokenExpiresAtMs?: number | null
+  readonly upstreamUserId?: string | null
   readonly verifiedCatalogId?: string | null
   readonly verifiedBaseUrl?: string | null
   readonly health?: ServerHealth
@@ -244,30 +246,55 @@ export interface DesiredUserState {
   readonly lastPlayedVersionId: string | null
 }
 
-export interface StateWrite extends DesiredUserState {
+export interface UserStatePatch {
+  readonly played?: boolean
+  readonly favorite?: boolean
+  readonly playCount?: number
+  readonly positionTicks?: number
+  readonly lastPlayedVersionId?: string | null
+}
+
+export interface StateWrite {
   readonly canonicalId: string
+  readonly patch: UserStatePatch
   readonly updatedAtMs: number
 }
 
-export interface UserStateRecord extends StateWrite {
+export interface UserStateRecord extends DesiredUserState {
+  readonly canonicalId: string
   readonly revision: number
+  readonly updatedAtMs: number
 }
+
+interface PlaybackEventBase {
+  readonly localSessionId: string
+  readonly canonicalId: string
+  readonly versionId: string
+  readonly positionTicks: number
+  readonly occurredAtMs: number
+}
+
+export type PlaybackEvent = PlaybackEventBase & (
+  | { readonly kind: "start" | "progress"; readonly played?: never }
+  | { readonly kind: "stop"; readonly played: boolean }
+)
 
 export interface ClaimRequest {
   readonly nowMs: number
   readonly leaseOwner: string
-  readonly leaseMs: number
-  readonly limit: number
 }
 
 export interface OutboxClaim {
   readonly targetId: string
   readonly canonicalId: string
   readonly sourceItemId: string
+  readonly upstreamItemId: string
+  readonly upstreamUserId: string
   readonly serverId: string
   readonly serverGeneration: number
   readonly desiredRevision: number
   readonly payload: DesiredUserState
+  readonly attemptCount: number
   readonly leaseOwner: string
   readonly leaseExpiresAtMs: number
 }
@@ -275,21 +302,46 @@ export interface OutboxClaim {
 export interface OutboxAcknowledgement {
   readonly targetId: string
   readonly desiredRevision: number
+  readonly serverGeneration: number
   readonly leaseOwner: string
   readonly acknowledgedAtMs: number
 }
 
 export interface OutboxUncertainty {
   readonly targetId: string
-  readonly leaseOwner: string
+  readonly desiredRevision: number
+  readonly code: string
   readonly uncertainAtMs: number
+  readonly nextAttemptAtMs: number
+}
+
+export interface OutboxDispatch {
+  readonly targetId: string
+  readonly desiredRevision: number
+  readonly serverGeneration: number
+  readonly leaseOwner: string
+  readonly dispatchedAtMs: number
+}
+
+export interface OutboxFailureUpdate {
+  readonly targetId: string
+  readonly desiredRevision: number
+  readonly serverGeneration: number
+  readonly leaseOwner: string
+  readonly code: string
+  readonly failedAtMs: number
+  readonly nextAttemptAtMs: number
+  readonly permanent: boolean
 }
 
 export interface MaintenanceResult {
   readonly expiredDashboardSessions: number
   readonly expiredEmbyTokens: number
   readonly expiredRateLimits: number
+  readonly expiredPlaybackSessions: number
   readonly expiredQueryGenerations: number
   readonly expiredMetadataCacheRows: number
   readonly releasedOutboxLeases: number
+  readonly cancelledOutboxTargets: number
+  readonly createdOutboxTargets: number
 }

@@ -38,6 +38,7 @@ const server = (index: number): UpstreamServer => ({
   password: "upstream-password",
   accessToken: "token",
   accessTokenExpiresAtMs: null,
+  upstreamUserId: `user-${index}`,
   userAgent: "oh-my-emby-test",
   enabled: true,
   health: "healthy",
@@ -310,11 +311,13 @@ describe("Federation", () => {
       const repo = yield* Repositories
       yield* repo.writeUserStateAndTargets({
         canonicalId,
-        played: false,
-        favorite: true,
-        playCount: 0,
-        positionTicks: 123,
-        lastPlayedVersionId: null,
+        patch: {
+          played: false,
+          favorite: true,
+          playCount: 0,
+          positionTicks: 123,
+          lastPlayedVersionId: null
+        },
         updatedAtMs: 2_000
       })
       yield* repo.invalidateStateDependentQueryGenerations()

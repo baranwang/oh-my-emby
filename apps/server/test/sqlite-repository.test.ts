@@ -31,9 +31,9 @@ const makeHarness = async (): Promise<RepositoryHarness> => {
         database.run(`
           INSERT INTO upstream_servers (
             id, catalog_namespace, verified_catalog_id, generation, name, base_url,
-            username, password, access_token, access_token_expires_at_ms, user_agent,
+            username, password, access_token, access_token_expires_at_ms, upstream_user_id, user_agent,
             enabled, health, last_success_at_ms, created_at_ms, updated_at_ms
-          ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, NULL, NULL, ?, 1, 'healthy', ?, ?, ?)
+          ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, NULL, NULL, 'upstream-user-id', ?, 1, 'healthy', ?, ?, ?)
         `, [
           "server-1",
           "catalog:server-1",

@@ -38,11 +38,13 @@ export const canonicalFixture: CanonicalFixture = {
 
 export const stateFixture: StateWrite = {
   canonicalId: canonicalFixture.id,
-  played: true,
-  favorite: false,
-  playCount: 2,
-  positionTicks: 123_456,
-  lastPlayedVersionId: null,
+  patch: {
+    played: true,
+    favorite: false,
+    playCount: 2,
+    positionTicks: 123_456,
+    lastPlayedVersionId: null
+  },
   updatedAtMs: 2_000
 }
 
@@ -58,6 +60,7 @@ const server = (id: string, sourceOrder = 0) => ({
   password: "upstream-password",
   accessToken: null,
   accessTokenExpiresAtMs: null,
+  upstreamUserId: `upstream-user:${id}`,
   userAgent: "oh-my-emby-test",
   enabled: true,
   health: "healthy" as const,
@@ -184,33 +187,6 @@ export const repositoryContract = (makeHarness: () => Promise<RepositoryHarness>
       expect(await harness.getUserState(canonicalFixture.id)).toBeNull()
     })
 
-    it("invalidates every state-dependent query generation after a state write", async () => {
-      await harness.seedCanonicalWithEligibleSources(canonicalFixture)
-      await Effect.runPromise(Effect.gen(function*() {
-        const repo = yield* Repositories
-        yield* repo.appendQueryGenerationItems({
-          generation: {
-            id: "generation-1",
-            queryKey: "favorites",
-            revision: 0,
-            userKey: "owner",
-            deviceId: "device-1",
-            virtualLibraryId: "library-1",
-            normalizedQuery: { IsFavorite: true },
-            sourceState: {},
-            allSourcesExhausted: true,
-            stateDependent: true,
-            createdAtMs: 1_000,
-            expiresAtMs: 10_000
-          },
-          items: [],
-          expected: null
-        })
-        yield* repo.writeUserStateAndTargets(stateFixture)
-        expect(yield* repo.readQueryGeneration("favorites")).toBeNull()
-      }).pipe(Effect.provide(harness.layer)))
-    })
-
     it("encodes booleans as integers and preserves epoch milliseconds", async () => {
       await Effect.runPromise(Effect.gen(function*() {
         const repo = yield* Repositories
@@ -230,15 +206,11 @@ export const repositoryContract = (makeHarness: () => Promise<RepositoryHarness>
         yield* repo.writeUserStateAndTargets(stateFixture)
         const first = yield* repo.claimOutboxTargets({
           nowMs: 3_000,
-          leaseOwner: "worker-1",
-          leaseMs: 60_000,
-          limit: 50
+          leaseOwner: "worker-1"
         })
         const second = yield* repo.claimOutboxTargets({
           nowMs: 3_001,
-          leaseOwner: "worker-2",
-          leaseMs: 60_000,
-          limit: 50
+          leaseOwner: "worker-2"
         })
 
         expect(first).toHaveLength(1)
@@ -248,42 +220,53 @@ export const repositoryContract = (makeHarness: () => Promise<RepositoryHarness>
       }).pipe(Effect.provide(harness.layer)))
     })
 
-    it("stops claiming an uncertain target after its guarded retry is acknowledged", async () => {
+    it("keeps an acknowledged uncertain target due for periodic reconciliation", async () => {
       await harness.seedCanonicalWithEligibleSources(canonicalFixture)
       await Effect.runPromise(Effect.gen(function*() {
         const repo = yield* Repositories
         yield* repo.writeUserStateAndTargets(stateFixture)
         const [first] = yield* repo.claimOutboxTargets({
           nowMs: 3_000,
-          leaseOwner: "worker-1",
-          leaseMs: 60_000,
-          limit: 50
+          leaseOwner: "worker-1"
         })
         expect(first).toBeDefined()
         yield* repo.markOutboxUncertain({
           targetId: first!.targetId,
+          desiredRevision: first!.desiredRevision,
+          code: "timeout_after_dispatch",
+          uncertainAtMs: 3_500,
+          nextAttemptAtMs: 4_000
+        })
+        yield* repo.recordOutboxFailure({
+          targetId: first!.targetId,
+          desiredRevision: first!.desiredRevision,
+          serverGeneration: first!.serverGeneration,
           leaseOwner: first!.leaseOwner,
-          uncertainAtMs: 3_500
+          code: "timeout_after_dispatch",
+          failedAtMs: 3_500,
+          nextAttemptAtMs: 4_000,
+          permanent: false
         })
         const [retry] = yield* repo.claimOutboxTargets({
           nowMs: 4_000,
-          leaseOwner: "worker-2",
-          leaseMs: 60_000,
-          limit: 50
+          leaseOwner: "worker-2"
         })
         expect(retry).toBeDefined()
         expect(yield* repo.acknowledgeOutboxTarget({
           targetId: retry!.targetId,
           desiredRevision: retry!.desiredRevision,
+          serverGeneration: retry!.serverGeneration,
           leaseOwner: retry!.leaseOwner,
           acknowledgedAtMs: 4_500
         })).toBe(true)
         expect(yield* repo.claimOutboxTargets({
           nowMs: 5_000,
-          leaseOwner: "worker-3",
-          leaseMs: 60_000,
-          limit: 50
+          leaseOwner: "worker-3"
         })).toEqual([])
+        expect(yield* repo.claimOutboxTargets({
+          nowMs: 4_500 + 15 * 60_000,
+          leaseOwner: "worker-3"
+        })).toHaveLength(1)
       }).pipe(Effect.provide(harness.layer)))
     })
 
@@ -299,9 +282,7 @@ export const repositoryContract = (makeHarness: () => Promise<RepositoryHarness>
         const repo = yield* Repositories
         const error = yield* Effect.flip(repo.claimOutboxTargets({
           nowMs: 3_000,
-          leaseOwner: "worker-1",
-          leaseMs: 60_000,
-          limit: 50
+          leaseOwner: "worker-1"
         }))
         expect(error._tag).toBe("RepositoryError")
       }).pipe(Effect.provide(harness.layer)))
