@@ -373,4 +373,34 @@ describe("Emby catalog routes", () => {
       }]
     })
   })
+
+  it("returns JSON 404 before PlaybackInfo work for an unknown canonical item", async () => {
+    let playbackCalls = 0
+    const base = services()
+    const app = makeEmbyHandler({
+      ...base,
+      federation: {
+        ...base.federation,
+        lookupMembership: () => Effect.succeed(null)
+      },
+      playback: {
+        getInfo: () => {
+          playbackCalls++
+          return Effect.succeed({ playSessionId: "unused", mediaSources: [] })
+        }
+      }
+    })
+
+    const response = await Effect.runPromise(app(new Request(
+      "https://local/Items/missing/PlaybackInfo",
+      { method: "POST", headers: { authorization: "Bearer token" } }
+    )))
+
+    expect(response.status).toBe(404)
+    expect(response.headers.get("content-type")).toContain("application/json")
+    await expect(response.json()).resolves.toEqual({
+      error: { code: "NotFound", message: "Resource not found" }
+    })
+    expect(playbackCalls).toBe(0)
+  })
 })

@@ -493,7 +493,9 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
 
   if (playbackInfo) {
     const canonicalId = yield* pathSegment(playbackInfo[1]!)
-    const info = yield* services.playback.getInfo(canonicalId)
+    const membership = yield* services.federation.lookupMembership(canonicalId)
+    if (membership === null) return yield* Effect.fail(new EmbyNotFound())
+    const info = yield* services.playback.getInfo(membership.item.id)
     return json(playbackInfoDto(info))
   }
 
