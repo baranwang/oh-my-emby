@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdtemp, rm, symlink } from "node:fs/promises"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 
@@ -15,6 +15,8 @@ describe("Bun production routing", () => {
     const assetsDir = join(directory, "dashboard")
     await Bun.write(join(assetsDir, "index.html"), "<main>dashboard</main>")
     await Bun.write(join(assetsDir, "assets", "app.js"), "console.log('dashboard')")
+    await Bun.write(join(directory, "secret.txt"), "outside-secret")
+    await symlink("../secret.txt", join(assetsDir, "leak.txt"))
     runtime = await startBunRuntime({
       hostname: "127.0.0.1",
       port: 0,
@@ -42,6 +44,15 @@ describe("Bun production routing", () => {
     })
     expect(response.status).toBe(404)
     expect(response.headers.get("content-type")).not.toContain("text/html")
+  })
+
+  it("keeps symlinked assets outside the Dashboard root as plain 404", async () => {
+    const response = await request("/dashboard/leak.txt", {
+      headers: { accept: "text/html,*/*" }
+    })
+    expect(response.status).toBe(404)
+    expect(response.headers.get("content-type")).not.toContain("text/html")
+    expect(await response.text()).not.toContain("outside-secret")
   })
 
   it("serves the SPA only for GET and HEAD Dashboard navigations", async () => {

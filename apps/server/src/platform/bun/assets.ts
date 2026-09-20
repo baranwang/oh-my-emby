@@ -1,3 +1,4 @@
+import { realpath } from "node:fs/promises"
 import { resolve, sep } from "node:path"
 
 import { Effect } from "effect"
@@ -8,6 +9,22 @@ const plain = (status: number, body: string) => new Response(body, {
   status,
   headers: { "content-type": "text/plain; charset=utf-8" }
 })
+
+const isMissing = (error: unknown): boolean =>
+  typeof error === "object" && error !== null && "code" in error &&
+  (error.code === "ENOENT" || error.code === "ENOTDIR")
+
+const existingRealPath = async (path: string): Promise<string | null> => {
+  try {
+    return await realpath(path)
+  } catch (error) {
+    if (isMissing(error)) return null
+    throw error
+  }
+}
+
+const isWithin = (path: string, root: string): boolean =>
+  path === root || path.startsWith(`${root}${sep}`)
 
 const resolveAsset = (request: Request, root: string): string | null => {
   const pathname = new URL(request.url).pathname
@@ -53,10 +70,19 @@ export const serveDashboardAsset = (
   if (path === null) return plain(404, "Not Found")
 
   try {
-    const exact = await fileResponse(path, request.method === "HEAD")
-    if (exact !== null) return exact
+    const canonicalRoot = await existingRealPath(root)
+    if (canonicalRoot === null) return plain(404, "Not Found")
+
+    const canonicalPath = await existingRealPath(path)
+    if (canonicalPath !== null) {
+      if (!isWithin(canonicalPath, canonicalRoot)) return plain(404, "Not Found")
+      return await fileResponse(canonicalPath, request.method === "HEAD") ?? plain(404, "Not Found")
+    }
     if (!isDashboardNavigationRequest(request)) return plain(404, "Not Found")
-    return await fileResponse(resolve(root, "index.html"), request.method === "HEAD") ?? plain(404, "Not Found")
+
+    const fallbackPath = await existingRealPath(resolve(root, "index.html"))
+    if (fallbackPath === null || !isWithin(fallbackPath, canonicalRoot)) return plain(404, "Not Found")
+    return await fileResponse(fallbackPath, request.method === "HEAD") ?? plain(404, "Not Found")
   } catch {
     return plain(502, "Asset service unavailable")
   }
