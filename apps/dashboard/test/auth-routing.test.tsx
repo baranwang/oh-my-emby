@@ -1,10 +1,17 @@
+import { act } from "react"
+import { createRoot } from "react-dom/client"
 import { renderToStaticMarkup } from "react-dom/server"
 import { QueryClient } from "@tanstack/react-query"
 import { createMemoryHistory } from "@tanstack/react-router"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { sectionFromPathname } from "../src/components/app-shell/app-shell.js"
-import { SidebarInset } from "../src/components/ui/sidebar.js"
+import {
+  SidebarInset,
+  SidebarMenuButton,
+  SidebarProvider,
+  useSidebar
+} from "../src/components/ui/sidebar.js"
 import {
   handleUnauthorized,
   logout,
@@ -36,6 +43,8 @@ const makeTestRouter = (path: string, fetch: typeof globalThis.fetch) => {
   return { queryClient, router }
 }
 
+globalThis.IS_REACT_ACT_ENVIRONMENT = true
+
 afterEach(() => {
   vi.unstubAllGlobals()
 })
@@ -53,6 +62,41 @@ it("renders shell content with exactly one main landmark", () => {
   )
 
   expect(markup.match(/<main\b/g)).toHaveLength(1)
+})
+
+it("closes the mobile drawer after selecting navigation", async () => {
+  vi.stubGlobal("innerWidth", 500)
+  vi.stubGlobal("matchMedia", vi.fn(() => ({
+    matches: true,
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn()
+  })))
+  const Probe = () => {
+    const sidebar = useSidebar()
+    return (
+      <>
+        <button onClick={() => sidebar.setOpenMobile(true)}>Open</button>
+        <output>{String(sidebar.openMobile)}</output>
+        <SidebarMenuButton>Navigate</SidebarMenuButton>
+      </>
+    )
+  }
+  const container = document.body.appendChild(document.createElement("div"))
+  const root = createRoot(container)
+  await act(async () => root.render(
+    <SidebarProvider labels={{ toggle: "Toggle", title: "Navigation", description: "Menu", close: "Close" }}>
+      <Probe />
+    </SidebarProvider>
+  ))
+
+  const buttons = [...container.querySelectorAll("button")]
+  await act(async () => buttons.find((button) => button.textContent === "Open")?.click())
+  expect(container.querySelector("output")?.textContent).toBe("true")
+  await act(async () => buttons.find((button) => button.textContent === "Navigate")?.click())
+  expect(container.querySelector("output")?.textContent).toBe("false")
+
+  await act(async () => root.unmount())
+  container.remove()
 })
 
 describe("Dashboard authentication routing", () => {
@@ -110,6 +154,8 @@ describe("Dashboard authentication routing", () => {
     await router.load()
 
     expect(router.state.location.publicHref).toBe("/dashboard/servers")
+    expect(router.state.matches.some((match) => match.routeId === "/_authenticated/servers/"))
+      .toBe(true)
   })
 })
 

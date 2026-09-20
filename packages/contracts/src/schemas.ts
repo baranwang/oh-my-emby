@@ -122,9 +122,14 @@ export const OutboxFailureView = Schema.Struct({
 
 export type BootstrapView = typeof BootstrapView.Type
 export type SessionView = typeof SessionView.Type
+export type PasswordChangeInput = typeof PasswordChangeInput.Type
+export type SecretPatch = typeof SecretPatch.Type
 export type ServerInput = typeof ServerInput.Type
 export type ServerView = typeof ServerView.Type
+export type ConnectionTestView = typeof ConnectionTestView.Type
+export type ServerHealthView = typeof ServerHealthView.Type
 export type SourceLibraryView = typeof SourceLibraryView.Type
+export type SourceBindingInput = typeof SourceBindingInput.Type
 export type VirtualLibraryInput = typeof VirtualLibraryInput.Type
 export type VirtualLibraryView = typeof VirtualLibraryView.Type
 export type SystemStatusView = typeof SystemStatusView.Type

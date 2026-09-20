@@ -8,7 +8,7 @@ export const queryKeys = {
   libraries: ["libraries"] as const,
   library: (id: string) => ["libraries", id] as const,
   system: ["system"] as const,
-  outboxFailures: ["system", "outboxFailures"] as const
+  outboxFailures: ["system", "outbox-failures"] as const
 }
 
 export const protectedQueryFamilies = [

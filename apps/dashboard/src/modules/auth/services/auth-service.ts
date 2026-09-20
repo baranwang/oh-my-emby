@@ -11,6 +11,11 @@ type Credentials = {
   readonly password: string
 }
 
+type PasswordChange = {
+  readonly currentPassword: string
+  readonly newPassword: string
+}
+
 const run = async <A, E>(effect: Effect.Effect<A, E>): Promise<A> => {
   const result = await Effect.runPromise(Effect.result(
     effect.pipe(Effect.provideService(
@@ -73,6 +78,12 @@ export const login = async (credentials: Credentials, queryClient: QueryClient) 
 
 export const logout = async (queryClient: QueryClient) => {
   await runProtected(apiClient.auth.logout(), queryClient)
+  clearProtectedQueries(queryClient)
+  await queryClient.refetchQueries({ queryKey: queryKeys.session, exact: true, type: "all" })
+}
+
+export const changePassword = async (input: PasswordChange, queryClient: QueryClient) => {
+  await runProtected(apiClient.auth.changePassword({ payload: input }), queryClient)
   clearProtectedQueries(queryClient)
   await queryClient.refetchQueries({ queryKey: queryKeys.session, exact: true, type: "all" })
 }
