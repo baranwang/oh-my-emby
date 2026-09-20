@@ -209,6 +209,7 @@ export interface IdentityResolution {
 export interface QueryGeneration {
   readonly id: string
   readonly queryKey: string
+  readonly revision: number
   readonly userKey: string
   readonly deviceId: string
   readonly virtualLibraryId: string
@@ -229,6 +230,10 @@ export interface QueryGenerationItem {
 export interface QueryGenerationAppend {
   readonly generation: QueryGeneration
   readonly items: ReadonlyArray<QueryGenerationItem>
+  readonly expected: {
+    readonly id: string
+    readonly revision: number
+  } | null
 }
 
 export interface DesiredUserState {

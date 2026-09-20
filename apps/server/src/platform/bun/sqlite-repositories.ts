@@ -1544,6 +1544,7 @@ const makeRepositories = Effect.gen(function*() {
   interface QueryGenerationRow {
     readonly id: string
     readonly query_key: string
+    readonly revision: unknown
     readonly user_key: string
     readonly device_id: string
     readonly virtual_library_id: string
@@ -1558,6 +1559,7 @@ const makeRepositories = Effect.gen(function*() {
   const queryGeneration = (row: QueryGenerationRow): QueryGeneration => ({
     id: row.id,
     queryKey: row.query_key,
+    revision: integer(row.revision, "revision"),
     userKey: row.user_key,
     deviceId: row.device_id,
     virtualLibraryId: row.virtual_library_id,
@@ -1602,27 +1604,29 @@ const makeRepositories = Effect.gen(function*() {
         message: `at most ${DB_BATCH_SIZE} items may be appended atomically`
       }))
     }
+    const requiredRevision = input.expected?.id === input.generation.id
+      ? input.expected.revision + 1
+      : 0
+    if (input.generation.revision !== requiredRevision) {
+      return Effect.fail(new RepositoryError({
+        operation: "appendQueryGenerationItems",
+        message: `generation revision must be ${requiredRevision}`
+      }))
+    }
     return database("appendQueryGenerationItems", sql.withTransaction(Effect.gen(function*() {
       const generation = input.generation
-      yield* sql.unsafe(
-        "DELETE FROM query_generations WHERE query_key = ? AND id <> ?",
-        [generation.queryKey, generation.id]
-      )
-      yield* sql.unsafe(`
+      const insert = () => sql.unsafe<{ readonly id: string }>(`
         INSERT INTO query_generations (
-          id, query_key, user_key, device_id, virtual_library_id,
+          id, query_key, revision, user_key, device_id, virtual_library_id,
           normalized_query_json, source_state_json, all_sources_exhausted,
           state_dependent, created_at_ms, expires_at_ms
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(query_key) DO UPDATE SET
-          normalized_query_json = excluded.normalized_query_json,
-          source_state_json = excluded.source_state_json,
-          all_sources_exhausted = excluded.all_sources_exhausted,
-          state_dependent = excluded.state_dependent,
-          expires_at_ms = excluded.expires_at_ms
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(query_key) DO NOTHING
+        RETURNING id
       `, [
         generation.id,
         generation.queryKey,
+        generation.revision,
         generation.userKey,
         generation.deviceId,
         generation.virtualLibraryId,
@@ -1633,6 +1637,39 @@ const makeRepositories = Effect.gen(function*() {
         generation.createdAtMs,
         generation.expiresAtMs
       ])
+
+      let applied: boolean
+      if (input.expected === null) {
+        applied = (yield* insert()).length === 1
+      } else if (input.expected.id === generation.id) {
+        const updated = yield* sql.unsafe<{ readonly id: string }>(`
+          UPDATE query_generations
+          SET revision = ?, normalized_query_json = ?, source_state_json = ?,
+              all_sources_exhausted = ?, state_dependent = ?, expires_at_ms = ?
+          WHERE query_key = ? AND id = ? AND revision = ?
+          RETURNING id
+        `, [
+          generation.revision,
+          canonicalJson(generation.normalizedQuery),
+          canonicalJson(generation.sourceState),
+          generation.allSourcesExhausted ? 1 : 0,
+          generation.stateDependent ? 1 : 0,
+          generation.expiresAtMs,
+          generation.queryKey,
+          input.expected.id,
+          input.expected.revision
+        ])
+        applied = updated.length === 1
+      } else {
+        const removed = yield* sql.unsafe<{ readonly id: string }>(`
+          DELETE FROM query_generations
+          WHERE query_key = ? AND id = ? AND revision = ?
+          RETURNING id
+        `, [generation.queryKey, input.expected.id, input.expected.revision])
+        applied = removed.length === 1 && (yield* insert()).length === 1
+      }
+
+      if (!applied) return false
       for (const item of input.items) {
         yield* sql.unsafe(`
           INSERT INTO query_generation_items (
@@ -1641,6 +1678,7 @@ const makeRepositories = Effect.gen(function*() {
           ON CONFLICT(generation_id, canonical_id) DO NOTHING
         `, [generation.id, item.ordinal, item.canonicalId, canonicalJson(item.sortValues)])
       }
+      return true
     })))
   }
 
@@ -1669,30 +1707,6 @@ const makeRepositories = Effect.gen(function*() {
     `, [sourceItemId, projectionKey])).pipe(Effect.flatMap((rows) => decode(
       "readMetadataProjection",
       () => rows[0] ? metadataProjection(rows[0]) : null
-    )))
-
-  const readCachedSourceItems: RepositoriesService["readCachedSourceItems"] = (input) =>
-    database("readCachedSourceItems", sql.unsafe<MetadataProjectionRow>(`
-      SELECT cache.*
-      FROM source_metadata_cache cache
-      JOIN source_items item ON item.id = cache.source_item_id
-      WHERE item.server_id = ?
-        AND item.server_generation = ?
-        AND item.source_library_id = ?
-        AND cache.projection_key = ?
-        AND cache.stale_until_ms > ?
-      ORDER BY item.upstream_item_id, item.id
-      LIMIT ?
-    `, [
-      input.serverId,
-      input.serverGeneration,
-      input.sourceLibraryId,
-      input.projectionKey,
-      input.usableAtMs,
-      Math.max(0, Math.min(DB_BATCH_SIZE, input.limit))
-    ])).pipe(Effect.flatMap((rows) => decode(
-      "readCachedSourceItems",
-      () => rows.map(metadataProjection)
     )))
 
   const writeMetadataProjection: RepositoriesService["writeMetadataProjection"] = (input) =>
@@ -1777,7 +1791,11 @@ const makeRepositories = Effect.gen(function*() {
           AND version.server_generation = item.server_generation
           AND (? IS NULL OR EXISTS (
             SELECT 1 FROM source_metadata_cache cache
-            WHERE cache.source_item_id = item.id AND cache.stale_until_ms > ?
+            JOIN json_each(cache.payload_json, '$.MediaSources') detail_version
+            WHERE cache.source_item_id = item.id
+              AND cache.projection_key = 'detail'
+              AND cache.stale_until_ms > ?
+              AND json_extract(detail_version.value, '$.Id') = version.upstream_media_source_id
           ))
           AND EXISTS (
             SELECT 1
@@ -2151,7 +2169,6 @@ const makeRepositories = Effect.gen(function*() {
     readQueryGenerationItems,
     appendQueryGenerationItems,
     readMetadataProjection,
-    readCachedSourceItems,
     writeMetadataProjection,
     mergeCanonicalMetadata,
     readCatalogItems,

@@ -192,6 +192,7 @@ export const repositoryContract = (makeHarness: () => Promise<RepositoryHarness>
           generation: {
             id: "generation-1",
             queryKey: "favorites",
+            revision: 0,
             userKey: "owner",
             deviceId: "device-1",
             virtualLibraryId: "library-1",
@@ -202,7 +203,8 @@ export const repositoryContract = (makeHarness: () => Promise<RepositoryHarness>
             createdAtMs: 1_000,
             expiresAtMs: 10_000
           },
-          items: []
+          items: [],
+          expected: null
         })
         yield* repo.writeUserStateAndTargets(stateFixture)
         expect(yield* repo.readQueryGeneration("favorites")).toBeNull()

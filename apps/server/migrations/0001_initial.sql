@@ -158,6 +158,7 @@ CREATE TABLE source_metadata_cache (
 CREATE TABLE query_generations (
   id TEXT PRIMARY KEY,
   query_key TEXT NOT NULL UNIQUE,
+  revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
   user_key TEXT NOT NULL,
   device_id TEXT NOT NULL,
   virtual_library_id TEXT NOT NULL REFERENCES virtual_libraries(id) ON DELETE CASCADE,

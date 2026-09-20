@@ -49,15 +49,6 @@ export interface MetadataProjection {
   readonly updatedAtMs: number
 }
 
-export interface CachedSourceItemsLookup {
-  readonly serverId: string
-  readonly serverGeneration: number
-  readonly sourceLibraryId: string
-  readonly projectionKey: string
-  readonly usableAtMs: number
-  readonly limit: number
-}
-
 export interface CatalogItemRecord {
   readonly canonical: CanonicalItem
   readonly claims: ReadonlyArray<IdentityClaim>
@@ -135,14 +126,12 @@ export interface RepositoriesService {
   readonly readQueryGenerationItems: (
     generationId: string
   ) => Effect.Effect<ReadonlyArray<QueryGenerationItem>, RepositoryError>
-  readonly appendQueryGenerationItems: (input: QueryGenerationAppend) => Effect.Effect<void, RepositoryError>
+  /** Atomically publishes one bounded item chunk and its matching state when the generation CAS wins. */
+  readonly appendQueryGenerationItems: (input: QueryGenerationAppend) => Effect.Effect<boolean, RepositoryError>
   readonly readMetadataProjection: (
     sourceItemId: string,
     projectionKey: string
   ) => Effect.Effect<MetadataProjection | null, RepositoryError>
-  readonly readCachedSourceItems: (
-    input: CachedSourceItemsLookup
-  ) => Effect.Effect<ReadonlyArray<MetadataProjection>, RepositoryError>
   readonly writeMetadataProjection: (
     input: MetadataProjection
   ) => Effect.Effect<void, RepositoryError>

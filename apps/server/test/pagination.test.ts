@@ -90,7 +90,7 @@ describe("federated pagination generations", () => {
       }, [{ serverId: "server", generation: 1 }])
     }).pipe(Effect.provide(repositories)))
     const upstream = Layer.succeed(UpstreamClient, UpstreamClient.of({
-      request: ({ path }) => Effect.succeed(handle(path)) as any,
+      request: ({ path }) => Effect.promise(() => Promise.resolve(handle(path))) as any,
       authenticate: () => Effect.die("unused") as any,
       getServerIdentity: () => Effect.die("unused") as any,
       listSourceLibraries: () => Effect.die("unused") as any,
@@ -205,6 +205,78 @@ describe("federated pagination generations", () => {
     const database = new Database(filename)
     expect(database.query("SELECT count(*) AS count FROM query_generations").get()).toEqual({ count: 1 })
     expect(database.query("SELECT count(*) AS count FROM query_generation_items").get()).toEqual({ count: 150 })
+    database.close()
+  })
+
+  it("resumes after an interrupted generation chunk without skipping ordinals", async () => {
+    const { layer } = await setup((path) => {
+      const url = new URL(path, "https://local")
+      const start = Number(url.searchParams.get("StartIndex"))
+      const limit = Number(url.searchParams.get("Limit"))
+      const all = Array.from({ length: 150 }, (_, index) => movie(String(index + 1), String(index).padStart(3, "0")))
+      return { Items: all.slice(start, start + limit), TotalRecordCount: all.length }
+    })
+    const interrupted = new Database(filename)
+    interrupted.exec(`
+      CREATE TRIGGER abort_second_generation_chunk
+      BEFORE INSERT ON query_generation_items
+      WHEN NEW.ordinal >= 100
+      BEGIN
+        SELECT RAISE(ABORT, 'stop after first generation chunk');
+      END;
+    `)
+    interrupted.close()
+
+    const run = () => Effect.runPromise(Effect.gen(function*() {
+      const federation = yield* Federation
+      return yield* federation.list(query({ startIndex: 100, limit: 50 }))
+    }).pipe(Effect.provide(layer)))
+
+    await expect(run()).rejects.toMatchObject({ _tag: "RepositoryError" })
+    const checkpoint = new Database(filename)
+    expect(checkpoint.query("SELECT count(*) AS count FROM query_generation_items").get()).toEqual({ count: 100 })
+    const row = checkpoint.query<{ source_state_json: string }, []>(
+      "SELECT source_state_json FROM query_generations"
+    ).get()!
+    expect((JSON.parse(row.source_state_json).sources[0] as { continuation: number }).continuation).toBe(100)
+    checkpoint.exec("DROP TRIGGER abort_second_generation_chunk")
+    checkpoint.close()
+
+    const resumed = await run()
+    expect(resumed.items).toHaveLength(50)
+    const complete = new Database(filename)
+    expect(complete.query(`
+      SELECT count(*) AS count, min(ordinal) AS first, max(ordinal) AS last
+      FROM query_generation_items
+    `).get()).toEqual({ count: 150, first: 0, last: 149 })
+    complete.close()
+  })
+
+  it("converges concurrent same-query publications on the repository winner", async () => {
+    let arrivals = 0
+    let release!: () => void
+    const barrier = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const { layer } = await setup(async () => {
+      const arrival = ++arrivals
+      if (arrivals === 2) release()
+      await barrier
+      return {
+        Items: [movie(String(arrival), arrival === 1 ? "Alpha" : "Beta")],
+        TotalRecordCount: 1
+      }
+    })
+    const run = () => Effect.runPromise(Effect.gen(function*() {
+      const federation = yield* Federation
+      return yield* federation.list(query({ limit: 1 }))
+    }).pipe(Effect.provide(layer)))
+
+    const [first, second] = await Promise.all([run(), run()])
+    expect(first.items.map(({ id }) => id)).toEqual(second.items.map(({ id }) => id))
+    const database = new Database(filename)
+    expect(database.query("SELECT count(*) AS count FROM query_generations").get()).toEqual({ count: 1 })
+    expect(database.query("SELECT count(*) AS count FROM query_generation_items").get()).toEqual({ count: 1 })
     database.close()
   })
 })

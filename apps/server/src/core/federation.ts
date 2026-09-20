@@ -412,20 +412,18 @@ export const makeFederationLayer = (
       generation: QueryGeneration,
       state: GenerationState,
       items: ReadonlyArray<QueryGenerationItem>,
-      exhausted: boolean
+      exhausted: boolean,
+      expected: { readonly id: string; readonly revision: number } | null
     ) => Effect.gen(function*() {
-      const saved = { ...generation, sourceState: state as unknown as JsonValue, allSourcesExhausted: exhausted }
-      if (items.length === 0) {
-        yield* repositories.appendQueryGenerationItems({ generation: saved, items: [] })
-      } else {
-        for (let index = 0; index < items.length; index += DB_BATCH_SIZE) {
-          yield* repositories.appendQueryGenerationItems({
-            generation: saved,
-            items: items.slice(index, index + DB_BATCH_SIZE)
-          })
-        }
+      const revision = expected?.id === generation.id ? expected.revision + 1 : 0
+      const saved = {
+        ...generation,
+        revision,
+        sourceState: state as unknown as JsonValue,
+        allSourcesExhausted: exhausted
       }
-      return saved
+      const applied = yield* repositories.appendQueryGenerationItems({ generation: saved, items, expected })
+      return applied ? saved : null
     })
 
     const cacheItem = (
@@ -487,212 +485,234 @@ export const makeFederationLayer = (
         const sources = yield* repositories.resolveEligibleSources(query.virtualLibraryId)
         const normalized = normalizedQuery(query, searchTerm)
         const key = queryKey(query, normalized)
-        const currentTime = now()
-        let generation = yield* repositories.readQueryGeneration(key)
-        let state = generation === null ? newState(sources) : decodeState(generation.sourceState, sources)
-        if (
-          generation === null || generation.expiresAtMs <= currentTime ||
-          !sameParticipation(state, sources)
-        ) {
-          state = newState(sources)
-          generation = {
-            id: crypto.randomUUID(),
-            queryKey: key,
-            userKey: query.userId,
-            deviceId: query.deviceId,
-            virtualLibraryId: query.virtualLibraryId,
-            normalizedQuery: normalized,
-            sourceState: state as unknown as JsonValue,
-            allSourcesExhausted: false,
-            stateDependent: stateDependent(query),
-            createdAtMs: currentTime,
-            expiresAtMs: currentTime + QUERY_GENERATION_TTL_MS
-          }
-          yield* persist(generation, state, [], false)
-        }
-
-        const published = [...yield* repositories.readQueryGenerationItems(generation.id)]
-        const publishedIds = new Set(published.map(({ canonicalId }) => canonicalId))
-        const additions: Array<QueryGenerationItem> = []
-        const blocked = new Set<string>()
-        const failed = new Set<string>()
-        let successes = 0
         const projection = projectionKey(query)
 
-        if (localMembershipOnly(query) && published.length < requestedEnd && state.localBuffer.length === 0) {
-          const favorite = query.filters.find(({ field }) => field === "favorite")?.value
-          const resume = query.filters.find(({ field }) => field === "resume")?.value
-          const ids = yield* repositories.listStateMemberCanonicalIds({
-            virtualLibraryId: query.virtualLibraryId,
-            ...(typeof favorite === "boolean" ? { favorite } : {}),
-            ...(typeof resume === "boolean" ? { resume } : {}),
-            limit: MAX_MATERIALIZED_ITEMS
-          })
-          const records = yield* readCatalog(ids)
-          state.localBuffer = records
-            .filter((record) => matchesFilters(record, query.filters))
-            .map((record) => ({
-              canonicalId: record.canonical.id,
-              sortValues: sortValues(record, query.sort)
-            }))
-            .sort((left, right) => compareBuffered(left, right, query.sort))
-          for (const cursor of state.sources) cursor.exhausted = true
-        }
+        const openGeneration = Effect.gen(function*() {
+          while (true) {
+            const currentTime = now()
+            const current = yield* repositories.readQueryGeneration(key)
+            const currentState = current === null ? newState(sources) : decodeState(current.sourceState, sources)
+            if (
+              current !== null && current.expiresAtMs > currentTime &&
+              sameParticipation(currentState, sources)
+            ) return current
 
-        while (published.length + additions.length < requestedEnd && state.scanned < MAX_MATERIALIZED_ITEMS) {
-          if (state.localBuffer.length > 0) {
-            const next = state.localBuffer.shift()!
-            if (!publishedIds.has(next.canonicalId)) {
-              const entry = { ...next, ordinal: published.length + additions.length }
+            const state = newState(sources)
+            const replacement: QueryGeneration = {
+              id: crypto.randomUUID(),
+              queryKey: key,
+              revision: 0,
+              userKey: query.userId,
+              deviceId: query.deviceId,
+              virtualLibraryId: query.virtualLibraryId,
+              normalizedQuery: normalized,
+              sourceState: state as unknown as JsonValue,
+              allSourcesExhausted: false,
+              stateDependent: stateDependent(query),
+              createdAtMs: currentTime,
+              expiresAtMs: currentTime + QUERY_GENERATION_TTL_MS
+            }
+            const saved = yield* persist(
+              replacement,
+              state,
+              [],
+              false,
+              current === null ? null : { id: current.id, revision: current.revision }
+            )
+            if (saved !== null) return saved
+          }
+        })
+
+        retryPublication: while (true) {
+          let generation = yield* openGeneration
+          const state = decodeState(generation.sourceState, sources)
+          const published = [...yield* repositories.readQueryGenerationItems(generation.id)]
+          const publishedIds = new Set(published.map(({ canonicalId }) => canonicalId))
+          const blocked = new Set<string>()
+          let exhausted = generation.allSourcesExhausted
+
+          while (published.length < requestedEnd && state.scanned < MAX_MATERIALIZED_ITEMS && !exhausted) {
+            const additions: Array<QueryGenerationItem> = []
+            let dirty = false
+
+            if (
+              localMembershipOnly(query) && state.localBuffer.length === 0 &&
+              !state.sources.every((cursor) => cursor.exhausted)
+            ) {
+              const favorite = query.filters.find(({ field }) => field === "favorite")?.value
+              const resume = query.filters.find(({ field }) => field === "resume")?.value
+              const ids = yield* repositories.listStateMemberCanonicalIds({
+                virtualLibraryId: query.virtualLibraryId,
+                ...(typeof favorite === "boolean" ? { favorite } : {}),
+                ...(typeof resume === "boolean" ? { resume } : {}),
+                limit: MAX_MATERIALIZED_ITEMS
+              })
+              const records = yield* readCatalog(ids)
+              state.localBuffer = records
+                .filter((record) => matchesFilters(record, query.filters))
+                .map((record) => ({
+                  canonicalId: record.canonical.id,
+                  sortValues: sortValues(record, query.sort)
+                }))
+                .sort((left, right) => compareBuffered(left, right, query.sort))
+              for (const cursor of state.sources) cursor.exhausted = true
+              dirty = true
+            }
+
+            while (
+              published.length + additions.length < requestedEnd &&
+              additions.length < DB_BATCH_SIZE && state.scanned < MAX_MATERIALIZED_ITEMS
+            ) {
+              if (state.localBuffer.length > 0) {
+                const next = state.localBuffer.shift()!
+                dirty = true
+                if (!publishedIds.has(next.canonicalId)) {
+                  const entry = { ...next, ordinal: published.length + additions.length }
+                  additions.push(entry)
+                  publishedIds.add(entry.canonicalId)
+                }
+                continue
+              }
+
+              const pending = state.sources.filter((cursor) =>
+                !cursor.exhausted && cursor.buffer.length === 0 && !blocked.has(sourceKey(cursor))
+              )
+              if (pending.length > 0) {
+                let remainingScanBudget = MAX_MATERIALIZED_ITEMS - state.scanned
+                const fetches = pending.flatMap((cursor, index) => {
+                  if (remainingScanBudget <= 0) return []
+                  const pageLimit = Math.min(
+                    DB_BATCH_SIZE,
+                    Math.max(1, Math.floor(remainingScanBudget / (pending.length - index)))
+                  )
+                  remainingScanBudget -= pageLimit
+                  return [{ cursor, pageLimit }]
+                })
+                yield* Effect.forEach(fetches, ({ cursor, pageLimit }) => Effect.gen(function*() {
+                  const source = sources.find((candidate) => sourceKey(candidate) === sourceKey(cursor))!
+                  const path = listPath(source, query, cursor.continuation, pageLimit, searchTerm)
+                  const attempted = yield* deadline(
+                    upstream.request({
+                      serverId: source.serverId,
+                      generation: source.serverGeneration,
+                      path,
+                      method: "GET"
+                    }, Schema.Unknown),
+                    source.serverId,
+                    listDeadlineMs
+                  ).pipe(Effect.result)
+                  dirty = true
+                  if (Result.isSuccess(attempted)) {
+                    const processed = yield* Effect.gen(function*() {
+                      const received = yield* Effect.try({
+                        try: () => parsePage(attempted.success),
+                        catch: () => new UpstreamInvalidResponse({ serverId: source.serverId })
+                      })
+                      const page = { ...received, items: received.items.slice(0, pageLimit) }
+                      const observedAtMs = now()
+                      const items = yield* resolvePageItems(source, page.items, query, projection, observedAtMs, true)
+                      return { page, items }
+                    }).pipe(Effect.result)
+                    if (Result.isSuccess(processed)) {
+                      const { page, items } = processed.success
+                      cursor.continuation += page.items.length
+                      cursor.scanned += page.items.length
+                      state.scanned += page.items.length
+                      cursor.reportedTotal = page.totalRecordCount
+                      cursor.exhausted = page.items.length === 0 || (
+                        page.totalRecordCount !== null && cursor.continuation >= page.totalRecordCount
+                      )
+                      cursor.incomplete = false
+                      cursor.buffer.push(...items.sort((left, right) => compareBuffered(left, right, query.sort)))
+                      return
+                    }
+                    if (processed.failure instanceof RepositoryError) return yield* Effect.fail(processed.failure)
+                  }
+                  cursor.incomplete = true
+                  blocked.add(sourceKey(cursor))
+                }), { concurrency: MAX_FANOUT_CONCURRENCY, discard: true })
+
+                const bufferedIds = [...new Set(state.sources.flatMap((cursor) =>
+                  cursor.buffer.map(({ canonicalId }) => canonicalId)
+                ))]
+                const refreshed = new Map(
+                  (yield* readCatalog(bufferedIds)).map((record) => [record.canonical.id, record])
+                )
+                for (const cursor of state.sources) {
+                  cursor.buffer = cursor.buffer.flatMap(({ canonicalId }) => {
+                    const record = refreshed.get(canonicalId)
+                    return record && matchesFilters(record, query.filters)
+                      ? [{ canonicalId, sortValues: sortValues(record, query.sort) }]
+                      : []
+                  }).sort((left, right) => compareBuffered(left, right, query.sort))
+                }
+              }
+
+              const heads = state.sources.flatMap((cursor) => cursor.buffer[0]
+                ? [{ cursor, item: cursor.buffer[0] }]
+                : [])
+              if (heads.length === 0) {
+                if (state.sources.some((cursor) =>
+                  !cursor.exhausted && !blocked.has(sourceKey(cursor))
+                )) continue
+                break
+              }
+              heads.sort((left, right) => compareBuffered(left.item, right.item, query.sort))
+              const selected = heads[0]!
+              selected.cursor.buffer.shift()
+              dirty = true
+              if (publishedIds.has(selected.item.canonicalId)) continue
+              const entry = {
+                ...selected.item,
+                ordinal: published.length + additions.length
+              }
               additions.push(entry)
               publishedIds.add(entry.canonicalId)
             }
-            continue
-          }
 
-          const pending = state.sources.filter((cursor) =>
-            !cursor.exhausted && cursor.buffer.length === 0 && !blocked.has(sourceKey(cursor))
-          )
-          if (pending.length > 0) {
-            let remainingScanBudget = MAX_MATERIALIZED_ITEMS - state.scanned
-            const fetches = pending.flatMap((cursor, index) => {
-              if (remainingScanBudget <= 0) return []
-              const pageLimit = Math.min(
-                DB_BATCH_SIZE,
-                Math.max(1, Math.floor(remainingScanBudget / (pending.length - index)))
-              )
-              remainingScanBudget -= pageLimit
-              return [{ cursor, pageLimit }]
-            })
-            const results = yield* Effect.forEach(fetches, ({ cursor, pageLimit }) => Effect.gen(function*() {
-              const source = sources.find((candidate) => sourceKey(candidate) === sourceKey(cursor))!
-              const path = listPath(source, query, cursor.continuation, pageLimit, searchTerm)
-              const attempted = yield* deadline(
-                upstream.request({
-                  serverId: source.serverId,
-                  generation: source.serverGeneration,
-                  path,
-                  method: "GET"
-                }, Schema.Unknown),
-                source.serverId,
-                listDeadlineMs
-              ).pipe(Effect.result)
-              if (Result.isSuccess(attempted)) {
-                const processed = yield* Effect.gen(function*() {
-                  const received = yield* Effect.try({
-                    try: () => parsePage(attempted.success),
-                    catch: () => new UpstreamInvalidResponse({ serverId: source.serverId })
-                  })
-                  const page = { ...received, items: received.items.slice(0, pageLimit) }
-                  const observedAtMs = now()
-                  const items = yield* resolvePageItems(source, page.items, query, projection, observedAtMs, true)
-                  return { page, items }
-                }).pipe(Effect.result)
-                if (Result.isSuccess(processed)) {
-                  const { page, items } = processed.success
-                  cursor.continuation += page.items.length
-                  cursor.scanned += page.items.length
-                  state.scanned += page.items.length
-                  cursor.reportedTotal = page.totalRecordCount
-                  cursor.exhausted = page.items.length === 0 || (
-                    page.totalRecordCount !== null && cursor.continuation >= page.totalRecordCount
-                  )
-                  cursor.incomplete = false
-                  cursor.buffer.push(...items.sort((left, right) => compareBuffered(left, right, query.sort)))
-                  successes++
-                  return
-                }
-                if (processed.failure instanceof RepositoryError) return yield* Effect.fail(processed.failure)
-                cursor.incomplete = true
-                failed.add(source.serverId)
-                blocked.add(sourceKey(cursor))
-                return
-              }
-              const error = attempted.failure
-              cursor.incomplete = true
-              failed.add(source.serverId)
-              blocked.add(sourceKey(cursor))
-              if (transient(error)) {
-                const cached = yield* repositories.readCachedSourceItems({
-                  serverId: source.serverId,
-                  serverGeneration: source.serverGeneration,
-                  sourceLibraryId: source.sourceLibraryId,
-                  projectionKey: projection,
-                  usableAtMs: now(),
-                  limit: DB_BATCH_SIZE
-                })
-                if (cached.length > 0) {
-                  const stale = cached.flatMap(({ payload }) => jsonObject(payload) ? [payload] : [])
-                  cursor.buffer.push(...yield* resolvePageItems(source, stale, query, projection, now(), false))
-                }
-              }
-            }), { concurrency: MAX_FANOUT_CONCURRENCY })
-            void results
-
-            const bufferedIds = [...new Set(state.sources.flatMap((cursor) =>
-              cursor.buffer.map(({ canonicalId }) => canonicalId)
-            ))]
-            const refreshed = new Map(
-              (yield* readCatalog(bufferedIds)).map((record) => [record.canonical.id, record])
+            const nextExhausted = state.localBuffer.length === 0 && (
+              state.scanned >= MAX_MATERIALIZED_ITEMS ||
+              state.sources.every((cursor) => cursor.exhausted && cursor.buffer.length === 0)
             )
-            for (const cursor of state.sources) {
-              cursor.buffer = cursor.buffer.flatMap(({ canonicalId }) => {
-                const record = refreshed.get(canonicalId)
-                return record && matchesFilters(record, query.filters)
-                  ? [{ canonicalId, sortValues: sortValues(record, query.sort) }]
-                  : []
-              }).sort((left, right) => compareBuffered(left, right, query.sort))
-            }
+            dirty ||= nextExhausted !== exhausted
+            exhausted = nextExhausted
+            if (!dirty) break
+            const saved = yield* persist(
+              generation,
+              state,
+              additions,
+              exhausted,
+              { id: generation.id, revision: generation.revision }
+            )
+            if (saved === null) continue retryPublication
+            generation = saved
+            published.push(...additions)
+            if (additions.length === 0) break
           }
 
-          const heads = state.sources.flatMap((cursor) => cursor.buffer[0]
-            ? [{ cursor, item: cursor.buffer[0] }]
-            : [])
-          if (heads.length === 0) {
-            if (state.sources.some((cursor) =>
-              !cursor.exhausted && !blocked.has(sourceKey(cursor))
-            )) continue
-            break
+          if (
+            published.length === 0 && sources.length > 0 &&
+            state.sources.every((cursor) => cursor.incomplete)
+          ) {
+            return yield* Effect.fail(new FederationUnavailable({
+              sourceIds: [...new Set(state.sources.map(({ serverId }) => serverId))].sort()
+            }))
           }
-          heads.sort((left, right) => compareBuffered(left.item, right.item, query.sort))
-          const selected = heads[0]!
-          selected.cursor.buffer.shift()
-          if (publishedIds.has(selected.item.canonicalId)) continue
-          const entry = {
-            ...selected.item,
-            ordinal: published.length + additions.length
+
+          const pageIds = published.slice(startIndex, requestedEnd).map(({ canonicalId }) => canonicalId)
+          const records = yield* repositories.readCatalogItems(pageIds, now())
+          const incompleteSourceIds = [...new Set(state.sources
+            .filter(({ incomplete }) => incomplete)
+            .map(({ serverId }) => serverId))].sort()
+          const totalRecordCount = exhausted
+            ? published.length
+            : Math.max(published.length, requestedEnd + 1)
+          return {
+            items: records.map((record) => view(record, incompleteSourceIds)),
+            totalRecordCount,
+            exhausted,
+            incompleteSourceIds
           }
-          additions.push(entry)
-          publishedIds.add(entry.canonicalId)
-        }
-
-        const exhausted = state.localBuffer.length === 0 && (
-          state.scanned >= MAX_MATERIALIZED_ITEMS ||
-          state.sources.every((cursor) => cursor.exhausted && cursor.buffer.length === 0)
-        )
-        generation = yield* persist(generation, state, additions, exhausted)
-        published.push(...additions)
-
-        if (
-          published.length === 0 && sources.length > 0 && successes === 0 &&
-          state.sources.every((cursor) => blocked.has(sourceKey(cursor)))
-        ) {
-          return yield* Effect.fail(new FederationUnavailable({ sourceIds: [...failed].sort() }))
-        }
-
-        const pageIds = published.slice(startIndex, requestedEnd).map(({ canonicalId }) => canonicalId)
-        const records = yield* repositories.readCatalogItems(pageIds, now())
-        const incompleteSourceIds = [...new Set(state.sources
-          .filter(({ incomplete }) => incomplete)
-          .map(({ serverId }) => serverId))].sort()
-        const totalRecordCount = exhausted
-          ? published.length
-          : Math.max(published.length, requestedEnd + 1)
-        return {
-          items: records.map((record) => view(record, incompleteSourceIds)),
-          totalRecordCount,
-          exhausted,
-          incompleteSourceIds
         }
       })
 
@@ -710,6 +730,21 @@ export const makeFederationLayer = (
         const incomplete = new Set<string>()
         yield* Effect.forEach(sources, (source) => Effect.gen(function*() {
           const negativeKey = `exact:${sourceKey(source)}:${claim.namespace}:${claim.value}`
+          const sourceItem = record?.sourceItems.find((item) =>
+            item.serverId === source.serverId &&
+            item.serverGeneration === source.serverGeneration &&
+            item.sourceLibraryId === source.sourceLibraryId
+          )
+          const suppressStaleVersions = (observedAtMs: number) => sourceItem
+            ? repositories.writeMetadataProjection({
+                sourceItemId: sourceItem.id,
+                projectionKey: "detail",
+                payload: { suppressed: true },
+                freshUntilMs: observedAtMs,
+                staleUntilMs: observedAtMs,
+                updatedAtMs: observedAtMs
+              })
+            : Effect.succeed(undefined)
           const cached = yield* repositories.readMetadataProjection(anchor.id, negativeKey)
           if (
             cached && cached.freshUntilMs > now() && jsonObject(cached.payload) &&
@@ -731,6 +766,12 @@ export const makeFederationLayer = (
           }, Schema.Unknown), source.serverId, detailDeadlineMs).pipe(Effect.result)
           const observedAtMs = now()
           if (Result.isFailure(attempted)) {
+            if (attempted.failure instanceof RepositoryError) return yield* Effect.fail(attempted.failure)
+            if (transient(attempted.failure)) {
+              incomplete.add(source.serverId)
+              return
+            }
+            yield* suppressStaleVersions(observedAtMs)
             if (attempted.failure instanceof UpstreamNotFound) {
               yield* repositories.writeMetadataProjection({
                 sourceItemId: anchor.id,
@@ -752,6 +793,7 @@ export const makeFederationLayer = (
             })
             const exact = page.items.filter((item) => matchesClaim(item, claim))
             if (exact.length === 0) {
+              yield* suppressStaleVersions(observedAtMs)
               yield* repositories.writeMetadataProjection({
                 sourceItemId: anchor.id,
                 projectionKey: negativeKey,
@@ -776,9 +818,11 @@ export const makeFederationLayer = (
               staleUntilMs: observedAtMs + (foundCompatible ? METADATA_STALE_MS : METADATA_FRESH_MS),
               updatedAtMs: observedAtMs
             })
+            if (!foundCompatible) yield* suppressStaleVersions(observedAtMs)
           }).pipe(Effect.result)
           if (Result.isFailure(processed)) {
             if (processed.failure instanceof RepositoryError) return yield* Effect.fail(processed.failure)
+            yield* suppressStaleVersions(observedAtMs)
             incomplete.add(source.serverId)
           }
         }), { concurrency: MAX_FANOUT_CONCURRENCY })

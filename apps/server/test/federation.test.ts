@@ -12,14 +12,13 @@ import {
   type FederatedQuery
 } from "../src/core/federation.js"
 import {
-  ObsoleteGeneration,
   UpstreamRejected,
   UpstreamNotFound,
   UpstreamUnavailable,
   type UpstreamFailure
 } from "../src/core/errors.js"
 import { makeIdentityLayer } from "../src/core/identity.js"
-import { METADATA_STALE_MS } from "../src/core/limits.js"
+import { METADATA_FRESH_MS, METADATA_STALE_MS } from "../src/core/limits.js"
 import type { UpstreamServer } from "../src/core/model.js"
 import { Repositories } from "../src/core/repositories.js"
 import { UpstreamClient } from "../src/core/upstream-client.js"
@@ -176,31 +175,48 @@ describe("Federation", () => {
     expect(error._tag).toBe("FederationUnavailable")
   })
 
-  it("uses still-valid stale metadata only for transient failures", async () => {
-    let now = 1_000
-    let failure: UpstreamFailure | null = null
-    const layer = await setup(1, (serverId) => failure === null
-      ? Effect.succeed({ Items: [item("movie-10", "Cached")], TotalRecordCount: 1 })
-      : Effect.fail(failure), { now: () => now })
+  it("does not use an unrelated cached list to satisfy a failed search", async () => {
+    const layer = await setup(1, (serverId, path) => path.includes("SearchTerm=")
+      ? Effect.fail(new UpstreamUnavailable({ serverId }))
+      : Effect.succeed({ Items: [item("movie-10", "Cached")], TotalRecordCount: 1 }))
 
-    const run = (deviceId: string) => Effect.runPromise(Effect.gen(function*() {
+    await Effect.runPromise(Effect.gen(function*() {
       const federation = yield* Federation
-      return yield* federation.list(query({ deviceId }))
+      yield* federation.list(query())
+      const failed = yield* Effect.flip(federation.search({ ...query(), searchTerm: "Needle" }))
+      expect(failed._tag).toBe("FederationUnavailable")
     }).pipe(Effect.provide(layer)))
+  })
 
-    await run("fresh")
-    now += 16 * 60_000
-    failure = new UpstreamUnavailable({ serverId: "server-0" })
-    const stale = await run("transient")
-    expect(stale.items.map(({ displayMetadata }) => displayMetadata)).toContainEqual(expect.objectContaining({ Name: "Cached" }))
-    expect(stale.incompleteSourceIds).toEqual(["server-0"])
+  it("does not replay arbitrary first-page metadata after a deep-page transient failure", async () => {
+    const layer = await setup(1, (serverId, path) => {
+      const url = new URL(path, "https://local")
+      const start = Number(url.searchParams.get("StartIndex"))
+      if (!url.searchParams.has("SearchTerm")) {
+        return Effect.succeed({
+          Items: Array.from({ length: 100 }, (_, index) => item(`aaa-warm-${1_000 + index}`)),
+          TotalRecordCount: 100
+        })
+      }
+      if (start === 0) {
+        return Effect.succeed({
+          Items: Array.from({ length: 100 }, (_, index) => item(`zzz-target-${2_000 + index}`)),
+          TotalRecordCount: 200
+        })
+      }
+      return Effect.fail(new UpstreamUnavailable({ serverId }))
+    })
 
-    failure = new UpstreamRejected({ serverId: "server-0", status: 401 })
-    await expect(run("auth-rejected")).rejects.toMatchObject({ _tag: "FederationUnavailable" })
-    failure = new UpstreamNotFound({ serverId: "server-0" })
-    await expect(run("not-found")).rejects.toMatchObject({ _tag: "FederationUnavailable" })
-    failure = new ObsoleteGeneration({ serverId: "server-0" })
-    await expect(run("generation-changed")).rejects.toMatchObject({ _tag: "FederationUnavailable" })
+    await Effect.runPromise(Effect.gen(function*() {
+      const federation = yield* Federation
+      yield* federation.list(query({ limit: 100 }))
+      const deep = yield* federation.search({
+        ...query({ startIndex: 100, limit: 1 }),
+        searchTerm: "Needle"
+      })
+      expect(deep.items).toEqual([])
+      expect(deep.incompleteSourceIds).toEqual(["server-0"])
+    }).pipe(Effect.provide(layer)))
   })
 
   it("does not let a lightweight projection erase richer cached metadata", async () => {
@@ -463,6 +479,56 @@ describe("Federation", () => {
       const expired = yield* federation.detail(page.items[0]!.id)
       expect(expired?.mediaVersions).toEqual([])
       expect(expired?.incompleteSourceIds).toEqual(["server-0"])
+    }).pipe(Effect.provide(layer)))
+  })
+
+  it("hides a version omitted by the latest successful detail projection", async () => {
+    let now = 1_000
+    let mediaSources: ReadonlyArray<{ readonly Id: string; readonly Name: string }> = [{ Id: "source-a", Name: "A" }]
+    const layer = await setup(1, (_serverId, path) => Effect.succeed(path.includes("AnyProviderIdEquals=")
+      ? { Items: [item("movie-10", "Movie", { MediaSources: mediaSources })], TotalRecordCount: 1 }
+      : { Items: [item("movie-10")], TotalRecordCount: 1 }), { now: () => now })
+
+    await Effect.runPromise(Effect.gen(function*() {
+      const federation = yield* Federation
+      const page = yield* federation.list(query())
+      expect((yield* federation.detail(page.items[0]!.id))?.mediaVersions.map(({ label }) => label)).toEqual(["A"])
+      now += METADATA_FRESH_MS + 1
+      mediaSources = []
+      expect((yield* federation.detail(page.items[0]!.id))?.mediaVersions).toEqual([])
+    }).pipe(Effect.provide(layer)))
+  })
+
+  it.each([
+    ["transient", true],
+    ["auth", false],
+    ["not-found", false],
+    ["invalid", false]
+  ] as const)("classifies %s exact refreshes when exposing stale detail versions", async (failure, visible) => {
+    let now = 1_000
+    let mode: "success" | typeof failure = "success"
+    const layer = await setup(1, (serverId, path) => {
+      if (!path.includes("AnyProviderIdEquals=")) {
+        return Effect.succeed({ Items: [item("movie-10")], TotalRecordCount: 1 })
+      }
+      if (mode === "transient") return Effect.fail(new UpstreamUnavailable({ serverId }))
+      if (mode === "auth") return Effect.fail(new UpstreamRejected({ serverId, status: 401 }))
+      if (mode === "not-found") return Effect.fail(new UpstreamNotFound({ serverId }))
+      if (mode === "invalid") return Effect.succeed({ invalid: true })
+      return Effect.succeed({
+        Items: [item("movie-10", "Movie", { MediaSources: [{ Id: "source-a", Name: "A" }] })],
+        TotalRecordCount: 1
+      })
+    }, { now: () => now })
+
+    await Effect.runPromise(Effect.gen(function*() {
+      const federation = yield* Federation
+      const page = yield* federation.list(query())
+      expect((yield* federation.detail(page.items[0]!.id))?.mediaVersions.map(({ label }) => label)).toEqual(["A"])
+      now += METADATA_FRESH_MS + 1
+      mode = failure
+      const refreshed = yield* federation.detail(page.items[0]!.id)
+      expect(refreshed?.mediaVersions.map(({ label }) => label)).toEqual(visible ? ["A"] : [])
     }).pipe(Effect.provide(layer)))
   })
 })
