@@ -7,7 +7,7 @@
     "build": "tsc -p tsconfig.json && bun build --target=bun --production --outdir=dist/bun src/platform/bun/index.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "bun --bun vitest run --exclude test/d1-repository.test.ts --exclude test/workers-routing.test.ts",
-    "test:bun": "bun --bun vitest run test/bun-*.test.ts",
+    "test:bun": "bun --bun vitest run test/bun-*.test.ts test/cross-platform.test.ts test/ten-source-budget.test.ts",
     "test:workers": "vitest run --config vitest.config.workers.ts"
   },
   "dependencies": {

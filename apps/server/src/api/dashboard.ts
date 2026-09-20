@@ -1,7 +1,10 @@
 import { DashboardApi } from "@oh-my-emby/contracts"
 import { Effect, Layer, Option, Result } from "effect"
-import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse"
+import * as HttpServerError from "effect/unstable/http/HttpServerError"
+import * as HttpServerRequestModule from "effect/unstable/http/HttpServerRequest"
 import type { HttpServerRequest } from "effect/unstable/http/HttpServerRequest"
+import * as HttpServerRespondable from "effect/unstable/http/HttpServerRespondable"
+import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse"
 import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder"
 
 import { Auth, type AuthService, type DashboardSession } from "../core/auth.js"
@@ -12,6 +15,22 @@ import { ServerService } from "../core/server-service.js"
 
 export const DASHBOARD_SESSION_COOKIE = "oh_my_emby_session"
 const dashboardCookiePath = "/api/dashboard"
+
+export const toDashboardWebResponse = <R>(
+  handler: Effect.Effect<
+    HttpServerResponse.HttpServerResponse,
+    HttpServerError.HttpServerError,
+    R
+  >,
+  request: Request,
+  dashboardRequest: HttpServerRequest
+) => Effect.scoped(handler.pipe(
+  Effect.provideService(HttpServerRequestModule.HttpServerRequest, dashboardRequest),
+  Effect.catchTag("HttpServerError", (error) => error.reason._tag === "RouteNotFound"
+    ? HttpServerRespondable.toResponse(error)
+    : Effect.die(error)),
+  Effect.map((response) => HttpServerResponse.toWeb(response, { withoutBody: request.method === "HEAD" }))
+))
 
 export interface DashboardRequestPolicyConfig {
   readonly publicOrigin: string

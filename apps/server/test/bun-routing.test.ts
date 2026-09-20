@@ -43,7 +43,7 @@ describe("Bun production routing", () => {
       headers: { accept: "text/html,*/*" }
     })
     expect(response.status).toBe(404)
-    expect(response.headers.get("content-type")).not.toContain("text/html")
+    expect(response.headers.get("content-type") ?? "").not.toContain("text/html")
   })
 
   it("keeps symlinked assets outside the Dashboard root as plain 404", async () => {
@@ -86,7 +86,7 @@ describe("Bun production routing", () => {
   ])("keeps %s misses non-HTML", async (path) => {
     const response = await request(path, { headers: { accept: "text/html" } })
     expect(response.status).toBeGreaterThanOrEqual(400)
-    expect(response.headers.get("content-type")).not.toContain("text/html")
+    expect(response.headers.get("content-type") ?? "").not.toContain("text/html")
   })
 
   it("uses the exact public origin and trusted socket address for Dashboard cookies", async () => {

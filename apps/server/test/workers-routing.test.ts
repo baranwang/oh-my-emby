@@ -15,10 +15,12 @@ import {
   makeWorkersResourceCache,
   type WorkersCacheBinding
 } from "../src/platform/workers/cache.js"
+import { makeD1RepositoriesLayer } from "../src/platform/workers/d1-repositories.js"
 import worker, {
   makeWorkersCoreLayer,
   parseTrustedProxyAddresses
 } from "../src/platform/workers/index.js"
+import { crossPlatformAcceptance } from "./cross-platform-contract.js"
 
 const request = (path: string, init?: RequestInit) => new Request(`https://app.example.com${path}`, init)
 
@@ -179,6 +181,61 @@ const runWorkerFetch = async (path: string, init?: RequestInit) => {
   return response
 }
 
+const mutableTables = [
+  "playback_watermarks",
+  "playback_sessions",
+  "state_outbox",
+  "query_generation_items",
+  "query_generations",
+  "source_metadata_cache",
+  "user_state",
+  "source_media_versions",
+  "identity_claims",
+  "canonical_aliases",
+  "source_items",
+  "canonical_items",
+  "library_sources",
+  "virtual_libraries",
+  "dashboard_sessions",
+  "emby_tokens",
+  "auth_rate_limits",
+  "upstream_servers",
+  "users",
+  "maintenance_status"
+] as const
+
+const clearWorkerState = () => env.DB.batch(
+  mutableTables.map((table) => env.DB.prepare(`DELETE FROM ${table}`))
+)
+
+crossPlatformAcceptance("workers", {
+  startFresh: async () => {
+    await clearWorkerState()
+    const repositories = () => makeD1RepositoriesLayer(env.DB)
+    return {
+      publicOrigin: "http://localhost:8787",
+      repositories: repositories(),
+      request: runWorkerFetch,
+      inspectStorage: async () => {
+        const migrationRows = await env.DB.prepare(
+          "SELECT name FROM schema_migrations ORDER BY version"
+        ).all<{ name: string }>()
+        const enabled = await env.DB.prepare(
+          "SELECT enabled FROM upstream_servers ORDER BY id LIMIT 1"
+        ).first<{ enabled: number }>()
+        return {
+          migrationNames: migrationRows.results.map(({ name }) => name),
+          enabledEncoding: enabled!.enabled
+        }
+      },
+      reopenRepositories: repositories,
+      close: async () => {
+        await clearWorkerState()
+      }
+    }
+  }
+})
+
 describe("Workers production runtime", () => {
   it("normalizes the trusted-proxy CSV without retaining empty entries", () => {
     expect(parseTrustedProxyAddresses(" 10.0.0.1, ,2001:db8::1 ,")).toEqual([
@@ -213,7 +270,7 @@ describe("Workers production runtime", () => {
     ]) {
       const response = await runWorkerFetch(path, { headers: { accept: "text/html" } })
       expect(response.status, path).toBeGreaterThanOrEqual(400)
-      expect(response.headers.get("content-type"), path).not.toContain("text/html")
+      expect(response.headers.get("content-type") ?? "", path).not.toContain("text/html")
     }
   })
 

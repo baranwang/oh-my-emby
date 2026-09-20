@@ -5,14 +5,14 @@ import { Effect, Layer, ManagedRuntime, Option } from "effect"
 import * as HttpRouter from "effect/unstable/http/HttpRouter"
 import * as HttpServer from "effect/unstable/http/HttpServer"
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest"
-import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse"
 import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder"
 
 import { DashboardApi } from "@oh-my-emby/contracts"
 import { ApplicationServices, routeApplication } from "../../api/application.js"
 import {
   makeDashboardAuthLayers,
-  makeDashboardControlPlaneLayers
+  makeDashboardControlPlaneLayers,
+  toDashboardWebResponse
 } from "../../api/dashboard.js"
 import { makeEmbyHandler } from "../../api/emby.js"
 import { Auth, makeAuthLayer } from "../../core/auth.js"
@@ -162,11 +162,7 @@ export const startBunRuntime = async (config: BunRuntimeConfig): Promise<BunRunt
         remoteAddress: remoteAddress === undefined ? Option.none() : Option.some(remoteAddress)
       })
       const services = ApplicationServices.of({
-        handleDashboard: () => Effect.scoped(dashboardHandler.pipe(
-          Effect.provideService(HttpServerRequest.HttpServerRequest, dashboardRequest),
-          Effect.orDie,
-          Effect.map((response) => HttpServerResponse.toWeb(response, { withoutBody: request.method === "HEAD" }))
-        )),
+        handleDashboard: () => toDashboardWebResponse(dashboardHandler, request, dashboardRequest),
         handleEmby: makeEmbyHandler({
           config: { serverId: "oh-my-emby", serverName: "oh-my-emby", version: "0.0.0" },
           now: Date.now,

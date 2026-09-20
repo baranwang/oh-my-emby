@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - run: bun ci
+      - run: bun run typecheck
+      - run: bun run build
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - run: bun ci
+      - run: bun run test
+      - run: bun --filter @oh-my-emby/server test:workers
+      - run: bun --filter @oh-my-emby/server test:bun
+
+  workers-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - run: bun ci
+      - run: bun run build
+      - run: ./scripts/smoke-workers.sh
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t oh-my-emby:ci .
+      - run: OH_MY_EMBY_IMAGE=oh-my-emby:ci ./scripts/smoke-docker.sh
+
+# Remote Workers deployment is intentionally absent. Release operators must run
+# scripts/smoke-workers.sh --remote with explicit staging-only inputs.
