@@ -113,7 +113,7 @@ Cross-module code belongs in `src/lib` or `src/components`. A domain module must
 The approved preset was generated in an isolated temporary Vite project with:
 
 ```bash
-pnpm dlx shadcn@latest init --preset b59i69Ugb4 --template vite
+bunx --bun shadcn@latest init --preset b59i69Ugb4 --template vite
 ```
 
 The command resolved shadcn `4.21.0` on 2026-09-20 and produced these relevant settings:

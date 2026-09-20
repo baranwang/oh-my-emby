@@ -80,7 +80,7 @@ One HTTP application owns three disjoint surfaces:
 
 ## Repository architecture
 
-The repository is a pnpm workspace orchestrated by Turborepo:
+The repository uses Bun workspaces orchestrated by Turborepo. Bun is the sole package manager and script runner; the repository commits only `bun.lock`:
 
 ```text
 apps/
