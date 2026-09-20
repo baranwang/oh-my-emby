@@ -1,6 +1,7 @@
 import { Context, type Effect } from "effect"
 
 import type { AuthError, ClaimError, IdentityFailure, RepositoryError } from "./errors.js"
+import type { PreparedIdentityCandidate } from "./identity.js"
 import type {
   CanonicalItem,
   ClaimRequest,
@@ -79,6 +80,8 @@ export interface RepositoriesService {
     sourceLibraryId: string
   ) => Effect.Effect<boolean, RepositoryError>
   readonly resolveEligibleSources: (libraryId: string) => Effect.Effect<ReadonlyArray<EligibleSource>, RepositoryError>
+  readonly resolveIdentity: (candidate: PreparedIdentityCandidate) => Effect.Effect<IdentityResolution, IdentityFailure>
+  readonly lookupCanonicalId: (id: string) => Effect.Effect<string | null, RepositoryError>
   readonly persistIdentityResult: (result: IdentityResolution) => Effect.Effect<CanonicalItem, IdentityFailure>
   readonly readQueryGeneration: (key: string) => Effect.Effect<QueryGeneration | null, RepositoryError>
   readonly appendQueryGenerationItems: (input: QueryGenerationAppend) => Effect.Effect<void, RepositoryError>

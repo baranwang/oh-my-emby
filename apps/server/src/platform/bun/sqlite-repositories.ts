@@ -7,10 +7,27 @@ import {
 import { Effect, Layer, Schema, Semaphore } from "effect"
 
 import { OUTBOX_BATCH_SIZE } from "../../core/limits.js"
-import { AlreadyInitialized, AuthenticationChanged, RepositoryError } from "../../core/errors.js"
+import {
+  AlreadyInitialized,
+  AuthenticationChanged,
+  IdentityConflict,
+  RepositoryError
+} from "../../core/errors.js"
+import {
+  clustersCompatible,
+  stableCanonicalId,
+  toClaimSet,
+  type ExternalClaim,
+  type PreparedIdentityCandidate,
+  type ProviderNamespace
+} from "../../core/identity.js"
 import type {
+  CanonicalAlias,
+  CanonicalItem,
   DesiredUserState,
   EligibleSource,
+  IdentityClaim,
+  IdentityResolution,
   JsonValue,
   LibrarySource,
   MaintenanceResult,
@@ -19,6 +36,7 @@ import type {
   QueryGeneration,
   ServerHealth,
   SourceItemRecord,
+  SourceMediaVersion,
   UpstreamServer,
   UserRecord,
   UserStateRecord,
@@ -41,6 +59,11 @@ const database = <A, E, R>(operation: string, effect: Effect.Effect<A, E, R>) =>
 const authDatabase = <A, E, R>(operation: string, effect: Effect.Effect<A, E, R>) =>
   effect.pipe(Effect.mapError((cause) =>
     cause instanceof AuthenticationChanged ? cause : failure(operation, cause)
+  ))
+
+const identityDatabase = <A, E, R>(operation: string, effect: Effect.Effect<A, E, R>) =>
+  effect.pipe(Effect.mapError((cause) =>
+    cause instanceof IdentityConflict ? cause : failure(operation, cause)
   ))
 
 const decode = <A>(operation: string, evaluate: () => A) => Effect.try({
@@ -236,6 +259,98 @@ interface UserStateRow {
   readonly last_played_version_id: string | null
   readonly updated_at_ms: unknown
 }
+
+interface CanonicalRow {
+  readonly id: string
+  readonly item_type: string
+  readonly identity_state: string
+  readonly display_metadata_json: unknown
+  readonly created_at_ms: unknown
+  readonly updated_at_ms: unknown
+}
+
+interface IdentityClaimRow {
+  readonly canonical_id: string
+  readonly namespace: string
+  readonly value: string
+  readonly state: string
+  readonly source_item_id: string
+  readonly created_at_ms: unknown
+}
+
+interface SourceItemRow {
+  readonly id: string
+  readonly server_id: string
+  readonly catalog_namespace: string
+  readonly server_generation: unknown
+  readonly source_library_id: string
+  readonly upstream_item_id: string
+  readonly item_type: string
+  readonly canonical_id: string | null
+  readonly quarantine_reason: string | null
+  readonly created_at_ms: unknown
+  readonly updated_at_ms: unknown
+}
+
+interface MediaVersionRow {
+  readonly id: string
+  readonly source_item_id: string
+  readonly server_generation: unknown
+  readonly upstream_media_source_id: string
+  readonly label: string
+  readonly capabilities_json: unknown
+  readonly streams_json: unknown
+  readonly updated_at_ms: unknown
+}
+
+const canonicalItem = (row: CanonicalRow): CanonicalItem => ({
+  id: row.id,
+  itemType: row.item_type,
+  identityState: row.identity_state,
+  displayMetadata: json(row.display_metadata_json, "display_metadata_json"),
+  createdAtMs: integer(row.created_at_ms, "created_at_ms"),
+  updatedAtMs: integer(row.updated_at_ms, "updated_at_ms")
+})
+
+const identityClaim = (row: IdentityClaimRow): IdentityClaim => ({
+  namespace: row.namespace,
+  value: row.value,
+  state: row.state,
+  sourceItemId: row.source_item_id,
+  createdAtMs: integer(row.created_at_ms, "created_at_ms")
+})
+
+const sourceItem = (row: SourceItemRow): SourceItemRecord => ({
+  id: row.id,
+  serverId: row.server_id,
+  catalogNamespace: row.catalog_namespace,
+  serverGeneration: integer(row.server_generation, "server_generation"),
+  sourceLibraryId: row.source_library_id,
+  upstreamItemId: row.upstream_item_id,
+  itemType: row.item_type,
+  canonicalId: row.canonical_id,
+  quarantineReason: row.quarantine_reason,
+  createdAtMs: integer(row.created_at_ms, "created_at_ms"),
+  updatedAtMs: integer(row.updated_at_ms, "updated_at_ms")
+})
+
+const mediaVersion = (row: MediaVersionRow): SourceMediaVersion => ({
+  id: row.id,
+  sourceItemId: row.source_item_id,
+  serverGeneration: integer(row.server_generation, "server_generation"),
+  upstreamMediaSourceId: row.upstream_media_source_id,
+  label: row.label,
+  capabilities: json(row.capabilities_json, "capabilities_json"),
+  streams: json(row.streams_json, "streams_json"),
+  updatedAtMs: integer(row.updated_at_ms, "updated_at_ms")
+})
+
+const providerNamespaces = new Set<string>(["tmdb:movie", "tmdb:tv", "imdb:title"])
+const externalClaims = (rows: ReadonlyArray<IdentityClaimRow>): ReadonlyArray<ExternalClaim> => rows
+  .filter((row): row is IdentityClaimRow & { readonly namespace: ProviderNamespace } =>
+    row.state === "exact" && providerNamespaces.has(row.namespace)
+  )
+  .map(({ namespace, value }) => ({ namespace, value }))
 
 const userState = (row: UserStateRow): UserStateRecord => ({
   canonicalId: row.canonical_id,
@@ -890,6 +1005,383 @@ const makeRepositories = Effect.gen(function*() {
       userAgent: row.user_agent
     })))))
 
+  const resolveCanonicalIdInTransaction = (id: string) => Effect.gen(function*() {
+    const rows = yield* sql.unsafe<{ readonly canonical_id: string }>(`
+      SELECT id AS canonical_id FROM canonical_items WHERE id = ?
+      UNION ALL
+      SELECT canonical_id FROM canonical_aliases
+      WHERE alias_id = ? AND NOT EXISTS (SELECT 1 FROM canonical_items WHERE id = ?)
+      LIMIT 1
+    `, [id, id, id])
+    return rows[0]?.canonical_id ?? null
+  })
+
+  const lookupCanonicalId: RepositoriesService["lookupCanonicalId"] = (id) =>
+    database("lookupCanonicalId", resolveCanonicalIdInTransaction(id))
+
+  const assertIdentityFence = (candidate: PreparedIdentityCandidate, lock: boolean) => Effect.gen(function*() {
+    const rows = lock
+      ? yield* sql.unsafe<{ readonly id: string }>(`
+          UPDATE upstream_servers
+          SET updated_at_ms = updated_at_ms
+          WHERE id = ? AND catalog_namespace = ? AND verified_catalog_id = ?
+            AND generation = ? AND deleted_at_ms IS NULL
+          RETURNING id
+        `, [
+          candidate.serverId,
+          candidate.catalogNamespace,
+          candidate.verifiedCatalogId,
+          candidate.serverGeneration
+        ])
+      : yield* sql.unsafe<{ readonly id: string }>(`
+          SELECT id FROM upstream_servers
+          WHERE id = ? AND catalog_namespace = ? AND verified_catalog_id = ?
+            AND generation = ? AND deleted_at_ms IS NULL
+        `, [
+          candidate.serverId,
+          candidate.catalogNamespace,
+          candidate.verifiedCatalogId,
+          candidate.serverGeneration
+        ])
+    if (!rows[0]) {
+      return yield* Effect.fail(new IdentityConflict({ message: "server-generation-changed" }))
+    }
+  })
+
+  const resolveIdentity: RepositoriesService["resolveIdentity"] = (candidate) =>
+    identityDatabase("resolveIdentity", sql.withTransaction(Effect.gen(function*() {
+      yield* assertIdentityFence(candidate, true)
+
+      type MatchClaim = { readonly namespace: string; readonly value: string }
+      let matchClaims: ReadonlyArray<MatchClaim> = candidate.claims
+      let proposedCanonicalId = candidate.proposedCanonicalId
+      let identityState = candidate.claims.length > 0 ? "exact" : "source-exclusive"
+      let quarantineReason = candidate.sourceExclusiveReason
+
+      if (candidate.fallback !== null) {
+        const parentId = yield* resolveCanonicalIdInTransaction(candidate.fallback.canonicalSeriesId)
+        const parent = parentId === null ? [] : yield* sql.unsafe<{ readonly id: string }>(
+          "SELECT id FROM canonical_items WHERE id = ? AND item_type = 'Series'",
+          [parentId]
+        )
+        if (parent[0]) {
+          const namespace = `fallback:${candidate.fallback.kind}`
+          const value = JSON.stringify(candidate.fallback.kind === "season"
+            ? [parent[0].id, candidate.fallback.seasonNumber]
+            : [parent[0].id, candidate.fallback.seasonNumber, candidate.fallback.episodeNumber])
+          matchClaims = [{ namespace, value }]
+          proposedCanonicalId = yield* Effect.promise(() => stableCanonicalId([
+            namespace,
+            value
+          ]))
+          identityState = "fallback"
+          quarantineReason = null
+        } else {
+          matchClaims = []
+          proposedCanonicalId = null
+          identityState = "source-exclusive"
+          quarantineReason = "parent-unresolved"
+        }
+      }
+
+      const existingRows = yield* sql.unsafe<SourceItemRow>(`
+        SELECT * FROM source_items
+        WHERE catalog_namespace = ? AND upstream_item_id = ? AND item_type = ?
+        LIMIT 1
+      `, [candidate.catalogNamespace, candidate.upstreamItemId, candidate.itemType])
+      const existing = existingRows[0]
+      const sourceItemId = existing?.id ?? candidate.sourceItemId
+
+      const candidateIds = new Set<string>()
+      if (existing?.canonical_id) candidateIds.add(existing.canonical_id)
+      if (proposedCanonicalId !== null) {
+        const proposedTarget = yield* resolveCanonicalIdInTransaction(proposedCanonicalId)
+        if (proposedTarget !== null) candidateIds.add(proposedTarget)
+      }
+      if (matchClaims.length > 0) {
+        const predicate = matchClaims.map(() => "(ic.namespace = ? AND ic.value = ?)").join(" OR ")
+        const matched = yield* sql.unsafe<{ readonly canonical_id: string }>(`
+          SELECT DISTINCT ic.canonical_id
+          FROM identity_claims ic
+          JOIN canonical_items ci ON ci.id = ic.canonical_id
+          WHERE ic.state = 'exact' AND ci.item_type = ? AND (${predicate})
+        `, [candidate.itemType, ...matchClaims.flatMap(({ namespace, value }) => [namespace, value])])
+        for (const row of matched) candidateIds.add(row.canonical_id)
+      }
+
+      const ids = [...candidateIds]
+      const placeholders = ids.map(() => "?").join(", ")
+      const canonicalRows = ids.length === 0 ? [] : yield* sql.unsafe<CanonicalRow>(`
+        SELECT * FROM canonical_items
+        WHERE id IN (${placeholders}) AND item_type = ?
+        ORDER BY created_at_ms, id
+      `, [...ids, candidate.itemType])
+      const activeIds = new Set(canonicalRows.map(({ id }) => id))
+      const clusterClaims = canonicalRows.length === 0 ? [] : yield* sql.unsafe<IdentityClaimRow>(`
+        SELECT * FROM identity_claims
+        WHERE canonical_id IN (${canonicalRows.map(() => "?").join(", ")})
+        ORDER BY created_at_ms, canonical_id, namespace
+      `, canonicalRows.map(({ id }) => id))
+
+      let incompatible = false
+      const candidateSet = toClaimSet(candidate.claims)
+      for (const row of canonicalRows) {
+        if (!clustersCompatible(
+          candidateSet,
+          toClaimSet(externalClaims(clusterClaims.filter((entry) => entry.canonical_id === row.id)))
+        )) incompatible = true
+      }
+      const values = new Map<string, string>()
+      for (const entry of [
+        ...clusterClaims.filter(({ state }) => state === "exact").map(({ namespace, value }) => ({ namespace, value })),
+        ...matchClaims
+      ]) {
+        const current = values.get(entry.namespace)
+        if (current !== undefined && current !== entry.value) incompatible = true
+        values.set(entry.namespace, entry.value)
+      }
+
+      const ensureCanonical = (id: string, state: string) => sql.unsafe(`
+        INSERT OR IGNORE INTO canonical_items (
+          id, item_type, identity_state, display_metadata_json, created_at_ms, updated_at_ms
+        ) VALUES (?, ?, ?, ?, ?, ?)
+      `, [
+        id,
+        candidate.itemType,
+        state,
+        canonicalJson(candidate.displayMetadata),
+        candidate.observedAtMs,
+        candidate.observedAtMs
+      ])
+
+      const saveSource = (canonicalId: string, reason: string | null) => sql.unsafe(`
+        INSERT INTO source_items (
+          id, server_id, catalog_namespace, server_generation, source_library_id,
+          upstream_item_id, item_type, canonical_id, quarantine_reason, created_at_ms,
+          updated_at_ms
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          server_generation = excluded.server_generation,
+          source_library_id = excluded.source_library_id,
+          canonical_id = excluded.canonical_id,
+          quarantine_reason = excluded.quarantine_reason,
+          updated_at_ms = excluded.updated_at_ms
+      `, [
+        sourceItemId,
+        candidate.serverId,
+        candidate.catalogNamespace,
+        candidate.serverGeneration,
+        candidate.sourceLibraryId,
+        candidate.upstreamItemId,
+        candidate.itemType,
+        canonicalId,
+        reason,
+        existing === undefined ? candidate.observedAtMs : integer(existing.created_at_ms, "created_at_ms"),
+        candidate.observedAtMs
+      ])
+
+      const saveVersions = Effect.gen(function*() {
+        for (const version of candidate.mediaVersions) {
+          yield* sql.unsafe(`
+            INSERT INTO source_media_versions (
+              id, source_item_id, server_generation, upstream_media_source_id,
+              label, capabilities_json, streams_json, updated_at_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+              source_item_id = excluded.source_item_id,
+              server_generation = excluded.server_generation,
+              label = excluded.label,
+              capabilities_json = excluded.capabilities_json,
+              streams_json = excluded.streams_json,
+              updated_at_ms = excluded.updated_at_ms
+          `, [
+            version.id,
+            sourceItemId,
+            candidate.serverGeneration,
+            version.upstreamMediaSourceId,
+            version.label,
+            canonicalJson(version.capabilities),
+            canonicalJson(version.streams),
+            candidate.observedAtMs
+          ])
+        }
+      })
+
+      const readResolution = (canonicalId: string) => Effect.gen(function*() {
+        const canonicals = yield* sql.unsafe<CanonicalRow>("SELECT * FROM canonical_items WHERE id = ?", [canonicalId])
+        const sources = yield* sql.unsafe<SourceItemRow>("SELECT * FROM source_items WHERE id = ?", [sourceItemId])
+        const claims = yield* sql.unsafe<IdentityClaimRow>(`
+          SELECT * FROM identity_claims WHERE canonical_id = ? ORDER BY namespace
+        `, [canonicalId])
+        const aliases = yield* sql.unsafe<{
+          readonly alias_id: string
+          readonly canonical_id: string
+          readonly retired_at_ms: unknown
+        }>("SELECT * FROM canonical_aliases WHERE canonical_id = ? ORDER BY alias_id", [canonicalId])
+        const versions = yield* sql.unsafe<MediaVersionRow>(`
+          SELECT * FROM source_media_versions WHERE source_item_id = ? ORDER BY id
+        `, [sourceItemId])
+        return yield* decode("resolveIdentity", (): IdentityResolution => ({
+          canonical: canonicalItem(canonicals[0]!),
+          aliases: aliases.map((row): CanonicalAlias => ({
+            aliasId: row.alias_id,
+            canonicalId: row.canonical_id,
+            retiredAtMs: integer(row.retired_at_ms, "retired_at_ms")
+          })),
+          claims: claims.map(identityClaim),
+          sourceItem: sourceItem(sources[0]!),
+          mediaVersions: versions.map(mediaVersion)
+        }))
+      })
+
+      if (incompatible) {
+        let canonicalId = existing?.canonical_id && activeIds.has(existing.canonical_id)
+          ? existing.canonical_id
+          : candidate.sourceExclusiveCanonicalId
+        const aliasTarget = yield* resolveCanonicalIdInTransaction(canonicalId)
+        if (aliasTarget !== null) canonicalId = aliasTarget
+        yield* ensureCanonical(canonicalId, "source-exclusive")
+        yield* saveSource(canonicalId, "ambiguous-identity")
+        if (existing?.canonical_id === null || existing === undefined) {
+          for (const entry of candidate.claims) {
+            yield* sql.unsafe(`
+              INSERT INTO identity_claims (
+                canonical_id, namespace, value, state, source_item_id, created_at_ms
+              ) VALUES (?, ?, ?, 'quarantined', ?, ?)
+              ON CONFLICT(canonical_id, namespace) DO UPDATE SET
+                value = excluded.value,
+                state = excluded.state,
+                source_item_id = excluded.source_item_id
+            `, [canonicalId, entry.namespace, entry.value, sourceItemId, candidate.observedAtMs])
+          }
+        }
+        yield* saveVersions
+        yield* assertIdentityFence(candidate, false)
+        return yield* readResolution(canonicalId)
+      }
+
+      let survivorId: string
+      if (canonicalRows[0]) {
+        survivorId = canonicalRows[0].id
+      } else {
+        survivorId = proposedCanonicalId ?? candidate.sourceExclusiveCanonicalId
+        const aliasTarget = yield* resolveCanonicalIdInTransaction(survivorId)
+        if (aliasTarget !== null) survivorId = aliasTarget
+        yield* ensureCanonical(survivorId, identityState)
+      }
+      const retiredIds = canonicalRows.map(({ id }) => id).filter((id) => id !== survivorId)
+
+      yield* saveSource(survivorId, quarantineReason)
+
+      if (retiredIds.length > 0) {
+        const retiredPlaceholders = retiredIds.map(() => "?").join(", ")
+        yield* sql.unsafe(`
+          DELETE FROM query_generations
+          WHERE id IN (
+            SELECT generation_id FROM query_generation_items
+            WHERE canonical_id IN (${retiredPlaceholders})
+          )
+        `, retiredIds)
+        yield* sql.unsafe(`
+          UPDATE source_items SET canonical_id = ?
+          WHERE canonical_id IN (${retiredPlaceholders})
+        `, [survivorId, ...retiredIds])
+        yield* sql.unsafe(`
+          UPDATE state_outbox SET canonical_id = ?
+          WHERE canonical_id IN (${retiredPlaceholders})
+        `, [survivorId, ...retiredIds])
+        yield* sql.unsafe(`
+          UPDATE playback_sessions SET canonical_id = ?
+          WHERE canonical_id IN (${retiredPlaceholders})
+        `, [survivorId, ...retiredIds])
+
+        const states = yield* sql.unsafe<UserStateRow>(`
+          SELECT * FROM user_state
+          WHERE canonical_id IN (${[survivorId, ...retiredIds].map(() => "?").join(", ")})
+          ORDER BY revision DESC, updated_at_ms DESC, canonical_id
+        `, [survivorId, ...retiredIds])
+        yield* sql.unsafe(`
+          DELETE FROM user_state
+          WHERE canonical_id IN (${[survivorId, ...retiredIds].map(() => "?").join(", ")})
+        `, [survivorId, ...retiredIds])
+        if (states[0]) {
+          const state = userState(states[0])
+          yield* sql.unsafe(`
+            INSERT INTO user_state (
+              canonical_id, revision, played, favorite, play_count, position_ticks,
+              last_played_version_id, updated_at_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          `, [
+            survivorId,
+            state.revision,
+            state.played ? 1 : 0,
+            state.favorite ? 1 : 0,
+            state.playCount,
+            state.positionTicks,
+            state.lastPlayedVersionId,
+            state.updatedAtMs
+          ])
+        }
+
+        for (const row of clusterClaims.filter(({ canonical_id, state }) =>
+          state === "exact" && retiredIds.includes(canonical_id)
+        )) {
+          yield* sql.unsafe(`
+            INSERT OR IGNORE INTO identity_claims (
+              canonical_id, namespace, value, state, source_item_id, created_at_ms
+            ) VALUES (?, ?, ?, 'exact', ?, ?)
+          `, [survivorId, row.namespace, row.value, row.source_item_id, row.created_at_ms])
+        }
+        yield* sql.unsafe(`
+          DELETE FROM identity_claims WHERE canonical_id IN (${retiredPlaceholders})
+        `, retiredIds)
+        yield* sql.unsafe(`
+          UPDATE canonical_aliases SET canonical_id = ?
+          WHERE canonical_id IN (${retiredPlaceholders})
+        `, [survivorId, ...retiredIds])
+        for (const retiredId of retiredIds) {
+          yield* sql.unsafe(`
+            INSERT INTO canonical_aliases (alias_id, canonical_id, retired_at_ms)
+            VALUES (?, ?, ?)
+            ON CONFLICT(alias_id) DO UPDATE SET
+              canonical_id = excluded.canonical_id,
+              retired_at_ms = excluded.retired_at_ms
+          `, [retiredId, survivorId, candidate.observedAtMs])
+        }
+        yield* sql.unsafe(`DELETE FROM canonical_items WHERE id IN (${retiredPlaceholders})`, retiredIds)
+      }
+
+      yield* sql.unsafe(
+        "DELETE FROM identity_claims WHERE canonical_id = ? AND state <> 'exact'",
+        [survivorId]
+      )
+      for (const entry of matchClaims) {
+        yield* sql.unsafe(`
+          INSERT INTO identity_claims (
+            canonical_id, namespace, value, state, source_item_id, created_at_ms
+          ) VALUES (?, ?, ?, 'exact', ?, ?)
+          ON CONFLICT(canonical_id, namespace) DO UPDATE SET
+            value = excluded.value,
+            state = excluded.state
+        `, [survivorId, entry.namespace, entry.value, sourceItemId, candidate.observedAtMs])
+      }
+      if (proposedCanonicalId !== null && proposedCanonicalId !== survivorId) {
+        yield* sql.unsafe(`
+          INSERT INTO canonical_aliases (alias_id, canonical_id, retired_at_ms)
+          VALUES (?, ?, ?)
+          ON CONFLICT(alias_id) DO UPDATE SET canonical_id = excluded.canonical_id
+        `, [proposedCanonicalId, survivorId, candidate.observedAtMs])
+      }
+      yield* sql.unsafe(`
+        UPDATE canonical_items
+        SET identity_state = ?, updated_at_ms = ?
+        WHERE id = ?
+      `, [identityState, candidate.observedAtMs, survivorId])
+      yield* saveVersions
+      yield* assertIdentityFence(candidate, false)
+      return yield* readResolution(survivorId)
+    })))
+
   const persistIdentityResult: RepositoriesService["persistIdentityResult"] = (result) =>
     database("persistIdentityResult", sql.withTransaction(Effect.gen(function*() {
       const canonical = result.canonical
@@ -1301,6 +1793,8 @@ const makeRepositories = Effect.gen(function*() {
     deleteVirtualLibrary,
     isSourceEligible,
     resolveEligibleSources,
+    resolveIdentity,
+    lookupCanonicalId,
     persistIdentityResult,
     readQueryGeneration,
     appendQueryGenerationItems,
