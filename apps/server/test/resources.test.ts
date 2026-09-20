@@ -212,6 +212,32 @@ describe("bounded auxiliary resources", () => {
     await expect(response.text()).rejects.toMatchObject({ name: "AbortError" })
   })
 
+  it("handles rejected upstream cancellation while releasing the scope on request abort", async () => {
+    const unhandled: Array<unknown> = []
+    const onUnhandled = (reason: unknown) => { unhandled.push(reason) }
+    process.on("unhandledRejection", onUnhandled)
+    try {
+      let released = false
+      const signal = new AbortController()
+      const response = await Effect.runPromise(serveRegisteredResource(request("subtitle", {
+        open: () => Effect.acquireRelease(
+          Effect.succeed(new Response(new ReadableStream<Uint8Array>({
+            cancel: () => Promise.reject(new Error("underlying cancel failed"))
+          }), { headers: { "content-type": "text/vtt" } })),
+          () => Effect.sync(() => { released = true })
+        )
+      }), { signal: signal.signal }))
+
+      signal.abort()
+      await expect(response.text()).rejects.toMatchObject({ name: "AbortError" })
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(released).toBe(true)
+      expect(unhandled).toEqual([])
+    } finally {
+      process.off("unhandledRejection", onUnhandled)
+    }
+  })
+
   it("does not fail successful delivery when the optional image cache write fails", async () => {
     const failingCache = ResourceCache.of({
       get: () => Effect.succeed(null),

@@ -498,7 +498,7 @@ export const serveRegisteredResource = (
   const body = new ReadableStream<Uint8Array>({
     start(output) {
       const abort = (error: ResourceTimeout | DOMException) => {
-        void reader.cancel(error)
+        void reader.cancel(error).catch(() => undefined)
         output.error(error)
         void finalize(Exit.fail(error))
       }
