@@ -42,12 +42,18 @@ The default smoke is local and has no Cloudflare side effects:
 ./scripts/smoke-workers.sh
 ```
 
-Remote release evidence requires an explicit staging-looking Worker name and exact HTTPS origin:
+Inspect the remote plan without creating local temporary state or contacting Cloudflare:
 
 ```sh
-WORKERS_STAGING_NAME=oh-my-emby-staging \
-WORKERS_STAGING_ORIGIN=https://oh-my-emby-staging.example.workers.dev \
+./scripts/smoke-workers.sh --plan-remote
+```
+
+Run the remote smoke only from an authenticated release environment:
+
+```sh
 ./scripts/smoke-workers.sh --remote
 ```
 
-Remote mode creates a uniquely named ephemeral D1 database, writes its returned ID into a temporary config, migrates D1 before deployment, checks health/assets/non-HTML misses/claim/session, and removes only that staging Worker and database on exit. Never point these variables at production.
+Remote mode generates one 128-bit run ID and derives the exact ephemeral Worker and D1 names from it. Caller-supplied Worker names and origins are not accepted. The script writes the returned D1 ID into a temporary config, migrates D1 before deployment, parses and validates the run-owned `workers.dev` URL from Wrangler's deploy output, and checks health/assets/non-HTML misses/claim/session.
+
+The same run then temporarily replaces that Worker with an authenticated single-derivation PBKDF2 entrypoint. A local Bun runner sends ten requests, discards the first timing, and gates the remaining end-to-end request samples at p95 below 250 ms. This caller-side timing is required because [deployed Workers timers do not advance during CPU-only execution](https://developers.cloudflare.com/workers/runtime-apis/performance/). Cleanup validates the run ID again and deletes only the Worker and D1 database that this invocation successfully created. The command still has remote side effects and must not run against a production release path.

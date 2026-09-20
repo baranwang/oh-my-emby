@@ -3,7 +3,7 @@ import { cp, mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import { crossPlatformAcceptance } from "./cross-platform-contract.js"
+import { acceptanceUpstreamFetch, crossPlatformAcceptance } from "./cross-platform-contract.js"
 import { makeSqliteRepositoriesLayer } from "../src/platform/bun/sqlite-repositories.js"
 import { startBunRuntime } from "../src/platform/bun/index.js"
 
@@ -26,7 +26,8 @@ crossPlatformAcceptance("docker", {
       sqlitePath,
       cachePath: join(directory, "cache.sqlite"),
       assetsDir,
-      migrationsDir
+      migrationsDir,
+      upstreamFetch: acceptanceUpstreamFetch
     }
     const runtime = await startBunRuntime(config)
     const repositories = () => makeSqliteRepositoriesLayer({ filename: sqlitePath })

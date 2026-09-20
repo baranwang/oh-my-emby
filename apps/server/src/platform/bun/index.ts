@@ -43,6 +43,7 @@ export interface BunRuntimeConfig {
   readonly cachePath: string
   readonly assetsDir: string
   readonly migrationsDir: string
+  readonly upstreamFetch?: typeof fetch
 }
 
 export interface BunRuntime {
@@ -83,7 +84,7 @@ export const scheduleMaintenance = (
 const makeBunCoreLayer = (config: BunRuntimeConfig) => {
   const repositories = makeSqliteRepositoriesLayer({ filename: config.sqlitePath })
   const upstream = makeUpstreamClientLayer({
-    fetch,
+    fetch: config.upstreamFetch ?? fetch,
     destinationPolicy: {
       platform: "docker",
       administratorPrivateHosts: config.administratorPrivateHosts,

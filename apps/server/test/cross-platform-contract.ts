@@ -1,12 +1,10 @@
 import { Effect, Layer } from "effect"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
-import { makeEmbyHandler, type EmbyServices } from "../src/api/emby.js"
 import { UpstreamUnavailable } from "../src/core/errors.js"
 import { Federation, makeFederationLayer } from "../src/core/federation.js"
 import { makeIdentityLayer } from "../src/core/identity.js"
 import type { UpstreamServer } from "../src/core/model.js"
-import { Playback, makePlaybackLayer } from "../src/core/playback.js"
 import { Repositories, type RepositoriesService } from "../src/core/repositories.js"
 import { UpstreamClient } from "../src/core/upstream-client.js"
 
@@ -72,9 +70,56 @@ const upstreamItem = (serverId: string) => ({
     Id: `${serverId}-media`,
     Name: `${serverId} version`,
     Container: "mkv",
-    MediaStreams: [{ Index: 0, Type: "Video", Codec: "h264" }]
+    MediaStreams: [
+      { Index: 0, Type: "Video", Codec: "h264" },
+      { Index: 2, Type: "Subtitle", Codec: "srt", IsExternal: true, IsTextSubtitleStream: true }
+    ]
   }]
 })
+
+export const acceptanceUpstreamFetch: typeof fetch = async (input, init) => {
+  const request = new Request(input, init)
+  const url = new URL(request.url)
+  if (url.origin === "https://setup.example.com" &&
+    url.pathname === "/Users/AuthenticateByName" && request.method === "POST") {
+    return Response.json({
+      AccessToken: "setup-access-token",
+      ServerId: "setup-catalog-id",
+      User: { Id: "setup-upstream-user" }
+    })
+  }
+  const source = /^server-(\d+)\.example\.com$/.exec(url.hostname)?.[1]
+  if (source !== undefined && url.pathname === "/Items") {
+    const serverId = `server-${source}`
+    return serverId === "server-2"
+      ? new Response("Unavailable", { status: 503 })
+      : Response.json({ Items: [upstreamItem(serverId)], TotalRecordCount: 1 })
+  }
+  return new Response("Not Found", { status: 404 })
+}
+
+const embyAuthorization =
+  'MediaBrowser Client="SenPlayer", Device="Acceptance", DeviceId="acceptance-device", Version="1"'
+
+const claimOwner = async (app: AcceptanceApp): Promise<string> => {
+  const claim = await app.request("/api/dashboard/claim", {
+    method: "POST",
+    headers: jsonHeaders(app.publicOrigin),
+    body: JSON.stringify(ownerFixture)
+  })
+  expect(claim.status).toBe(200)
+  return cookieFrom(claim)
+}
+
+const loginEmby = async (app: AcceptanceApp): Promise<string> => {
+  const login = await app.request("/Users/AuthenticateByName", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-emby-authorization": embyAuthorization },
+    body: JSON.stringify({ Username: ownerFixture.username, Pw: ownerFixture.password })
+  })
+  expect(login.status).toBe(200)
+  return String((await login.json() as { AccessToken?: string }).AccessToken)
+}
 
 const prepareFederation = async (app: AcceptanceApp) => {
   await useRepositories(app.repositories, (repositories) => Effect.gen(function*() {
@@ -101,7 +146,6 @@ const prepareFederation = async (app: AcceptanceApp) => {
   }))
 
   let listCalls = 0
-  let proxiedVideoRequests = 0
   const upstream = Layer.succeed(UpstreamClient, UpstreamClient.of({
     request: ({ serverId }) => {
       listCalls++
@@ -117,10 +161,7 @@ const prepareFederation = async (app: AcceptanceApp) => {
       generation: version.serverGeneration,
       url: String((version.capabilities as Record<string, unknown>).url)
     }),
-    requestResource: () => {
-      proxiedVideoRequests++
-      return Effect.die("video bytes must never be proxied")
-    }
+    requestResource: () => Effect.die("unused")
   }))
   const identity = makeIdentityLayer.pipe(Layer.provide(app.repositories))
   const dependencies = Layer.mergeAll(app.repositories, identity, upstream)
@@ -147,8 +188,7 @@ const prepareFederation = async (app: AcceptanceApp) => {
     page,
     detailed,
     query,
-    listCalls: () => listCalls,
-    proxiedVideoRequests: () => proxiedVideoRequests
+    listCalls: () => listCalls
   }
 }
 
@@ -168,22 +208,45 @@ export const crossPlatformAcceptance = (
 
   it("supports claim, server setup, deep-link routing, and secret-safe status", async () => {
     const publicBodies: Array<string> = []
-    const claim = await app.request("/api/dashboard/claim", {
-      method: "POST",
-      headers: jsonHeaders(app.publicOrigin),
-      body: JSON.stringify(ownerFixture)
-    })
-    publicBodies.push(await claim.clone().text())
-    expect(claim.status).toBe(200)
-    await expect(claim.clone().json()).resolves.toMatchObject({ authenticated: true })
-    const cookie = cookieFrom(claim)
+    const cookie = await claimOwner(app)
 
-    await useRepositories(app.repositories, (repositories) => repositories.saveServer(serverFixture(0)))
+    const created = await app.request("/api/dashboard/servers", {
+      method: "POST",
+      headers: { ...jsonHeaders(app.publicOrigin), cookie },
+      body: JSON.stringify({
+        name: "Setup server",
+        baseUrl: "https://setup.example.com",
+        username: "upstream-user",
+        password: { _tag: "Set", value: "upstream-password" },
+        userAgent: "oh-my-emby-acceptance",
+        enabled: true
+      })
+    })
+    publicBodies.push(await created.clone().text())
+    expect(created.status).toBe(200)
+    const createdServer = await created.clone().json() as { id: string }
+    await expect(created.clone().json()).resolves.toMatchObject({
+      id: createdServer.id,
+      hasPassword: true,
+      health: "unknown"
+    })
+
+    const verified = await app.request(`/api/dashboard/servers/${createdServer.id}/test`, {
+      method: "POST",
+      headers: { origin: app.publicOrigin, cookie }
+    })
+    publicBodies.push(await verified.clone().text())
+    expect(verified.status).toBe(200)
+    await expect(verified.clone().json()).resolves.toEqual({
+      reachable: true,
+      catalogId: "setup-catalog-id"
+    })
+
     const servers = await app.request("/api/dashboard/servers", { headers: { cookie } })
     publicBodies.push(await servers.clone().text())
     expect(servers.status).toBe(200)
     await expect(servers.clone().json()).resolves.toEqual([
-      expect.objectContaining({ id: "server-0", hasPassword: true })
+      expect.objectContaining({ id: createdServer.id, hasPassword: true, health: "healthy" })
     ])
 
     const deepLink = await app.request("/dashboard/servers", {
@@ -191,7 +254,7 @@ export const crossPlatformAcceptance = (
     })
     publicBodies.push(await deepLink.clone().text())
     expect(deepLink.status).toBe(200)
-    expect(publicBodies.join("\n")).not.toContain(serverFixture(0).password)
+    expect(publicBodies.join("\n")).not.toContain("upstream-password")
   })
 
   it("preserves repository encoding, source order, and applied migrations", async () => {
@@ -273,39 +336,42 @@ export const crossPlatformAcceptance = (
     expect(claims).toHaveLength(2)
   })
 
-  it("returns one private video 302 with an empty body and no proxied bytes", async () => {
+  it("routes PlaybackInfo video and subtitle URLs through the production runtime", async () => {
+    await claimOwner(app)
+    const accessToken = await loginEmby(app)
     const scenario = await prepareFederation(app)
-    const playbackLayer = makePlaybackLayer({ sessionId: () => "acceptance-session" }).pipe(
-      Layer.provide(scenario.layer)
-    )
-    const item = scenario.detailed!
-    const response = await Effect.runPromise(Effect.gen(function*() {
-      const services: EmbyServices = {
-        config: { serverId: "oh-my-emby", serverName: "oh-my-emby", version: "0.0.0" },
-        now: () => 3_000,
-        auth: {
-          loginEmby: () => Effect.die("unused"),
-          authenticateEmby: () => Effect.succeed({
-            id: "token", username: "owner", authGeneration: 1,
-            deviceId: "device", deviceName: "SenPlayer"
-          })
-        },
-        federation: yield* Federation,
-        userState: {
-          write: () => Effect.die("unused"),
-          recordPlaybackEvent: () => Effect.die("unused")
-        },
-        libraries: { list: () => Effect.succeed([]) },
-        playback: yield* Playback
-      }
-      return yield* makeEmbyHandler(services)(new Request(
-        `https://local/Videos/${item.id}/stream?MediaSourceId=${item.mediaVersions[0]!.id}`,
-        { headers: { authorization: "Bearer token" } }
-      ))
-    }).pipe(Effect.provide(Layer.merge(scenario.layer, playbackLayer))))
-    expect(response.status).toBe(302)
-    expect(response.headers.get("cache-control")).toBe("private, no-store")
-    expect((await response.arrayBuffer()).byteLength).toBe(0)
-    expect(scenario.proxiedVideoRequests()).toBe(0)
+    const infoResponse = await app.request(`/Items/${scenario.page.items[0]!.id}/PlaybackInfo`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${accessToken}` }
+    })
+    expect(infoResponse.status).toBe(200)
+    const info = await infoResponse.json() as {
+      MediaSources: ReadonlyArray<{
+        DirectStreamUrl?: string
+        MediaStreams?: ReadonlyArray<{ DeliveryUrl?: string }>
+      }>
+    }
+    const directStreamUrl = info.MediaSources[0]?.DirectStreamUrl
+    const subtitleUrl = info.MediaSources[0]?.MediaStreams?.find(({ DeliveryUrl }) => DeliveryUrl)?.DeliveryUrl
+    expect(directStreamUrl).toMatch(/^\/Videos\//)
+    expect(subtitleUrl).toMatch(/^\/Videos\//)
+
+    for (const prefix of ["", "/emby"]) {
+      const video = await app.request(`${prefix}${directStreamUrl}`, {
+        headers: { authorization: `Bearer ${accessToken}` },
+        redirect: "manual"
+      })
+      expect(video.status, `${prefix || "root"} video`).toBe(302)
+      expect(video.headers.get("cache-control")).toBe("private, no-store")
+      expect((await video.arrayBuffer()).byteLength).toBe(0)
+
+      const subtitle = await app.request(`${prefix}${subtitleUrl}`, {
+        headers: { authorization: `Bearer ${accessToken}` }
+      })
+      expect(subtitle.status, `${prefix || "root"} subtitle`).toBe(503)
+      await expect(subtitle.json()).resolves.toEqual({
+        error: { code: "Unavailable", message: "Service unavailable" }
+      })
+    }
   })
 })

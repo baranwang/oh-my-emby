@@ -42,10 +42,17 @@ const requestRemoteAddress = (request: Request, publicOrigin: string): Option.Op
     : Option.some(connectedAddress)
 }
 
-export const makeWorkersCoreLayer = (env: Pick<Env, "DB">) => {
+export interface WorkersRuntimeDependencies {
+  readonly upstreamFetch?: typeof fetch
+}
+
+export const makeWorkersCoreLayer = (
+  env: Pick<Env, "DB">,
+  dependencies: WorkersRuntimeDependencies = {}
+) => {
   const repositories = makeD1RepositoriesLayer(env.DB)
   const upstream = makeUpstreamClientLayer({
-    fetch,
+    fetch: dependencies.upstreamFetch ?? fetch,
     destinationPolicy: { platform: "workers" }
   }).pipe(Layer.provide(repositories))
   const identity = makeIdentityLayer.pipe(Layer.provide(repositories))
@@ -71,8 +78,12 @@ export const makeWorkersCoreLayer = (env: Pick<Env, "DB">) => {
   )
 }
 
-const makeWorkersRuntimeLayer = (env: Env, workersCache: WorkersCacheBinding) => {
-  const core = makeWorkersCoreLayer(env)
+const makeWorkersRuntimeLayer = (
+  env: Env,
+  workersCache: WorkersCacheBinding,
+  dependencies: WorkersRuntimeDependencies
+) => {
+  const core = makeWorkersCoreLayer(env, dependencies)
   const cache = Layer.succeed(ResourceCache, ResourceCache.of(makeWorkersResourceCache(workersCache)))
   const dashboardConfig = {
     publicOrigin: env.PUBLIC_ORIGIN,
@@ -96,7 +107,8 @@ const internalFailure = (error: unknown): Response => {
 export const runWorkerRequest = async (
   request: Request,
   env: Env,
-  _ctx: ExecutionContext
+  _ctx: ExecutionContext,
+  dependencies: WorkersRuntimeDependencies = {}
 ): Promise<Response> => {
   const workersCache = await caches.open(resourceCacheName)
   const program = Effect.scoped(Effect.gen(function*() {
@@ -127,7 +139,7 @@ export const runWorkerRequest = async (
     return yield* routeApplication(request).pipe(
       Effect.provideService(ApplicationServices, services)
     )
-  })).pipe(Effect.provide(makeWorkersRuntimeLayer(env, workersCache)))
+  })).pipe(Effect.provide(makeWorkersRuntimeLayer(env, workersCache, dependencies)))
   return Effect.runPromise(program).catch(internalFailure)
 }
 

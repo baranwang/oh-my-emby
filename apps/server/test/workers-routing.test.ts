@@ -18,9 +18,10 @@ import {
 import { makeD1RepositoriesLayer } from "../src/platform/workers/d1-repositories.js"
 import worker, {
   makeWorkersCoreLayer,
-  parseTrustedProxyAddresses
+  parseTrustedProxyAddresses,
+  runWorkerRequest
 } from "../src/platform/workers/index.js"
-import { crossPlatformAcceptance } from "./cross-platform-contract.js"
+import { acceptanceUpstreamFetch, crossPlatformAcceptance } from "./cross-platform-contract.js"
 
 const request = (path: string, init?: RequestInit) => new Request(`https://app.example.com${path}`, init)
 
@@ -181,6 +182,18 @@ const runWorkerFetch = async (path: string, init?: RequestInit) => {
   return response
 }
 
+const runAcceptanceFetch = async (path: string, init?: RequestInit) => {
+  const context = createExecutionContext()
+  const response = await runWorkerRequest(
+    new Request(`http://localhost:8787${path}`, init),
+    env,
+    context,
+    { upstreamFetch: acceptanceUpstreamFetch }
+  )
+  await waitOnExecutionContext(context)
+  return response
+}
+
 const mutableTables = [
   "playback_watermarks",
   "playback_sessions",
@@ -215,7 +228,7 @@ crossPlatformAcceptance("workers", {
     return {
       publicOrigin: "http://localhost:8787",
       repositories: repositories(),
-      request: runWorkerFetch,
+      request: runAcceptanceFetch,
       inspectStorage: async () => {
         const migrationRows = await env.DB.prepare(
           "SELECT name FROM schema_migrations ORDER BY version"

@@ -4,22 +4,77 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SERVER_DIR="$ROOT/apps/server"
 WRANGLER="$SERVER_DIR/node_modules/.bin/wrangler"
-TEMP_DIR="$(mktemp -d)"
-CONFIG="$TEMP_DIR/wrangler.json"
-STATE_DIR="$TEMP_DIR/state"
-LOG="$TEMP_DIR/wrangler.log"
+TEMP_DIR=
+CONFIG=
+STATE_DIR=
+LOG=
 MODE=local
 DEV_PID=
+RUN_ID=
+BENCHMARK_TOKEN=
+REMOTE_WORKER=
 REMOTE_DB=
 REMOTE_WORKER_CREATED=0
 REMOTE_DB_CREATED=0
 
 if [[ "${1:-}" == "--remote" ]]; then
   MODE=remote
+elif [[ "${1:-}" == "--plan-remote" ]]; then
+  MODE=remote-plan
 elif [[ $# -ne 0 ]]; then
-  echo "usage: $0 [--remote]" >&2
+  echo "usage: $0 [--remote|--plan-remote]" >&2
   exit 2
 fi
+
+owned_targets() {
+  [[ "$RUN_ID" =~ ^[a-f0-9]{32}$ ]] &&
+    [[ "$REMOTE_WORKER" == "ome-worker-$RUN_ID" ]] &&
+    [[ "$REMOTE_DB" == "ome-d1-$RUN_ID" ]]
+}
+
+if [[ "$MODE" != local ]]; then
+  RUN_ID="$(bun -e 'process.stdout.write(crypto.randomUUID().replaceAll("-", ""))')"
+  BENCHMARK_TOKEN="$(bun -e 'process.stdout.write(crypto.randomUUID().replaceAll("-", "") + crypto.randomUUID().replaceAll("-", ""))')"
+  REMOTE_WORKER="ome-worker-$RUN_ID"
+  REMOTE_DB="ome-d1-$RUN_ID"
+  owned_targets || {
+    echo "refusing remote smoke with an invalid ownership marker" >&2
+    exit 2
+  }
+fi
+
+if [[ "$MODE" == remote-plan ]]; then
+  RUN_ID="$RUN_ID" REMOTE_WORKER="$REMOTE_WORKER" REMOTE_DB="$REMOTE_DB" bun -e '
+    console.log(JSON.stringify({
+      mode: "remote-plan",
+      runId: process.env.RUN_ID,
+      worker: process.env.REMOTE_WORKER,
+      database: process.env.REMOTE_DB,
+      smokeOrigin: {
+        source: "wrangler-deploy-output",
+        expectedWorker: process.env.REMOTE_WORKER
+      },
+      benchmark: {
+        entrypoint: "scripts/workers-pbkdf2-benchmark.ts",
+        runner: "scripts/benchmark-workers-pbkdf2.ts",
+        method: "POST",
+        targetWorker: process.env.REMOTE_WORKER,
+        authorization: "ephemeral-run-token",
+        measurement: "remote-request-upper-bound"
+      },
+      cleanup: {
+        worker: process.env.REMOTE_WORKER,
+        database: process.env.REMOTE_DB
+      }
+    }))
+  '
+  exit 0
+fi
+
+TEMP_DIR="$(mktemp -d)"
+CONFIG="$TEMP_DIR/wrangler.json"
+STATE_DIR="$TEMP_DIR/state"
+LOG="$TEMP_DIR/wrangler.log"
 
 cleanup() {
   local code=$?
@@ -30,11 +85,18 @@ cleanup() {
     kill "$DEV_PID" >/dev/null 2>&1 || true
     wait "$DEV_PID" >/dev/null 2>&1 || true
   fi
-  if [[ "$REMOTE_WORKER_CREATED" == 1 ]]; then
-    "$WRANGLER" --cwd "$SERVER_DIR" delete "$WORKERS_STAGING_NAME" --config "$CONFIG" >/dev/null 2>&1 || cleanup_failed=1
-  fi
-  if [[ "$REMOTE_DB_CREATED" == 1 ]]; then
-    "$WRANGLER" --cwd "$SERVER_DIR" d1 delete "$REMOTE_DB" --skip-confirmation --config "$CONFIG" >/dev/null 2>&1 || cleanup_failed=1
+  if [[ "$REMOTE_WORKER_CREATED" == 1 || "$REMOTE_DB_CREATED" == 1 ]]; then
+    if ! owned_targets; then
+      echo "refusing cleanup for targets not owned by this run" >&2
+      cleanup_failed=1
+    else
+      if [[ "$REMOTE_WORKER_CREATED" == 1 ]]; then
+        "$WRANGLER" --cwd "$SERVER_DIR" delete "$REMOTE_WORKER" --config "$CONFIG" >/dev/null 2>&1 || cleanup_failed=1
+      fi
+      if [[ "$REMOTE_DB_CREATED" == 1 ]]; then
+        "$WRANGLER" --cwd "$SERVER_DIR" d1 delete "$REMOTE_DB" --skip-confirmation --config "$CONFIG" >/dev/null 2>&1 || cleanup_failed=1
+      fi
+    fi
   fi
   rm -rf "$TEMP_DIR"
   if [[ "$code" == 0 && "$cleanup_failed" == 1 ]]; then code=1; fi
@@ -137,27 +199,7 @@ if [[ "$MODE" == local ]]; then
   exit 0
 fi
 
-: "${WORKERS_STAGING_NAME:?WORKERS_STAGING_NAME is required with --remote}"
-: "${WORKERS_STAGING_ORIGIN:?WORKERS_STAGING_ORIGIN is required with --remote}"
-if ! [[ "$WORKERS_STAGING_NAME" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]; then
-  echo "WORKERS_STAGING_NAME must be a lowercase Cloudflare Worker name" >&2
-  exit 2
-fi
-if ! [[ "$WORKERS_STAGING_NAME" =~ (staging|stage|preview|test) ]]; then
-  echo "WORKERS_STAGING_NAME must visibly identify a staging/test Worker" >&2
-  exit 2
-fi
-bun -e '
-  const value = process.argv[1]
-  const url = new URL(value)
-  if (url.protocol !== "https:" || url.origin !== value || url.username || url.password) process.exit(1)
-' "$WORKERS_STAGING_ORIGIN" || {
-  echo "WORKERS_STAGING_ORIGIN must be an exact HTTPS origin" >&2
-  exit 2
-}
-
-REMOTE_DB="ome-smoke-$(date +%Y%m%d%H%M%S)-$$"
-write_config "$WORKERS_STAGING_NAME" "$WORKERS_STAGING_ORIGIN" 0
+write_config "$REMOTE_WORKER" "https://invalid.example" 0
 "$WRANGLER" --cwd "$SERVER_DIR" d1 create "$REMOTE_DB" --binding DB --use-remote --update-config --config "$CONFIG"
 REMOTE_DB_CREATED=1
 CONFIG_PATH="$CONFIG" ROOT_PATH="$ROOT" bun -e '
@@ -166,7 +208,47 @@ CONFIG_PATH="$CONFIG" ROOT_PATH="$ROOT" bun -e '
   await Bun.write(process.env.CONFIG_PATH, JSON.stringify(config, null, 2))
 '
 CI=1 "$WRANGLER" --cwd "$SERVER_DIR" d1 migrations apply DB --remote --config "$CONFIG"
+"$WRANGLER" --cwd "$SERVER_DIR" deploy --strict --config "$CONFIG" 2>&1 | tee "$TEMP_DIR/deploy.log"
 REMOTE_WORKER_CREATED=1
-"$WRANGLER" --cwd "$SERVER_DIR" deploy --config "$CONFIG"
-smoke_http "$WORKERS_STAGING_ORIGIN" "$WORKERS_STAGING_ORIGIN"
-echo "Workers remote staging smoke passed; cleanup will delete the staging Worker and ephemeral D1"
+ORIGIN="$(DEPLOY_LOG="$TEMP_DIR/deploy.log" EXPECTED_WORKER="$REMOTE_WORKER" bun -e '
+  const output = await Bun.file(process.env.DEPLOY_LOG).text()
+  const candidates = [...new Set(output.match(/https:\/\/[a-z0-9.-]+\.workers\.dev\/?/g) ?? [])]
+    .map((value) => new URL(value))
+    .filter((url) => url.hostname.startsWith(`${process.env.EXPECTED_WORKER}.`))
+  if (candidates.length !== 1) process.exit(1)
+  const url = candidates[0]
+  const suffix = url.hostname.slice(process.env.EXPECTED_WORKER.length + 1)
+  if (!/^[a-z0-9-]+\.workers\.dev$/.test(suffix) || url.pathname !== "/" || url.search || url.hash) {
+    process.exit(1)
+  }
+  process.stdout.write(url.origin)
+')" || {
+  echo "Wrangler did not report exactly one HTTPS workers.dev URL for $REMOTE_WORKER" >&2
+  exit 1
+}
+CONFIG_PATH="$CONFIG" REMOTE_ORIGIN="$ORIGIN" bun -e '
+  const config = await Bun.file(process.env.CONFIG_PATH).json()
+  config.vars.PUBLIC_ORIGIN = process.env.REMOTE_ORIGIN
+  await Bun.write(process.env.CONFIG_PATH, JSON.stringify(config, null, 2))
+'
+"$WRANGLER" --cwd "$SERVER_DIR" deploy --strict --config "$CONFIG" >/dev/null
+smoke_http "$ORIGIN" "$ORIGIN"
+CONFIG_PATH="$CONFIG" ROOT_PATH="$ROOT" bun -e '
+  const config = await Bun.file(process.env.CONFIG_PATH).json()
+  config.main = `${process.env.ROOT_PATH}/scripts/workers-pbkdf2-benchmark.ts`
+  config.vars = { BENCHMARK_COMPATIBILITY_DATE: config.compatibility_date }
+  delete config.assets
+  delete config.triggers
+  delete config.d1_databases
+  await Bun.write(process.env.CONFIG_PATH, JSON.stringify(config, null, 2))
+'
+BENCHMARK_TOKEN="$BENCHMARK_TOKEN" BENCHMARK_SECRETS="$TEMP_DIR/benchmark-secrets.json" bun -e '
+  await Bun.write(process.env.BENCHMARK_SECRETS, JSON.stringify({
+    BENCHMARK_TOKEN: process.env.BENCHMARK_TOKEN
+  }))
+'
+"$WRANGLER" --cwd "$SERVER_DIR" deploy --strict --config "$CONFIG" \
+  --secrets-file "$TEMP_DIR/benchmark-secrets.json" >/dev/null
+WORKERS_BENCHMARK_ORIGIN="$ORIGIN" WORKERS_BENCHMARK_TOKEN="$BENCHMARK_TOKEN" \
+  bun "$ROOT/scripts/benchmark-workers-pbkdf2.ts"
+echo "Workers remote staging smoke passed; cleanup will delete only $REMOTE_WORKER and $REMOTE_DB"

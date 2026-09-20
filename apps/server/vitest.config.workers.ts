@@ -38,7 +38,11 @@ export default defineConfig(async () => ({
     })
   ],
   test: {
-    include: ["test/d1-repository.test.ts", "test/workers-routing.test.ts"],
+    include: [
+      "test/d1-repository.test.ts",
+      "test/workers-routing.test.ts",
+      "test/workers-pbkdf2-benchmark.test.ts"
+    ],
     setupFiles: ["./test/workers-setup.ts"]
   }
 }))

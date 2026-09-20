@@ -44,6 +44,7 @@ const isEmbyPath = (pathname: string): boolean => pathname === "/emby" || pathna
   "/System/",
   "/Users/",
   "/Items",
+  "/Videos/",
   "/Sessions/"
 ].some((prefix) => pathname.startsWith(prefix))
 

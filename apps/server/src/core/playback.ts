@@ -218,7 +218,7 @@ export const makePlaybackLayer = (
     const federation = yield* Federation
     const repositories = yield* Repositories
     const upstream = yield* UpstreamClient
-    const sessionId = config.sessionId ?? crypto.randomUUID
+    const sessionId = config.sessionId ?? (() => crypto.randomUUID())
     const isClientUsableResource = config.isClientUsableResource ?? (() => false)
 
     const record = (canonicalId: string, enrich: boolean) => Effect.gen(function*() {
