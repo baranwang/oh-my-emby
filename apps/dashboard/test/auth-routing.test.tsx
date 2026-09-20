@@ -1,8 +1,10 @@
+import { renderToStaticMarkup } from "react-dom/server"
 import { QueryClient } from "@tanstack/react-query"
 import { createMemoryHistory } from "@tanstack/react-router"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { sectionFromPathname } from "../src/components/app-shell/app-shell.js"
+import { SidebarInset } from "../src/components/ui/sidebar.js"
 import {
   handleUnauthorized,
   logout,
@@ -44,6 +46,14 @@ it.each(["/dashboard/servers", "/servers"])(
     expect(sectionFromPathname(pathname)).toBe("servers")
   }
 )
+
+it("renders shell content with exactly one main landmark", () => {
+  const markup = renderToStaticMarkup(
+    <SidebarInset><main id="main-content">Dashboard</main></SidebarInset>
+  )
+
+  expect(markup.match(/<main\b/g)).toHaveLength(1)
+})
 
 describe("Dashboard authentication routing", () => {
   it("redirects an uninitialized instance to setup", async () => {
@@ -144,6 +154,30 @@ describe("protected Query cache", () => {
     await logout(queryClient)
 
     expect(queryClient.getQueryData(queryKeys.bootstrap)).toEqual({ initialized: true })
+    expect(queryClient.getQueriesData({ queryKey: queryKeys.servers })).toEqual([])
+    expect(queryClient.getQueriesData({ queryKey: queryKeys.libraries })).toEqual([])
+    expect(queryClient.getQueriesData({ queryKey: queryKeys.system })).toEqual([])
+    expect(queryClient.getQueryData(queryKeys.session)).toEqual({
+      authenticated: false,
+      username: null
+    })
+  })
+
+  it("clears protected data and refreshes session when logout is unauthorized", async () => {
+    const fetch = makeFetch({
+      "/api/dashboard/logout": json({ _tag: "Unauthorized" }, 401),
+      "/api/dashboard/session": json({ authenticated: false, username: null })
+    })
+    vi.stubGlobal("fetch", fetch)
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    await queryClient.fetchQuery(sessionQueryOptions)
+    queryClient.setQueryData(queryKeys.servers, [{ id: "server-1" }])
+    queryClient.setQueryData(queryKeys.libraries, [{ id: "library-1" }])
+    queryClient.setQueryData(queryKeys.system, { database: "healthy" })
+    queryClient.setQueryData(queryKeys.session, { authenticated: true, username: "owner" })
+
+    await expect(logout(queryClient)).rejects.toMatchObject({ _tag: "Unauthorized" })
+
     expect(queryClient.getQueriesData({ queryKey: queryKeys.servers })).toEqual([])
     expect(queryClient.getQueriesData({ queryKey: queryKeys.libraries })).toEqual([])
     expect(queryClient.getQueriesData({ queryKey: queryKeys.system })).toEqual([])

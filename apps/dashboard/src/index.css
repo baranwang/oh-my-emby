@@ -1,6 +1,6 @@
 @import "tailwindcss";
 @import "tw-animate-css";
-@import "shadcn/tailwind.css";
+@import "./shadcn-preset.css";
 @import "@fontsource-variable/noto-sans";
 @import "@fontsource-variable/noto-serif";
 

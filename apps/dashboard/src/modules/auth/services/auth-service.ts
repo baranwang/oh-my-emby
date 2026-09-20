@@ -72,7 +72,7 @@ export const login = async (credentials: Credentials, queryClient: QueryClient) 
 }
 
 export const logout = async (queryClient: QueryClient) => {
-  await run(apiClient.auth.logout())
+  await runProtected(apiClient.auth.logout(), queryClient)
   clearProtectedQueries(queryClient)
   await queryClient.refetchQueries({ queryKey: queryKeys.session, exact: true, type: "all" })
 }
