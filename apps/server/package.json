@@ -6,15 +6,19 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "bun --bun vitest run"
+    "test": "bun --bun vitest run --exclude test/d1-repository.test.ts --exclude test/workers-routing.test.ts",
+    "test:workers": "vitest run --config vitest.config.workers.ts"
   },
   "dependencies": {
     "@effect/platform-bun": "4.0.0-rc.112",
+    "@effect/sql-d1": "4.0.0-rc.112",
     "@effect/sql-sqlite-bun": "4.0.0-rc.112",
     "@oh-my-emby/contracts": "workspace:*",
     "effect": "4.0.0-rc.112"
   },
   "devDependencies": {
-    "vitest": "^5.0.1"
+    "@cloudflare/vitest-pool-workers": "0.22.0",
+    "vitest": "4.1.0",
+    "wrangler": "4.135.0"
   }
 }

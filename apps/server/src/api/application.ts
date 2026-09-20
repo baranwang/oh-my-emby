@@ -17,7 +17,12 @@ const jsonNotFound = () => Response.json({
 const safePath = (pathname: string): string | null => {
   try {
     const decoded = decodeURIComponent(pathname)
-    if (decoded.includes("\\") || decoded.includes("\0") || decoded.split("/").some((part) => part === "..")) {
+    if (
+      decoded.includes("%") ||
+      decoded.includes("\\") ||
+      decoded.includes("\0") ||
+      decoded.split("/").some((part) => part === "..")
+    ) {
       return null
     }
     return decoded
