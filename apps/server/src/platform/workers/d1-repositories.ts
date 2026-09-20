@@ -692,8 +692,15 @@ const makeRepositories = Effect.gen(function*() {
           WHERE NOT EXISTS (
             SELECT 1 FROM users
             WHERE singleton = 1 AND auth_generation = ? AND updated_at_ms = ?
+              AND password_hash = ? AND password_salt = ? AND pbkdf2_iterations = ?
           )
-        `, [input.expectedAuthGeneration + 1, input.updatedAtMs])
+        `, [
+          input.expectedAuthGeneration + 1,
+          input.updatedAtMs,
+          input.password.hash,
+          input.password.salt,
+          input.password.iterations
+        ])
       ]))
       if (Result.isFailure(result)) {
         const users = yield* sql.unsafe<{ readonly auth_generation: unknown }>(

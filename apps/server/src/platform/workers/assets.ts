@@ -20,6 +20,7 @@ const assetPath = (request: Request): string | null => {
     return null
   }
   if (
+    decoded.includes("%") ||
     decoded.includes("\\") ||
     decoded.includes("\0") ||
     decoded.split("/").some((part) => part === "..") ||

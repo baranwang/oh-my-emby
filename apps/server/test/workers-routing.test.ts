@@ -70,6 +70,27 @@ describe("Workers Dashboard assets", () => {
     expect(fixture.paths).toEqual(["/servers", "/index.html", "/libraries", "/index.html"])
   })
 
+  it("rejects residual encoding before invoking the asset binding", async () => {
+    const paths: Array<string> = []
+    const binding: AssetsBinding = {
+      fetch: async (input) => {
+        paths.push(new URL(input.url).pathname)
+        return new Response("<h1>secret</h1>", {
+          headers: { "content-type": "text/html" }
+        })
+      }
+    }
+
+    const response = await Effect.runPromise(serveDashboardAsset(
+      request("/dashboard/%252e%252e%252fsecret", { headers: { accept: "text/html" } }),
+      binding
+    ))
+
+    expect(response.status).toBe(404)
+    expect(response.headers.get("content-type")).not.toContain("text/html")
+    expect(paths).toEqual([])
+  })
+
   it.each([
     ["missing JavaScript", "/dashboard/assets/missing.js", { headers: { accept: "text/html" } }],
     ["missing source map", "/dashboard/assets/app.js.map", { headers: { accept: "text/html" } }],

@@ -533,6 +533,80 @@ describe("D1 parity regressions", () => {
     }
   })
 
+  it("rejects a same-millisecond authentication revocation CAS loser", async () => {
+    const harness = await makeHarness()
+    const replacements = [
+      {
+        password: {
+          hash: new Uint8Array([20]),
+          salt: new Uint8Array([21]),
+          iterations: 310_000
+        },
+        expectedAuthGeneration: 1,
+        updatedAtMs: 2_000
+      },
+      {
+        password: {
+          hash: new Uint8Array([30]),
+          salt: new Uint8Array([31]),
+          iterations: 320_000
+        },
+        expectedAuthGeneration: 1,
+        updatedAtMs: 2_000
+      }
+    ] as const
+    try {
+      await useRepositories(harness, (repositories) => Effect.gen(function*() {
+        yield* repositories.claimUser({ username: "owner", password: passwordRecord, nowMs: 1_000 })
+        yield* repositories.issueDashboardSession({
+          id: "session-1",
+          tokenHash: new Uint8Array([10]),
+          expectedAuthGeneration: 1,
+          createdAtMs: 1_000,
+          lastSeenAtMs: 1_000,
+          expiresAtMs: 10_000
+        })
+        yield* repositories.issueEmbyToken({
+          id: "token-1",
+          tokenHash: new Uint8Array([11]),
+          expectedAuthGeneration: 1,
+          deviceId: "device-1",
+          deviceName: "SenPlayer",
+          createdAtMs: 1_000,
+          lastUsedAtMs: 1_000,
+          expiresAtMs: 10_000
+        })
+      }))
+
+      const results = await Promise.allSettled(replacements.map((replacement) =>
+        useRepositories(harness, (repositories) => repositories.revokeAuthentication(replacement))
+      ))
+      const winner = results.findIndex((result) => result.status === "fulfilled")
+      const rejected = results.filter((result) => result.status === "rejected")
+
+      expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1)
+      expect(rejected).toHaveLength(1)
+      expect(rejected[0]).toMatchObject({ reason: { _tag: "AuthenticationChanged" } })
+
+      const row = await env.DB.prepare(`
+        SELECT password_hash, password_salt, pbkdf2_iterations, auth_generation, updated_at_ms
+        FROM users WHERE singleton = 1
+      `).first<Record<string, unknown>>()
+      expect(row).not.toBeNull()
+      expect(Array.from(row!.password_hash as Uint8Array)).toEqual(Array.from(replacements[winner]!.password.hash))
+      expect(Array.from(row!.password_salt as Uint8Array)).toEqual(Array.from(replacements[winner]!.password.salt))
+      expect(row).toMatchObject({
+        pbkdf2_iterations: replacements[winner]!.password.iterations,
+        auth_generation: 2,
+        updated_at_ms: 2_000
+      })
+      expect(await env.DB.prepare("SELECT count(*) AS count FROM dashboard_sessions").first()).toEqual({ count: 0 })
+      expect(await env.DB.prepare("SELECT count(*) AS count FROM emby_tokens").first()).toEqual({ count: 0 })
+    } finally {
+      await harness.dispose()
+    }
+  })
+
   it("rolls back a virtual-library replacement when a source insert fails", async () => {
     const harness = await makeHarness()
     await useRepositories(harness, (repositories) => Effect.gen(function*() {
