@@ -2,6 +2,8 @@
 
 Date: 2026-09-20
 
+Parent architecture: [Emby Aggregation Architecture Design](./2026-09-20-emby-aggregation-architecture-design.md)
+
 ## Status
 
 Approved design for the first Dashboard release. This document defines frontend architecture only; it does not authorize product implementation beyond the agreed Dashboard boundary.
