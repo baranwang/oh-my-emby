@@ -11,7 +11,9 @@ import type {
   DashboardSessionLookup,
   DashboardSessionRecord,
   EligibleSource,
+  IdentityClaim,
   IdentityResolution,
+  JsonValue,
   MaintenanceResult,
   OutboxAcknowledgement,
   OutboxClaim,
@@ -19,6 +21,7 @@ import type {
   PasswordReplacement,
   QueryGeneration,
   QueryGenerationAppend,
+  QueryGenerationItem,
   SaveServerCommand,
   SaveServerResultCommand,
   SaveVirtualLibraryCommand,
@@ -26,6 +29,8 @@ import type {
   SessionIssue,
   SessionRecord,
   StateWrite,
+  SourceItemRecord,
+  SourceMediaVersion,
   TokenIssue,
   TokenLookup,
   TokenRecord,
@@ -34,6 +39,40 @@ import type {
   UserStateRecord,
   VirtualLibrary
 } from "./model.js"
+
+export interface MetadataProjection {
+  readonly sourceItemId: string
+  readonly projectionKey: string
+  readonly payload: JsonValue
+  readonly freshUntilMs: number
+  readonly staleUntilMs: number
+  readonly updatedAtMs: number
+}
+
+export interface CachedSourceItemsLookup {
+  readonly serverId: string
+  readonly serverGeneration: number
+  readonly sourceLibraryId: string
+  readonly projectionKey: string
+  readonly usableAtMs: number
+  readonly limit: number
+}
+
+export interface CatalogItemRecord {
+  readonly canonical: CanonicalItem
+  readonly claims: ReadonlyArray<IdentityClaim>
+  readonly sourceItems: ReadonlyArray<SourceItemRecord>
+  readonly mediaVersions: ReadonlyArray<SourceMediaVersion>
+  readonly userState: UserStateRecord | null
+}
+
+export interface StateMembershipLookup {
+  readonly virtualLibraryId: string
+  readonly favorite?: boolean
+  readonly resume?: boolean
+  readonly played?: boolean
+  readonly limit: number
+}
 
 export interface RepositoriesService {
   readonly claimUser: (input: ClaimUserInput) => Effect.Effect<UserRecord, ClaimError>
@@ -93,7 +132,38 @@ export interface RepositoriesService {
   readonly lookupCanonicalId: (id: string) => Effect.Effect<string | null, RepositoryError>
   readonly persistIdentityResult: (result: IdentityResolution) => Effect.Effect<CanonicalItem, IdentityFailure>
   readonly readQueryGeneration: (key: string) => Effect.Effect<QueryGeneration | null, RepositoryError>
+  readonly readQueryGenerationItems: (
+    generationId: string
+  ) => Effect.Effect<ReadonlyArray<QueryGenerationItem>, RepositoryError>
   readonly appendQueryGenerationItems: (input: QueryGenerationAppend) => Effect.Effect<void, RepositoryError>
+  readonly readMetadataProjection: (
+    sourceItemId: string,
+    projectionKey: string
+  ) => Effect.Effect<MetadataProjection | null, RepositoryError>
+  readonly readCachedSourceItems: (
+    input: CachedSourceItemsLookup
+  ) => Effect.Effect<ReadonlyArray<MetadataProjection>, RepositoryError>
+  readonly writeMetadataProjection: (
+    input: MetadataProjection
+  ) => Effect.Effect<void, RepositoryError>
+  readonly mergeCanonicalMetadata: (
+    canonicalId: string,
+    sourceItemId: string,
+    metadata: JsonValue,
+    updatedAtMs: number
+  ) => Effect.Effect<void, RepositoryError>
+  readonly readCatalogItems: (
+    canonicalIds: ReadonlyArray<string>,
+    usableAtMs?: number
+  ) => Effect.Effect<ReadonlyArray<CatalogItemRecord>, RepositoryError>
+  readonly resolveEligibleSourcesForCanonical: (
+    canonicalId: string
+  ) => Effect.Effect<ReadonlyArray<EligibleSource>, RepositoryError>
+  readonly listStateMemberCanonicalIds: (
+    input: StateMembershipLookup
+  ) => Effect.Effect<ReadonlyArray<string>, RepositoryError>
+  /** Called by the local-state service after a relevant state write commits. */
+  readonly invalidateStateDependentQueryGenerations: () => Effect.Effect<void, RepositoryError>
   readonly writeUserStateAndTargets: (input: StateWrite) => Effect.Effect<UserStateRecord, RepositoryError>
   readonly claimOutboxTargets: (input: ClaimRequest) => Effect.Effect<ReadonlyArray<OutboxClaim>, RepositoryError>
   readonly acknowledgeOutboxTarget: (input: OutboxAcknowledgement) => Effect.Effect<boolean, RepositoryError>

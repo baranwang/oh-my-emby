@@ -6,7 +6,7 @@ import {
 } from "@oh-my-emby/contracts"
 import { Effect, Layer, Schema, Semaphore } from "effect"
 
-import { OUTBOX_BATCH_SIZE } from "../../core/limits.js"
+import { DB_BATCH_SIZE, OUTBOX_BATCH_SIZE } from "../../core/limits.js"
 import {
   AlreadyInitialized,
   AuthenticationChanged,
@@ -42,7 +42,12 @@ import type {
   UserStateRecord,
   VirtualLibrary
 } from "../../core/model.js"
-import { Repositories, type RepositoriesService } from "../../core/repositories.js"
+import {
+  Repositories,
+  type CatalogItemRecord,
+  type MetadataProjection,
+  type RepositoriesService
+} from "../../core/repositories.js"
 
 const decodeServerId = Schema.decodeUnknownSync(ServerViewSchema.fields.id)
 const decodeSourceLibraryId = Schema.decodeUnknownSync(SourceLibraryViewSchema.fields.id)
@@ -120,6 +125,35 @@ const canonicalJson = (value: unknown): string => JSON.stringify(normalizeJson(v
 const json = (value: unknown, field: string): JsonValue => {
   if (typeof value !== "string") throw new TypeError(`${field} must be JSON text`)
   return normalizeJson(JSON.parse(value))
+}
+
+const mergeMissingJson = (current: JsonValue, incoming: JsonValue): JsonValue => {
+  if (
+    typeof current !== "object" || current === null || Array.isArray(current) ||
+    typeof incoming !== "object" || incoming === null || Array.isArray(incoming)
+  ) return current
+  const currentObject = current as { readonly [key: string]: JsonValue }
+  const incomingObject = incoming as { readonly [key: string]: JsonValue }
+  const merged: Record<string, JsonValue> = { ...incomingObject }
+  for (const [key, value] of Object.entries(currentObject)) {
+    const candidate = incomingObject[key]
+    merged[key] = candidate === undefined ? value : mergeMissingJson(value, candidate)
+  }
+  return merged
+}
+
+const mergeProjectionJson = (current: JsonValue, incoming: JsonValue): JsonValue => {
+  if (
+    typeof current !== "object" || current === null || Array.isArray(current) ||
+    typeof incoming !== "object" || incoming === null || Array.isArray(incoming)
+  ) return incoming
+  const currentObject = current as { readonly [key: string]: JsonValue }
+  const incomingObject = incoming as { readonly [key: string]: JsonValue }
+  const merged: Record<string, JsonValue> = { ...currentObject }
+  for (const [key, value] of Object.entries(incomingObject)) {
+    merged[key] = currentObject[key] === undefined ? value : mergeProjectionJson(currentObject[key], value)
+  }
+  return merged
 }
 
 const desiredUserState = (value: unknown): DesiredUserState => {
@@ -954,6 +988,27 @@ const makeRepositories = Effect.gen(function*() {
     readonly user_agent: string
   }
 
+  const eligibleSource = (row: EligibleSourceRow): EligibleSource => ({
+    virtualLibraryId: decodeVirtualLibraryId(row.virtual_library_id),
+    serverId: decodeServerId(row.server_id),
+    sourceLibraryId: decodeSourceLibraryId(row.source_library_id),
+    sourceLibraryName: row.source_library_name,
+    mediaType: mediaType(row.media_type),
+    sourceOrder: integer(row.source_order, "source_order"),
+    enabled: boolean(row.source_enabled, "source_enabled"),
+    catalogNamespace: row.catalog_namespace,
+    verifiedCatalogId: row.verified_catalog_id ?? row.catalog_namespace,
+    serverGeneration: integer(row.generation, "generation"),
+    baseUrl: row.base_url as EligibleSource["baseUrl"],
+    username: row.username,
+    password: row.password,
+    accessToken: row.access_token,
+    accessTokenExpiresAtMs: row.access_token_expires_at_ms === null
+      ? null
+      : integer(row.access_token_expires_at_ms, "access_token_expires_at_ms"),
+    userAgent: row.user_agent
+  })
+
   const resolveEligibleSources: RepositoriesService["resolveEligibleSources"] = (libraryId) =>
     database("resolveEligibleSources", sql.unsafe<EligibleSourceRow>(`
       SELECT
@@ -984,26 +1039,10 @@ const makeRepositories = Effect.gen(function*() {
         AND us.health = 'healthy'
         AND (us.verified_catalog_id IS NOT NULL OR us.verified_base_url IS NOT NULL)
       ORDER BY ls.source_order, ls.server_id, ls.source_library_id
-    `, [libraryId])).pipe(Effect.flatMap((rows) => decode("resolveEligibleSources", () => rows.map((row): EligibleSource => ({
-      virtualLibraryId: decodeVirtualLibraryId(row.virtual_library_id),
-      serverId: decodeServerId(row.server_id),
-      sourceLibraryId: decodeSourceLibraryId(row.source_library_id),
-      sourceLibraryName: row.source_library_name,
-      mediaType: mediaType(row.media_type),
-      sourceOrder: integer(row.source_order, "source_order"),
-      enabled: boolean(row.source_enabled, "source_enabled"),
-      catalogNamespace: row.catalog_namespace,
-      verifiedCatalogId: row.verified_catalog_id ?? row.catalog_namespace,
-      serverGeneration: integer(row.generation, "generation"),
-      baseUrl: row.base_url as EligibleSource["baseUrl"],
-      username: row.username,
-      password: row.password,
-      accessToken: row.access_token,
-      accessTokenExpiresAtMs: row.access_token_expires_at_ms === null
-        ? null
-        : integer(row.access_token_expires_at_ms, "access_token_expires_at_ms"),
-      userAgent: row.user_agent
-    })))))
+    `, [libraryId])).pipe(Effect.flatMap((rows) => decode(
+      "resolveEligibleSources",
+      () => rows.map(eligibleSource)
+    )))
 
   const resolveCanonicalIdInTransaction = (id: string) => Effect.gen(function*() {
     const rows = yield* sql.unsafe<{ readonly canonical_id: string }>(`
@@ -1538,9 +1577,37 @@ const makeRepositories = Effect.gen(function*() {
       decode("readQueryGeneration", () => rows[0] ? queryGeneration(rows[0]) : null)
     ))
 
-  const appendQueryGenerationItems: RepositoriesService["appendQueryGenerationItems"] = (input) =>
-    database("appendQueryGenerationItems", sql.withTransaction(Effect.gen(function*() {
+  interface QueryGenerationItemRow {
+    readonly ordinal: unknown
+    readonly canonical_id: string
+    readonly sort_values_json: unknown
+  }
+
+  const readQueryGenerationItems: RepositoriesService["readQueryGenerationItems"] = (generationId) =>
+    database("readQueryGenerationItems", sql.unsafe<QueryGenerationItemRow>(`
+      SELECT ordinal, canonical_id, sort_values_json
+      FROM query_generation_items
+      WHERE generation_id = ?
+      ORDER BY ordinal
+    `, [generationId])).pipe(Effect.flatMap((rows) => decode("readQueryGenerationItems", () => rows.map((row) => ({
+      ordinal: integer(row.ordinal, "ordinal"),
+      canonicalId: row.canonical_id,
+      sortValues: json(row.sort_values_json, "sort_values_json")
+    })))))
+
+  const appendQueryGenerationItems: RepositoriesService["appendQueryGenerationItems"] = (input) => {
+    if (input.items.length > DB_BATCH_SIZE) {
+      return Effect.fail(new RepositoryError({
+        operation: "appendQueryGenerationItems",
+        message: `at most ${DB_BATCH_SIZE} items may be appended atomically`
+      }))
+    }
+    return database("appendQueryGenerationItems", sql.withTransaction(Effect.gen(function*() {
       const generation = input.generation
+      yield* sql.unsafe(
+        "DELETE FROM query_generations WHERE query_key = ? AND id <> ?",
+        [generation.queryKey, generation.id]
+      )
       yield* sql.unsafe(`
         INSERT INTO query_generations (
           id, query_key, user_key, device_id, virtual_library_id,
@@ -1548,8 +1615,10 @@ const makeRepositories = Effect.gen(function*() {
           state_dependent, created_at_ms, expires_at_ms
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(query_key) DO UPDATE SET
+          normalized_query_json = excluded.normalized_query_json,
           source_state_json = excluded.source_state_json,
           all_sources_exhausted = excluded.all_sources_exhausted,
+          state_dependent = excluded.state_dependent,
           expires_at_ms = excluded.expires_at_ms
       `, [
         generation.id,
@@ -1566,12 +1635,266 @@ const makeRepositories = Effect.gen(function*() {
       ])
       for (const item of input.items) {
         yield* sql.unsafe(`
-          INSERT OR IGNORE INTO query_generation_items (
+          INSERT INTO query_generation_items (
             generation_id, ordinal, canonical_id, sort_values_json
           ) VALUES (?, ?, ?, ?)
+          ON CONFLICT(generation_id, canonical_id) DO NOTHING
         `, [generation.id, item.ordinal, item.canonicalId, canonicalJson(item.sortValues)])
       }
     })))
+  }
+
+  interface MetadataProjectionRow {
+    readonly source_item_id: string
+    readonly projection_key: string
+    readonly payload_json: unknown
+    readonly fresh_until_ms: unknown
+    readonly stale_until_ms: unknown
+    readonly updated_at_ms: unknown
+  }
+
+  const metadataProjection = (row: MetadataProjectionRow): MetadataProjection => ({
+    sourceItemId: row.source_item_id,
+    projectionKey: row.projection_key,
+    payload: json(row.payload_json, "payload_json"),
+    freshUntilMs: integer(row.fresh_until_ms, "fresh_until_ms"),
+    staleUntilMs: integer(row.stale_until_ms, "stale_until_ms"),
+    updatedAtMs: integer(row.updated_at_ms, "updated_at_ms")
+  })
+
+  const readMetadataProjection: RepositoriesService["readMetadataProjection"] = (sourceItemId, projectionKey) =>
+    database("readMetadataProjection", sql.unsafe<MetadataProjectionRow>(`
+      SELECT * FROM source_metadata_cache
+      WHERE source_item_id = ? AND projection_key = ?
+    `, [sourceItemId, projectionKey])).pipe(Effect.flatMap((rows) => decode(
+      "readMetadataProjection",
+      () => rows[0] ? metadataProjection(rows[0]) : null
+    )))
+
+  const readCachedSourceItems: RepositoriesService["readCachedSourceItems"] = (input) =>
+    database("readCachedSourceItems", sql.unsafe<MetadataProjectionRow>(`
+      SELECT cache.*
+      FROM source_metadata_cache cache
+      JOIN source_items item ON item.id = cache.source_item_id
+      WHERE item.server_id = ?
+        AND item.server_generation = ?
+        AND item.source_library_id = ?
+        AND cache.projection_key = ?
+        AND cache.stale_until_ms > ?
+      ORDER BY item.upstream_item_id, item.id
+      LIMIT ?
+    `, [
+      input.serverId,
+      input.serverGeneration,
+      input.sourceLibraryId,
+      input.projectionKey,
+      input.usableAtMs,
+      Math.max(0, Math.min(DB_BATCH_SIZE, input.limit))
+    ])).pipe(Effect.flatMap((rows) => decode(
+      "readCachedSourceItems",
+      () => rows.map(metadataProjection)
+    )))
+
+  const writeMetadataProjection: RepositoriesService["writeMetadataProjection"] = (input) =>
+    database("writeMetadataProjection", sql.unsafe(`
+      INSERT INTO source_metadata_cache (
+        source_item_id, projection_key, payload_json,
+        fresh_until_ms, stale_until_ms, updated_at_ms
+      ) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(source_item_id, projection_key) DO UPDATE SET
+        payload_json = excluded.payload_json,
+        fresh_until_ms = excluded.fresh_until_ms,
+        stale_until_ms = excluded.stale_until_ms,
+        updated_at_ms = excluded.updated_at_ms
+    `, [
+      input.sourceItemId,
+      input.projectionKey,
+      canonicalJson(input.payload),
+      input.freshUntilMs,
+      input.staleUntilMs,
+      input.updatedAtMs
+    ])).pipe(Effect.asVoid)
+
+  const mergeCanonicalMetadata: RepositoriesService["mergeCanonicalMetadata"] = (
+    canonicalId,
+    sourceItemId,
+    metadata,
+    updatedAtMs
+  ) => database("mergeCanonicalMetadata", sql.withTransaction(Effect.gen(function*() {
+    const rows = yield* sql.unsafe<CanonicalRow>("SELECT * FROM canonical_items WHERE id = ?", [canonicalId])
+    if (!rows[0]) return
+    const primary = yield* sql.unsafe<{ readonly id: string }>(`
+      SELECT item.id
+      FROM source_items item
+      WHERE item.canonical_id = ?
+      ORDER BY COALESCE((
+        SELECT MIN(binding.source_order)
+        FROM library_sources binding
+        JOIN virtual_libraries library ON library.id = binding.virtual_library_id
+        JOIN upstream_servers server ON server.id = binding.server_id
+        WHERE binding.server_id = item.server_id
+          AND binding.source_library_id = item.source_library_id
+          AND binding.enabled = 1 AND library.enabled = 1
+          AND server.enabled = 1 AND server.deleted_at_ms IS NULL
+          AND server.generation = item.server_generation
+      ), 2147483647), item.server_id, item.upstream_item_id, item.id
+      LIMIT 1
+    `, [canonicalId])
+    const current = json(rows[0].display_metadata_json, "display_metadata_json")
+    const merged = primary[0]?.id === sourceItemId
+      ? mergeProjectionJson(current, metadata)
+      : mergeMissingJson(current, metadata)
+    yield* sql.unsafe(`
+      UPDATE canonical_items
+      SET display_metadata_json = ?, updated_at_ms = MAX(updated_at_ms, ?)
+      WHERE id = ?
+    `, [canonicalJson(merged), updatedAtMs, canonicalId])
+  })))
+
+  const readCatalogItems: RepositoriesService["readCatalogItems"] = (canonicalIds, usableAtMs) => {
+    const ids = [...new Set(canonicalIds)].slice(0, DB_BATCH_SIZE)
+    if (ids.length === 0) return Effect.succeed([])
+    const placeholders = ids.map(() => "?").join(", ")
+    return database("readCatalogItems", Effect.gen(function*() {
+      const canonicals = yield* sql.unsafe<CanonicalRow>(`
+        SELECT * FROM canonical_items WHERE id IN (${placeholders})
+      `, ids)
+      const claims = yield* sql.unsafe<IdentityClaimRow>(`
+        SELECT * FROM identity_claims
+        WHERE canonical_id IN (${placeholders}) AND state = 'exact'
+        ORDER BY canonical_id, namespace
+      `, ids)
+      const sources = yield* sql.unsafe<SourceItemRow>(`
+        SELECT * FROM source_items
+        WHERE canonical_id IN (${placeholders})
+        ORDER BY canonical_id, server_id, upstream_item_id
+      `, ids)
+      const versions = yield* sql.unsafe<MediaVersionRow & { readonly canonical_id: string }>(`
+        SELECT version.*, item.canonical_id
+        FROM source_media_versions version
+        JOIN source_items item ON item.id = version.source_item_id
+        WHERE item.canonical_id IN (${placeholders})
+          AND version.server_generation = item.server_generation
+          AND (? IS NULL OR EXISTS (
+            SELECT 1 FROM source_metadata_cache cache
+            WHERE cache.source_item_id = item.id AND cache.stale_until_ms > ?
+          ))
+          AND EXISTS (
+            SELECT 1
+            FROM upstream_servers server
+            JOIN library_sources binding
+              ON binding.server_id = item.server_id
+              AND binding.source_library_id = item.source_library_id
+            JOIN virtual_libraries library ON library.id = binding.virtual_library_id
+            WHERE server.id = item.server_id
+              AND server.generation = item.server_generation
+              AND server.enabled = 1 AND server.deleted_at_ms IS NULL
+              AND binding.enabled = 1 AND library.enabled = 1
+          )
+        ORDER BY COALESCE((
+          SELECT MIN(binding.source_order)
+          FROM library_sources binding
+          JOIN virtual_libraries library ON library.id = binding.virtual_library_id
+          WHERE binding.server_id = item.server_id
+            AND binding.source_library_id = item.source_library_id
+            AND binding.enabled = 1 AND library.enabled = 1
+        ), 2147483647), item.server_id, item.upstream_item_id, version.upstream_media_source_id
+      `, [...ids, usableAtMs ?? null, usableAtMs ?? null])
+      const states = yield* sql.unsafe<UserStateRow>(`
+        SELECT * FROM user_state WHERE canonical_id IN (${placeholders})
+      `, ids)
+      return yield* decode("readCatalogItems", () => {
+        const byId = new Map(canonicals.map((row) => [row.id, row]))
+        return canonicalIds.flatMap((id): ReadonlyArray<CatalogItemRecord> => {
+          const row = byId.get(id)
+          if (!row) return []
+          const state = states.find((candidate) => candidate.canonical_id === id)
+          return [{
+            canonical: canonicalItem(row),
+            claims: claims.filter((candidate) => candidate.canonical_id === id).map(identityClaim),
+            sourceItems: sources.filter((candidate) => candidate.canonical_id === id).map(sourceItem),
+            mediaVersions: versions.filter((candidate) => candidate.canonical_id === id).map(mediaVersion),
+            userState: state ? userState(state) : null
+          }]
+        })
+      })
+    }))
+  }
+
+  const resolveEligibleSourcesForCanonical: RepositoriesService["resolveEligibleSourcesForCanonical"] = (canonicalId) =>
+    database("resolveEligibleSourcesForCanonical", sql.unsafe<EligibleSourceRow>(`
+      SELECT DISTINCT
+        target.virtual_library_id,
+        target.server_id,
+        target.source_library_id,
+        target.source_library_name,
+        target.media_type,
+        target.source_order,
+        target.enabled AS source_enabled,
+        server.catalog_namespace,
+        server.verified_catalog_id,
+        server.generation,
+        server.base_url,
+        server.username,
+        server.password,
+        server.access_token,
+        server.access_token_expires_at_ms,
+        server.user_agent
+      FROM source_items item
+      JOIN library_sources origin
+        ON origin.server_id = item.server_id
+        AND origin.source_library_id = item.source_library_id
+      JOIN virtual_libraries library ON library.id = origin.virtual_library_id
+      JOIN library_sources target ON target.virtual_library_id = library.id
+      JOIN upstream_servers server ON server.id = target.server_id
+      WHERE item.canonical_id = ?
+        AND library.enabled = 1 AND origin.enabled = 1 AND target.enabled = 1
+        AND server.enabled = 1 AND server.deleted_at_ms IS NULL
+        AND server.health = 'healthy'
+        AND (server.verified_catalog_id IS NOT NULL OR server.verified_base_url IS NOT NULL)
+      ORDER BY target.source_order, target.server_id, target.source_library_id
+    `, [canonicalId])).pipe(Effect.flatMap((rows) => decode(
+      "resolveEligibleSourcesForCanonical",
+      () => rows.map(eligibleSource)
+    )))
+
+  const listStateMemberCanonicalIds: RepositoriesService["listStateMemberCanonicalIds"] = (input) => {
+    const predicates = ["binding.virtual_library_id = ?"]
+    const parameters: Array<string | number> = [input.virtualLibraryId]
+    if (input.favorite !== undefined) {
+      predicates.push("state.favorite = ?")
+      parameters.push(input.favorite ? 1 : 0)
+    }
+    if (input.resume !== undefined) {
+      predicates.push(input.resume ? "state.position_ticks > 0 AND state.played = 0" : "state.position_ticks = 0")
+    }
+    if (input.played !== undefined) {
+      predicates.push("state.played = ?")
+      parameters.push(input.played ? 1 : 0)
+    }
+    parameters.push(Math.max(0, Math.min(2_000, input.limit)))
+    return database("listStateMemberCanonicalIds", sql.unsafe<{ readonly canonical_id: string }>(`
+      SELECT DISTINCT state.canonical_id
+      FROM user_state state
+      JOIN source_items item ON item.canonical_id = state.canonical_id
+      JOIN library_sources binding
+        ON binding.server_id = item.server_id
+        AND binding.source_library_id = item.source_library_id
+      JOIN virtual_libraries library ON library.id = binding.virtual_library_id
+      JOIN upstream_servers server ON server.id = item.server_id
+      WHERE ${predicates.join(" AND ")}
+        AND binding.enabled = 1 AND library.enabled = 1
+        AND server.enabled = 1 AND server.deleted_at_ms IS NULL
+      ORDER BY state.canonical_id
+      LIMIT ?
+    `, parameters)).pipe(Effect.map((rows) => rows.map(({ canonical_id }) => canonical_id)))
+  }
+
+  const invalidateStateDependentQueryGenerations: RepositoriesService["invalidateStateDependentQueryGenerations"] = () =>
+    database(
+      "invalidateStateDependentQueryGenerations",
+      sql.unsafe("DELETE FROM query_generations WHERE state_dependent = 1")
+    ).pipe(Effect.asVoid)
 
   const writeUserStateAndTargets: RepositoriesService["writeUserStateAndTargets"] = (input) =>
     database("writeUserStateAndTargets", sql.withTransaction(Effect.gen(function*() {
@@ -1825,7 +2148,16 @@ const makeRepositories = Effect.gen(function*() {
     lookupCanonicalId,
     persistIdentityResult,
     readQueryGeneration,
+    readQueryGenerationItems,
     appendQueryGenerationItems,
+    readMetadataProjection,
+    readCachedSourceItems,
+    writeMetadataProjection,
+    mergeCanonicalMetadata,
+    readCatalogItems,
+    resolveEligibleSourcesForCanonical,
+    listStateMemberCanonicalIds,
+    invalidateStateDependentQueryGenerations,
     writeUserStateAndTargets,
     claimOutboxTargets,
     acknowledgeOutboxTarget,

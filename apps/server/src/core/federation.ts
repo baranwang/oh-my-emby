@@ -1,0 +1,797 @@
+import { Context, Effect, Layer, Result, Schema } from "effect"
+
+import {
+  RepositoryError,
+  UpstreamInvalidResponse,
+  UpstreamNotFound,
+  UpstreamTimeout,
+  UpstreamUnavailable,
+  type IdentityFailure,
+  type UpstreamFailure
+} from "./errors.js"
+import {
+  Identity,
+  type ProviderIds,
+  type ProviderNamespace,
+  type SourceItemCandidate
+} from "./identity.js"
+import {
+  DB_BATCH_SIZE,
+  MAX_FANOUT_CONCURRENCY,
+  MAX_MATERIALIZED_ITEMS,
+  MAX_PAGE_SIZE,
+  METADATA_FRESH_MS,
+  METADATA_STALE_MS,
+  QUERY_GENERATION_TTL_MS,
+  UPSTREAM_DETAIL_DEADLINE_MS,
+  UPSTREAM_LIST_DEADLINE_MS
+} from "./limits.js"
+import type {
+  EligibleSource,
+  IdentityResolution,
+  JsonValue,
+  QueryGeneration,
+  QueryGenerationItem,
+  SourceMediaVersion,
+  UserStateRecord
+} from "./model.js"
+import {
+  Repositories,
+  type CatalogItemRecord
+} from "./repositories.js"
+import { UpstreamClient } from "./upstream-client.js"
+
+export interface SortTerm {
+  readonly field: string
+  readonly direction: "Ascending" | "Descending"
+}
+
+export interface CatalogFilter {
+  readonly field: string
+  readonly value: JsonValue
+}
+
+export interface FederatedQuery {
+  readonly userId: string
+  readonly deviceId: string
+  readonly virtualLibraryId: string
+  readonly startIndex: number
+  readonly limit: number
+  readonly sort: ReadonlyArray<SortTerm>
+  readonly filters: ReadonlyArray<CatalogFilter>
+  readonly fields?: ReadonlyArray<string>
+}
+
+export interface SearchQuery extends FederatedQuery {
+  readonly searchTerm: string
+}
+
+export interface CanonicalItemView {
+  readonly id: string
+  readonly itemType: string
+  readonly displayMetadata: JsonValue
+  readonly mediaVersions: ReadonlyArray<SourceMediaVersion>
+  readonly userState: UserStateRecord | null
+  readonly incompleteSourceIds: ReadonlyArray<string>
+}
+
+export interface FederatedPage {
+  readonly items: ReadonlyArray<CanonicalItemView>
+  readonly totalRecordCount: number
+  readonly exhausted: boolean
+  readonly incompleteSourceIds: ReadonlyArray<string>
+}
+
+export class FederationLimitExceeded extends Schema.TaggedError<FederationLimitExceeded>()(
+  "FederationLimitExceeded",
+  { requestedEnd: Schema.Int, maximum: Schema.Int }
+) {}
+
+export class FederationUnavailable extends Schema.TaggedError<FederationUnavailable>()(
+  "FederationUnavailable",
+  { sourceIds: Schema.Array(Schema.String) }
+) {}
+
+export type FederationFailure =
+  | FederationLimitExceeded
+  | FederationUnavailable
+  | IdentityFailure
+  | RepositoryError
+
+export interface FederationService {
+  readonly list: (query: FederatedQuery) => Effect.Effect<FederatedPage, FederationFailure>
+  readonly search: (query: SearchQuery) => Effect.Effect<FederatedPage, FederationFailure>
+  readonly detail: (canonicalId: string) => Effect.Effect<CanonicalItemView | null, FederationFailure>
+  readonly enrichVersions: (canonicalId: string) => Effect.Effect<CanonicalItemView | null, FederationFailure>
+  readonly invalidateStateDependentGenerations: () => Effect.Effect<void, RepositoryError>
+}
+
+export class Federation extends Context.Service<Federation, FederationService>()(
+  "oh-my-emby/Federation"
+) {}
+
+export interface FederationConfig {
+  readonly now?: () => number
+  readonly listDeadlineMs?: number
+  readonly detailDeadlineMs?: number
+}
+
+interface BufferedItem {
+  readonly canonicalId: string
+  readonly sortValues: ReadonlyArray<JsonValue>
+}
+
+interface SourceCursor {
+  readonly serverId: string
+  readonly serverGeneration: number
+  readonly sourceLibraryId: string
+  readonly sourceOrder: number
+  continuation: number
+  scanned: number
+  exhausted: boolean
+  incomplete: boolean
+  reportedTotal: number | null
+  buffer: Array<BufferedItem>
+}
+
+interface GenerationState {
+  sources: Array<SourceCursor>
+  localBuffer: Array<BufferedItem>
+  scanned: number
+}
+
+interface UpstreamPage {
+  readonly items: ReadonlyArray<Record<string, JsonValue>>
+  readonly totalRecordCount: number | null
+}
+
+const jsonObject = (value: JsonValue): value is { readonly [key: string]: JsonValue } =>
+  typeof value === "object" && value !== null && !Array.isArray(value)
+
+const toJson = (value: unknown): JsonValue => {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value
+  if (typeof value === "number" && Number.isFinite(value)) return value
+  if (Array.isArray(value)) return value.map(toJson)
+  if (typeof value === "object" && value !== null) {
+    return Object.fromEntries(Object.entries(value).flatMap(([key, entry]) =>
+      entry === undefined ? [] : [[key, toJson(entry)]]
+    ))
+  }
+  throw new TypeError("upstream value is not JSON")
+}
+
+const parsePage = (value: unknown): UpstreamPage => {
+  const page = toJson(value)
+  if (!jsonObject(page) || !Array.isArray(page.Items)) throw new TypeError("upstream page must contain Items")
+  const items = page.Items.map((entry) => {
+    if (!jsonObject(entry) || typeof entry.Id !== "string" || typeof entry.Type !== "string") {
+      throw new TypeError("upstream item must contain Id and Type")
+    }
+    return entry
+  })
+  return {
+    items,
+    totalRecordCount: typeof page.TotalRecordCount === "number" && Number.isSafeInteger(page.TotalRecordCount)
+      ? page.TotalRecordCount
+      : null
+  }
+}
+
+const canonicalJson = (value: JsonValue): string => JSON.stringify(value, (_key, entry) => {
+  if (entry === null || Array.isArray(entry) || typeof entry !== "object") return entry
+  return Object.fromEntries(Object.keys(entry).sort().map((key) => [key, entry[key]]))
+})
+
+const normalizedQuery = (query: FederatedQuery, searchTerm?: string): JsonValue => ({
+  fields: [...new Set(query.fields ?? [])].sort(),
+  filters: [...query.filters].sort((left, right) => canonicalJson(left as unknown as JsonValue).localeCompare(
+    canonicalJson(right as unknown as JsonValue)
+  )) as unknown as JsonValue,
+  searchTerm: searchTerm?.trim() ?? "",
+  sort: query.sort as unknown as JsonValue
+})
+
+const queryKey = (query: FederatedQuery, normalized: JsonValue): string => canonicalJson({
+  deviceId: query.deviceId,
+  normalized,
+  userId: query.userId,
+  virtualLibraryId: query.virtualLibraryId
+})
+
+const sourceKey = (source: {
+  readonly serverId: string
+  readonly serverGeneration: number
+  readonly sourceLibraryId: string
+}) => JSON.stringify([source.serverId, source.serverGeneration, source.sourceLibraryId])
+
+const newState = (sources: ReadonlyArray<EligibleSource>): GenerationState => ({
+  sources: sources.map((source) => ({
+    serverId: source.serverId,
+    serverGeneration: source.serverGeneration,
+    sourceLibraryId: source.sourceLibraryId,
+    sourceOrder: source.sourceOrder,
+    continuation: 0,
+    scanned: 0,
+    exhausted: false,
+    incomplete: false,
+    reportedTotal: null,
+    buffer: []
+  })),
+  localBuffer: [],
+  scanned: 0
+})
+
+const decodeState = (value: JsonValue, sources: ReadonlyArray<EligibleSource>): GenerationState => {
+  if (!jsonObject(value) || !Array.isArray(value.sources) || !Array.isArray(value.localBuffer)) {
+    return newState(sources)
+  }
+  return value as unknown as GenerationState
+}
+
+const sameParticipation = (state: GenerationState, sources: ReadonlyArray<EligibleSource>): boolean =>
+  state.sources.length === sources.length && state.sources.every((cursor, index) =>
+    sourceKey(cursor) === sourceKey(sources[index]!) && cursor.sourceOrder === sources[index]!.sourceOrder
+  )
+
+const projectionKey = (query: FederatedQuery): string =>
+  `list:${[...new Set(query.fields ?? [])].sort().join(",")}`
+
+const providerIds = (item: Record<string, JsonValue>): ProviderIds => {
+  const raw = item.ProviderIds
+  const ids: { readonly [key: string]: JsonValue } = raw !== undefined && jsonObject(raw) ? raw : {}
+  const read = (name: string) => typeof ids[name] === "string" ? ids[name] : null
+  return { tmdbMovie: read("Tmdb"), tmdbTv: read("Tmdb"), imdbTitle: read("Imdb") }
+}
+
+const mediaVersions = (item: Record<string, JsonValue>) => Array.isArray(item.MediaSources)
+  ? item.MediaSources.flatMap((entry) => {
+      if (!jsonObject(entry) || typeof entry.Id !== "string") return []
+      return [{
+        upstreamMediaSourceId: entry.Id,
+        label: typeof entry.Name === "string" ? entry.Name : entry.Id,
+        capabilities: entry,
+        streams: Array.isArray(entry.MediaStreams) ? entry.MediaStreams : []
+      }]
+    })
+  : []
+
+const candidate = (
+  source: EligibleSource,
+  item: Record<string, JsonValue>,
+  observedAtMs: number
+): SourceItemCandidate => ({
+  serverId: source.serverId,
+  catalogNamespace: source.catalogNamespace,
+  verifiedCatalogId: source.verifiedCatalogId,
+  serverGeneration: source.serverGeneration,
+  sourceLibraryId: source.sourceLibraryId,
+  upstreamItemId: item.Id as string,
+  itemType: item.Type as SourceItemCandidate["itemType"],
+  providerIds: providerIds(item),
+  displayMetadata: item,
+  mediaVersions: mediaVersions(item),
+  observedAtMs
+})
+
+const stateDependent = (query: FederatedQuery) => query.filters.some(({ field }) =>
+  field === "favorite" || field === "resume" || field === "played"
+)
+
+const localMembershipOnly = (query: FederatedQuery) => query.filters.length > 0 && query.filters.every(({ field, value }) =>
+  (field === "favorite" || field === "resume") && value === true
+)
+
+const stateMatches = (state: UserStateRecord | null, field: string, value: JsonValue): boolean => {
+  if (field === "favorite") return (state?.favorite ?? false) === value
+  if (field === "played") return (state?.played ?? false) === value
+  if (field === "resume") return ((state?.positionTicks ?? 0) > 0 && !(state?.played ?? false)) === value
+  return true
+}
+
+const matchesFilters = (record: CatalogItemRecord, filters: ReadonlyArray<CatalogFilter>): boolean =>
+  filters.every(({ field, value }) => {
+    if (field === "favorite" || field === "played" || field === "resume") {
+      return stateMatches(record.userState, field, value)
+    }
+    if (field === "itemType") return record.canonical.itemType === value
+    const metadata = record.canonical.displayMetadata
+    if (!jsonObject(metadata)) return false
+    const actual = metadata[field]
+    return Array.isArray(actual) ? actual.some((entry) => entry === value) : actual === value
+  })
+
+const sortValues = (record: CatalogItemRecord, sort: ReadonlyArray<SortTerm>): ReadonlyArray<JsonValue> => {
+  const metadata = record.canonical.displayMetadata
+  return sort.map(({ field }) => jsonObject(metadata) ? (metadata[field] ?? null) : null)
+}
+
+const compareValue = (left: JsonValue, right: JsonValue): number => {
+  if (left === right) return 0
+  if (left === null) return 1
+  if (right === null) return -1
+  if (typeof left === "number" && typeof right === "number") return left - right
+  return String(left).localeCompare(String(right))
+}
+
+const compareBuffered = (
+  left: BufferedItem,
+  right: BufferedItem,
+  sort: ReadonlyArray<SortTerm>
+): number => {
+  for (let index = 0; index < sort.length; index++) {
+    const compared = compareValue(left.sortValues[index] ?? null, right.sortValues[index] ?? null)
+    if (compared !== 0) return sort[index]!.direction === "Descending" ? -compared : compared
+  }
+  return left.canonicalId.localeCompare(right.canonicalId)
+}
+
+const transient = (error: UpstreamFailure): boolean =>
+  error instanceof UpstreamUnavailable || error instanceof UpstreamTimeout
+
+const deadline = <A, E>(effect: Effect.Effect<A, E>, serverId: string, durationMs: number) => effect.pipe(
+  Effect.timeout(durationMs),
+  Effect.catchTag("TimeoutError", () => Effect.fail(new UpstreamTimeout({ serverId })))
+)
+
+const listPath = (
+  source: EligibleSource,
+  query: FederatedQuery,
+  startIndex: number,
+  limit: number,
+  searchTerm?: string
+) => {
+  const parameters = new URLSearchParams({
+    ParentId: source.sourceLibraryId,
+    Recursive: "true",
+    StartIndex: String(startIndex),
+    Limit: String(limit),
+    Fields: [...new Set([...(query.fields ?? []), "ProviderIds"])].join(",")
+  })
+  if (query.sort.length > 0) {
+    parameters.set("SortBy", query.sort.map(({ field }) => field).join(","))
+    parameters.set("SortOrder", query.sort.map(({ direction }) => direction).join(","))
+  }
+  if (searchTerm?.trim()) parameters.set("SearchTerm", searchTerm.trim())
+  return `/Items?${parameters}`
+}
+
+const exactClaim = (record: CatalogItemRecord): { namespace: ProviderNamespace; value: string } | null => {
+  const priority = record.canonical.itemType === "Movie"
+    ? ["tmdb:movie", "imdb:title"]
+    : record.canonical.itemType === "Series"
+      ? ["tmdb:tv", "imdb:title"]
+      : ["imdb:title"]
+  for (const namespace of priority) {
+    const claim = record.claims.find((entry) => entry.namespace === namespace && entry.state === "exact")
+    if (claim) return { namespace: namespace as ProviderNamespace, value: claim.value }
+  }
+  return null
+}
+
+const embyProvider = (namespace: ProviderNamespace) => namespace.startsWith("tmdb:") ? "tmdb" : "imdb"
+
+const matchesClaim = (item: Record<string, JsonValue>, claim: { namespace: ProviderNamespace; value: string }) => {
+  const ids = providerIds(item)
+  return claim.namespace === "tmdb:movie"
+    ? ids.tmdbMovie === claim.value && item.Type === "Movie"
+    : claim.namespace === "tmdb:tv"
+      ? ids.tmdbTv === claim.value && item.Type === "Series"
+      : ids.imdbTitle === claim.value
+}
+
+const view = (record: CatalogItemRecord, incompleteSourceIds: ReadonlyArray<string>): CanonicalItemView => ({
+  id: record.canonical.id,
+  itemType: record.canonical.itemType,
+  displayMetadata: record.canonical.displayMetadata,
+  mediaVersions: record.mediaVersions,
+  userState: record.userState,
+  incompleteSourceIds
+})
+
+export const makeFederationLayer = (
+  config: FederationConfig = {}
+): Layer.Layer<Federation, never, Repositories | Identity | UpstreamClient> => Layer.effect(
+  Federation,
+  Effect.gen(function*() {
+    const repositories = yield* Repositories
+    const identity = yield* Identity
+    const upstream = yield* UpstreamClient
+    const now = config.now ?? Date.now
+    const listDeadlineMs = config.listDeadlineMs ?? UPSTREAM_LIST_DEADLINE_MS
+    const detailDeadlineMs = config.detailDeadlineMs ?? UPSTREAM_DETAIL_DEADLINE_MS
+
+    const readCatalog = (ids: ReadonlyArray<string>) => Effect.gen(function*() {
+      const records: Array<CatalogItemRecord> = []
+      for (let index = 0; index < ids.length; index += DB_BATCH_SIZE) {
+        records.push(...yield* repositories.readCatalogItems(ids.slice(index, index + DB_BATCH_SIZE), now()))
+      }
+      return records
+    })
+
+    const persist = (
+      generation: QueryGeneration,
+      state: GenerationState,
+      items: ReadonlyArray<QueryGenerationItem>,
+      exhausted: boolean
+    ) => Effect.gen(function*() {
+      const saved = { ...generation, sourceState: state as unknown as JsonValue, allSourcesExhausted: exhausted }
+      if (items.length === 0) {
+        yield* repositories.appendQueryGenerationItems({ generation: saved, items: [] })
+      } else {
+        for (let index = 0; index < items.length; index += DB_BATCH_SIZE) {
+          yield* repositories.appendQueryGenerationItems({
+            generation: saved,
+            items: items.slice(index, index + DB_BATCH_SIZE)
+          })
+        }
+      }
+      return saved
+    })
+
+    const cacheItem = (
+      resolution: IdentityResolution,
+      projection: string,
+      payload: Record<string, JsonValue>,
+      observedAtMs: number
+    ) => Effect.gen(function*() {
+      yield* repositories.writeMetadataProjection({
+        sourceItemId: resolution.sourceItem.id,
+        projectionKey: projection,
+        payload,
+        freshUntilMs: observedAtMs + METADATA_FRESH_MS,
+        staleUntilMs: observedAtMs + METADATA_STALE_MS,
+        updatedAtMs: observedAtMs
+      })
+      yield* repositories.mergeCanonicalMetadata(
+        resolution.canonical.id,
+        resolution.sourceItem.id,
+        payload,
+        observedAtMs
+      )
+    })
+
+    const resolvePageItems = (
+      source: EligibleSource,
+      items: ReadonlyArray<Record<string, JsonValue>>,
+      query: FederatedQuery,
+      projection: string,
+      observedAtMs: number,
+      writeCache: boolean
+    ) => Effect.gen(function*() {
+      const resolved: Array<BufferedItem> = []
+      for (const raw of items) {
+        if (!["Movie", "Series", "Season", "Episode"].includes(raw.Type as string)) continue
+        const result = yield* identity.resolve(candidate(source, raw, observedAtMs))
+        if (writeCache) yield* cacheItem(result, projection, raw, observedAtMs)
+        const records = yield* repositories.readCatalogItems([result.canonical.id], now())
+        const record = records[0]
+        if (record && matchesFilters(record, query.filters)) {
+          resolved.push({ canonicalId: record.canonical.id, sortValues: sortValues(record, query.sort) })
+        }
+      }
+      return resolved
+    })
+
+    const runList = (query: FederatedQuery, searchTerm?: string): Effect.Effect<FederatedPage, FederationFailure> =>
+      Effect.gen(function*() {
+        const startIndex = Number.isSafeInteger(query.startIndex) ? Math.max(0, query.startIndex) : 0
+        const limit = Number.isSafeInteger(query.limit) ? Math.max(0, Math.min(MAX_PAGE_SIZE, query.limit)) : MAX_PAGE_SIZE
+        const requestedEnd = startIndex + limit
+        if (requestedEnd > MAX_MATERIALIZED_ITEMS) {
+          return yield* Effect.fail(new FederationLimitExceeded({
+            requestedEnd,
+            maximum: MAX_MATERIALIZED_ITEMS
+          }))
+        }
+
+        const sources = yield* repositories.resolveEligibleSources(query.virtualLibraryId)
+        const normalized = normalizedQuery(query, searchTerm)
+        const key = queryKey(query, normalized)
+        const currentTime = now()
+        let generation = yield* repositories.readQueryGeneration(key)
+        let state = generation === null ? newState(sources) : decodeState(generation.sourceState, sources)
+        if (
+          generation === null || generation.expiresAtMs <= currentTime ||
+          !sameParticipation(state, sources)
+        ) {
+          state = newState(sources)
+          generation = {
+            id: crypto.randomUUID(),
+            queryKey: key,
+            userKey: query.userId,
+            deviceId: query.deviceId,
+            virtualLibraryId: query.virtualLibraryId,
+            normalizedQuery: normalized,
+            sourceState: state as unknown as JsonValue,
+            allSourcesExhausted: false,
+            stateDependent: stateDependent(query),
+            createdAtMs: currentTime,
+            expiresAtMs: currentTime + QUERY_GENERATION_TTL_MS
+          }
+          yield* persist(generation, state, [], false)
+        }
+
+        const published = [...yield* repositories.readQueryGenerationItems(generation.id)]
+        const publishedIds = new Set(published.map(({ canonicalId }) => canonicalId))
+        const additions: Array<QueryGenerationItem> = []
+        const blocked = new Set<string>()
+        const failed = new Set<string>()
+        let successes = 0
+        const projection = projectionKey(query)
+
+        if (localMembershipOnly(query) && published.length < requestedEnd && state.localBuffer.length === 0) {
+          const favorite = query.filters.find(({ field }) => field === "favorite")?.value
+          const resume = query.filters.find(({ field }) => field === "resume")?.value
+          const ids = yield* repositories.listStateMemberCanonicalIds({
+            virtualLibraryId: query.virtualLibraryId,
+            ...(typeof favorite === "boolean" ? { favorite } : {}),
+            ...(typeof resume === "boolean" ? { resume } : {}),
+            limit: MAX_MATERIALIZED_ITEMS
+          })
+          const records = yield* readCatalog(ids)
+          state.localBuffer = records
+            .filter((record) => matchesFilters(record, query.filters))
+            .map((record) => ({
+              canonicalId: record.canonical.id,
+              sortValues: sortValues(record, query.sort)
+            }))
+            .sort((left, right) => compareBuffered(left, right, query.sort))
+          for (const cursor of state.sources) cursor.exhausted = true
+        }
+
+        while (published.length + additions.length < requestedEnd && state.scanned < MAX_MATERIALIZED_ITEMS) {
+          if (state.localBuffer.length > 0) {
+            const next = state.localBuffer.shift()!
+            if (!publishedIds.has(next.canonicalId)) {
+              const entry = { ...next, ordinal: published.length + additions.length }
+              additions.push(entry)
+              publishedIds.add(entry.canonicalId)
+            }
+            continue
+          }
+
+          const pending = state.sources.filter((cursor) =>
+            !cursor.exhausted && cursor.buffer.length === 0 && !blocked.has(sourceKey(cursor))
+          )
+          if (pending.length > 0) {
+            let remainingScanBudget = MAX_MATERIALIZED_ITEMS - state.scanned
+            const fetches = pending.flatMap((cursor, index) => {
+              if (remainingScanBudget <= 0) return []
+              const pageLimit = Math.min(
+                DB_BATCH_SIZE,
+                Math.max(1, Math.floor(remainingScanBudget / (pending.length - index)))
+              )
+              remainingScanBudget -= pageLimit
+              return [{ cursor, pageLimit }]
+            })
+            const results = yield* Effect.forEach(fetches, ({ cursor, pageLimit }) => Effect.gen(function*() {
+              const source = sources.find((candidate) => sourceKey(candidate) === sourceKey(cursor))!
+              const path = listPath(source, query, cursor.continuation, pageLimit, searchTerm)
+              const attempted = yield* deadline(
+                upstream.request({
+                  serverId: source.serverId,
+                  generation: source.serverGeneration,
+                  path,
+                  method: "GET"
+                }, Schema.Unknown),
+                source.serverId,
+                listDeadlineMs
+              ).pipe(Effect.result)
+              if (Result.isSuccess(attempted)) {
+                const processed = yield* Effect.gen(function*() {
+                  const received = yield* Effect.try({
+                    try: () => parsePage(attempted.success),
+                    catch: () => new UpstreamInvalidResponse({ serverId: source.serverId })
+                  })
+                  const page = { ...received, items: received.items.slice(0, pageLimit) }
+                  const observedAtMs = now()
+                  const items = yield* resolvePageItems(source, page.items, query, projection, observedAtMs, true)
+                  return { page, items }
+                }).pipe(Effect.result)
+                if (Result.isSuccess(processed)) {
+                  const { page, items } = processed.success
+                  cursor.continuation += page.items.length
+                  cursor.scanned += page.items.length
+                  state.scanned += page.items.length
+                  cursor.reportedTotal = page.totalRecordCount
+                  cursor.exhausted = page.items.length === 0 || (
+                    page.totalRecordCount !== null && cursor.continuation >= page.totalRecordCount
+                  )
+                  cursor.incomplete = false
+                  cursor.buffer.push(...items.sort((left, right) => compareBuffered(left, right, query.sort)))
+                  successes++
+                  return
+                }
+                if (processed.failure instanceof RepositoryError) return yield* Effect.fail(processed.failure)
+                cursor.incomplete = true
+                failed.add(source.serverId)
+                blocked.add(sourceKey(cursor))
+                return
+              }
+              const error = attempted.failure
+              cursor.incomplete = true
+              failed.add(source.serverId)
+              blocked.add(sourceKey(cursor))
+              if (transient(error)) {
+                const cached = yield* repositories.readCachedSourceItems({
+                  serverId: source.serverId,
+                  serverGeneration: source.serverGeneration,
+                  sourceLibraryId: source.sourceLibraryId,
+                  projectionKey: projection,
+                  usableAtMs: now(),
+                  limit: DB_BATCH_SIZE
+                })
+                if (cached.length > 0) {
+                  const stale = cached.flatMap(({ payload }) => jsonObject(payload) ? [payload] : [])
+                  cursor.buffer.push(...yield* resolvePageItems(source, stale, query, projection, now(), false))
+                }
+              }
+            }), { concurrency: MAX_FANOUT_CONCURRENCY })
+            void results
+
+            const bufferedIds = [...new Set(state.sources.flatMap((cursor) =>
+              cursor.buffer.map(({ canonicalId }) => canonicalId)
+            ))]
+            const refreshed = new Map(
+              (yield* readCatalog(bufferedIds)).map((record) => [record.canonical.id, record])
+            )
+            for (const cursor of state.sources) {
+              cursor.buffer = cursor.buffer.flatMap(({ canonicalId }) => {
+                const record = refreshed.get(canonicalId)
+                return record && matchesFilters(record, query.filters)
+                  ? [{ canonicalId, sortValues: sortValues(record, query.sort) }]
+                  : []
+              }).sort((left, right) => compareBuffered(left, right, query.sort))
+            }
+          }
+
+          const heads = state.sources.flatMap((cursor) => cursor.buffer[0]
+            ? [{ cursor, item: cursor.buffer[0] }]
+            : [])
+          if (heads.length === 0) {
+            if (state.sources.some((cursor) =>
+              !cursor.exhausted && !blocked.has(sourceKey(cursor))
+            )) continue
+            break
+          }
+          heads.sort((left, right) => compareBuffered(left.item, right.item, query.sort))
+          const selected = heads[0]!
+          selected.cursor.buffer.shift()
+          if (publishedIds.has(selected.item.canonicalId)) continue
+          const entry = {
+            ...selected.item,
+            ordinal: published.length + additions.length
+          }
+          additions.push(entry)
+          publishedIds.add(entry.canonicalId)
+        }
+
+        const exhausted = state.localBuffer.length === 0 && (
+          state.scanned >= MAX_MATERIALIZED_ITEMS ||
+          state.sources.every((cursor) => cursor.exhausted && cursor.buffer.length === 0)
+        )
+        generation = yield* persist(generation, state, additions, exhausted)
+        published.push(...additions)
+
+        if (
+          published.length === 0 && sources.length > 0 && successes === 0 &&
+          state.sources.every((cursor) => blocked.has(sourceKey(cursor)))
+        ) {
+          return yield* Effect.fail(new FederationUnavailable({ sourceIds: [...failed].sort() }))
+        }
+
+        const pageIds = published.slice(startIndex, requestedEnd).map(({ canonicalId }) => canonicalId)
+        const records = yield* repositories.readCatalogItems(pageIds, now())
+        const incompleteSourceIds = [...new Set(state.sources
+          .filter(({ incomplete }) => incomplete)
+          .map(({ serverId }) => serverId))].sort()
+        const totalRecordCount = exhausted
+          ? published.length
+          : Math.max(published.length, requestedEnd + 1)
+        return {
+          items: records.map((record) => view(record, incompleteSourceIds)),
+          totalRecordCount,
+          exhausted,
+          incompleteSourceIds
+        }
+      })
+
+    const enrichVersions = (canonicalId: string): Effect.Effect<CanonicalItemView | null, FederationFailure> =>
+      Effect.gen(function*() {
+        const activeId = yield* identity.lookupCanonicalId(canonicalId)
+        if (activeId === null) return null
+        let record = (yield* repositories.readCatalogItems([activeId], now()))[0]
+        if (!record) return null
+        const claim = exactClaim(record)
+        if (claim === null || record.sourceItems.length === 0) return view(record, [])
+
+        const sources = yield* repositories.resolveEligibleSourcesForCanonical(activeId)
+        const anchor = record.sourceItems[0]!
+        const incomplete = new Set<string>()
+        yield* Effect.forEach(sources, (source) => Effect.gen(function*() {
+          const negativeKey = `exact:${sourceKey(source)}:${claim.namespace}:${claim.value}`
+          const cached = yield* repositories.readMetadataProjection(anchor.id, negativeKey)
+          if (
+            cached && cached.freshUntilMs > now() && jsonObject(cached.payload) &&
+            (cached.payload.found === false || cached.payload.found === true)
+          ) return
+
+          const parameters = new URLSearchParams({
+            ParentId: source.sourceLibraryId,
+            Recursive: "true",
+            AnyProviderIdEquals: `${embyProvider(claim.namespace)}.${claim.value}`,
+            Fields: "ProviderIds,MediaSources",
+            Limit: String(DB_BATCH_SIZE)
+          })
+          const attempted = yield* deadline(upstream.request({
+            serverId: source.serverId,
+            generation: source.serverGeneration,
+            path: `/Items?${parameters}`,
+            method: "GET"
+          }, Schema.Unknown), source.serverId, detailDeadlineMs).pipe(Effect.result)
+          const observedAtMs = now()
+          if (Result.isFailure(attempted)) {
+            if (attempted.failure instanceof UpstreamNotFound) {
+              yield* repositories.writeMetadataProjection({
+                sourceItemId: anchor.id,
+                projectionKey: negativeKey,
+                payload: { found: false },
+                freshUntilMs: observedAtMs + METADATA_FRESH_MS,
+                staleUntilMs: observedAtMs + METADATA_FRESH_MS,
+                updatedAtMs: observedAtMs
+              })
+              return
+            }
+            incomplete.add(source.serverId)
+            return
+          }
+          const processed = yield* Effect.gen(function*() {
+            const page = yield* Effect.try({
+              try: () => parsePage(attempted.success),
+              catch: () => new UpstreamInvalidResponse({ serverId: source.serverId })
+            })
+            const exact = page.items.filter((item) => matchesClaim(item, claim))
+            if (exact.length === 0) {
+              yield* repositories.writeMetadataProjection({
+                sourceItemId: anchor.id,
+                projectionKey: negativeKey,
+                payload: { found: false },
+                freshUntilMs: observedAtMs + METADATA_FRESH_MS,
+                staleUntilMs: observedAtMs + METADATA_FRESH_MS,
+                updatedAtMs: observedAtMs
+              })
+              return
+            }
+            let foundCompatible = false
+            for (const raw of exact) {
+              const result = yield* identity.resolve(candidate(source, raw, observedAtMs))
+              yield* cacheItem(result, "detail", raw, observedAtMs)
+              foundCompatible ||= (yield* identity.lookupCanonicalId(result.canonical.id)) === activeId
+            }
+            yield* repositories.writeMetadataProjection({
+              sourceItemId: anchor.id,
+              projectionKey: negativeKey,
+              payload: { found: foundCompatible },
+              freshUntilMs: observedAtMs + METADATA_FRESH_MS,
+              staleUntilMs: observedAtMs + (foundCompatible ? METADATA_STALE_MS : METADATA_FRESH_MS),
+              updatedAtMs: observedAtMs
+            })
+          }).pipe(Effect.result)
+          if (Result.isFailure(processed)) {
+            if (processed.failure instanceof RepositoryError) return yield* Effect.fail(processed.failure)
+            incomplete.add(source.serverId)
+          }
+        }), { concurrency: MAX_FANOUT_CONCURRENCY })
+        record = (yield* repositories.readCatalogItems([activeId], now()))[0]
+        return record ? view(record, [...incomplete].sort()) : null
+      })
+
+    return Federation.of({
+      list: (query) => runList(query),
+      search: (query) => runList(query, query.searchTerm),
+      detail: enrichVersions,
+      enrichVersions,
+      invalidateStateDependentGenerations: repositories.invalidateStateDependentQueryGenerations
+    })
+  })
+)
