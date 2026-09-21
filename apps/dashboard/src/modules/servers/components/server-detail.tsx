@@ -86,7 +86,7 @@ export const ServerDetailPage = ({ id }: { readonly id: Parameters<typeof useSer
   const update = useUpdateServer(id)
   const remove = useDeleteServer(id)
   const connection = useTestServerConnection(id)
-  const eligible = server.data?.enabled === true && server.data.health === "healthy" && server.data.verifiedCatalogId !== null
+  const eligible = server.data?.enabled === true && server.data.health === "healthy"
   const sources = useServerLibraries(id, eligible)
 
   if (server.isPending) {

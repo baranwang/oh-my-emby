@@ -37,10 +37,10 @@ Bun's standard outbound `fetch` does not expose or pin the actual connected dest
 Stop the service before copying `/data` so the SQLite database, WAL, and cache are consistent:
 
 ```sh
-docker stop oh-my-emby
-docker run --rm -v oh-my-emby-data:/data:ro -v "$PWD":/backup oven/bun:1.4.2-slim \
-  sh -c 'tar -C /data -czf /backup/oh-my-emby-data.tgz .'
-docker start oh-my-emby
+docker compose stop oh-my-emby
+docker compose run --rm --no-deps -T --entrypoint tar oh-my-emby \
+  -C /data -czf - . > oh-my-emby-data.tgz
+docker compose start oh-my-emby
 ```
 
 Before an upgrade, take the backup, build the new image, remove the stopped container, and recreate it with the same volume and environment. Startup migrations finish before the replacement listener becomes available. Restore only while the service is stopped.

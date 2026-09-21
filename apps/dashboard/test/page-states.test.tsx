@@ -16,14 +16,15 @@ vi.mock("@tanstack/react-router", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@tanstack/react-router")>()
   return {
     ...actual,
-    Link: ({ children }: { readonly children?: ReactNode }) => <a>{children}</a>
+    Link: ({ children }: { readonly children?: ReactNode }) => <a>{children}</a>,
+    useNavigate: () => vi.fn()
   }
 })
 
 import { queryKeys } from "../src/lib/query-keys.js"
 import { LibraryForm, SourceBindings } from "../src/modules/libraries/components/library-form.js"
 import { LibrariesPage } from "../src/modules/libraries/libraries-page.js"
-import { ServerHealthStatus } from "../src/modules/servers/components/server-detail.js"
+import { ServerDetailPage, ServerHealthStatus } from "../src/modules/servers/components/server-detail.js"
 import { ServerList } from "../src/modules/servers/components/server-list.js"
 import { OutboxFailures } from "../src/modules/system/components/outbox-failures.js"
 import { m } from "../src/paraglide/messages.js"
@@ -257,6 +258,44 @@ describe("library create prerequisites", () => {
 
     expect(fetch).not.toHaveBeenCalled()
   })
+
+  it("discovers libraries for a healthy enabled server without a stable catalog id", async () => {
+    const fetch = vi.fn(async () => json([source]))
+    vi.stubGlobal("fetch", fetch)
+    const queryClient = queryClientWithLibraries()
+    queryClient.setQueryData(queryKeys.servers, [{ ...server, verifiedCatalogId: null }])
+
+    const view = await renderPage(queryClient)
+    await act(async () => {
+      await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce())
+      await vi.waitFor(() => expect(view.container.querySelector("#source-server-1-source-1"))
+        .toBeInstanceOf(HTMLInputElement))
+    })
+  })
+})
+
+it("shows libraries in server detail for a healthy enabled server without a stable catalog id", async () => {
+  const fetch = vi.fn(async () => json([source]))
+  vi.stubGlobal("fetch", fetch)
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } })
+  queryClient.setQueryData(queryKeys.server(server.id), { ...server, verifiedCatalogId: null })
+  queryClient.setQueryData(queryKeys.serverHealth(server.id), {
+    serverId: server.id,
+    health: "healthy",
+    lastSuccessAtMs: Date.now()
+  })
+
+  const view = await render(
+    <QueryClientProvider client={queryClient}>
+      <ServerDetailPage id={server.id} />
+    </QueryClientProvider>
+  )
+  await act(async () => {
+    await vi.waitFor(() => expect(view.container.textContent).toContain("Movies"))
+  })
+
+  expect(fetch).toHaveBeenCalledOnce()
+  expect(view.container.textContent).not.toContain(m.source_libraries_unavailable())
 })
 
 it("keeps configured bindings visible and disable-able during discovery errors", async () => {

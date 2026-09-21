@@ -26,14 +26,14 @@ export const useSourceLibraryGroups = (servers: ReadonlyArray<ServerView>, activ
   const queryClient = useQueryClient()
   const queries = useQueries({
     queries: servers.map((server) => {
-      const eligible = server.enabled && server.health === "healthy" && server.verifiedCatalogId !== null
+      const eligible = server.enabled && server.health === "healthy"
       return { ...serverLibrariesQueryOptions(server.id, queryClient), enabled: active && eligible }
     })
   })
 
   return servers.map((server, index) => {
     const query = queries[index]!
-    const eligible = server.enabled && server.health === "healthy" && server.verifiedCatalogId !== null
+    const eligible = server.enabled && server.health === "healthy"
     return {
       server,
       state: !eligible ? "unavailable" as const

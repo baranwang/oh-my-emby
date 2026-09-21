@@ -96,7 +96,7 @@
   "source_libraries": "Source libraries",
   "source_libraries_loading": "Loading source libraries",
   "source_libraries_empty": "No source libraries were returned.",
-  "source_libraries_unavailable": "Discovery is unavailable until this server is enabled, verified, and healthy.",
+  "source_libraries_unavailable": "Discovery is unavailable until this server is enabled and healthy.",
   "source_libraries_failed": "Source libraries could not be discovered.",
   "libraries_description": "Build virtual libraries from explicitly selected upstream libraries.",
   "libraries_loading": "Loading virtual libraries",

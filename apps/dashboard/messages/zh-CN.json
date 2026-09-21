@@ -96,7 +96,7 @@
   "source_libraries": "来源媒体库",
   "source_libraries_loading": "正在加载来源媒体库",
   "source_libraries_empty": "上游未返回任何来源媒体库。",
-  "source_libraries_unavailable": "服务器启用、验证且状态正常后才能发现来源媒体库。",
+  "source_libraries_unavailable": "服务器启用且状态正常后才能发现来源媒体库。",
   "source_libraries_failed": "无法发现来源媒体库。",
   "libraries_description": "使用明确选择的上游媒体库构建虚拟媒体库。",
   "libraries_loading": "正在加载虚拟媒体库",
