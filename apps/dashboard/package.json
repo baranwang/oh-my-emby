@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "dev": "vite --port 5173 --strictPort",
     "build": "vite build",
     "typecheck": "paraglide-js compile --project ./project.inlang --outdir ./src/paraglide --strategy localStorage preferredLanguage baseLocale --emit-ts-declarations --silent && tsc -p tsconfig.json --noEmit",
     "test": "vitest run --passWithNoTests"

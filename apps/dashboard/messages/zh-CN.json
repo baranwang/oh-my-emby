@@ -1,5 +1,5 @@
 {
-  "app_name": "oh-my-emby",
+  "app_name": "Oh My Emby",
   "app_description": "聚合服务管理",
   "skip_to_content": "跳到主要内容",
   "navigation_label": "主导航",
@@ -82,6 +82,7 @@
   "server_testing_connection": "正在测试…",
   "server_test_reachable": "连接成功。",
   "server_test_failed": "连接失败。你仍然可以保存这些设置。",
+  "server_test_response_details": "上游响应详情",
   "server_health": "服务器健康状态",
   "server_health_loading": "正在加载服务器健康状态",
   "server_health_failed": "无法加载服务器健康状态。",

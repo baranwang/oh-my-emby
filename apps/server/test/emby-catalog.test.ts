@@ -127,6 +127,7 @@ describe("Emby catalog routes", () => {
     await expect(response.json()).resolves.toMatchObject({
       Items: [{
         Id: "library-1",
+        ServerId: "virtual-server",
         Name: "Movies",
         Type: "CollectionFolder",
         CollectionType: "movies"
@@ -134,6 +135,78 @@ describe("Emby catalog routes", () => {
       TotalRecordCount: 1,
       StartIndex: 0
     })
+  })
+
+  it("returns a virtual library as a collection detail for Infuse", async () => {
+    const base = services()
+    const response = await Effect.runPromise(makeEmbyHandler({
+      ...base,
+      federation: { ...base.federation, detail: () => Effect.succeed(null) }
+    })(get(
+      "/Users/owner/Items/library-1?Fields=DateCreated,Genres,MediaSources,ParentId,ChildCount"
+    )))
+
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toMatchObject({
+      Id: "library-1",
+      ServerId: "virtual-server",
+      Name: "Movies",
+      Type: "CollectionFolder",
+      CollectionType: "movies",
+      IsFolder: true
+    })
+  })
+
+  it.each(["", "/emby"])("returns virtual folders for %s so Emby clients can validate libraries", async (prefix) => {
+    const response = await Effect.runPromise(makeEmbyHandler(services())(
+      get(`${prefix}/Library/VirtualFolders`)
+    ))
+
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toEqual([{
+      Name: "Movies",
+      Locations: [],
+      CollectionType: "movies",
+      ItemId: "library-1"
+    }])
+  })
+
+  it("serves a latest-media request as a list rather than an item detail", async () => {
+    let detailCalls = 0
+    let observed: FederatedQuery | undefined
+    const app = makeEmbyHandler(services({
+      federation: {
+        list: (query) => {
+          observed = query
+          return Effect.succeed({
+            items: [item("movie-1")],
+            totalRecordCount: 1,
+            exhausted: true,
+            incompleteSourceIds: []
+          })
+        },
+        search: () => Effect.die("unused"),
+        detail: () => {
+          detailCalls++
+          return Effect.succeed(null)
+        },
+        lookupMembership: () => Effect.succeed(null)
+      }
+    }))
+
+    const response = await Effect.runPromise(app(get(
+      "/Users/owner/Items/Latest?ParentId=library-1&Limit=20&IncludeItemTypes=Movie"
+    )))
+
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toMatchObject([{ Id: "movie-1", Type: "Movie" }])
+    expect(observed).toMatchObject({
+      virtualLibraryId: "library-1",
+      limit: 20,
+      itemTypes: ["Movie"],
+      sort: [{ field: "DateCreated", direction: "Descending" }]
+    })
+    expect(detailCalls).toBe(0)
   })
 
   it.each(["", "/emby"])("overlays canonical state and versions for %s list routes", async (prefix) => {
@@ -146,6 +219,7 @@ describe("Emby catalog routes", () => {
     expect(body).toMatchObject({
       Items: [{
         Id: "movie-1",
+        ServerId: "virtual-server",
         Type: "Movie",
         UserData: {
           ItemId: "movie-1",
@@ -164,8 +238,10 @@ describe("Emby catalog routes", () => {
       StartIndex: 0,
       TotalRecordCount: 1
     })
-    expect(body.Items[0].MediaSources[0]).not.toHaveProperty("Path")
-    expect(body.Items[0].MediaSources[0]).not.toHaveProperty("DirectStreamUrl")
+    expect(body.Items[0].MediaSources[0]).toMatchObject({
+      Path: "/Videos/movie-1/stream?MediaSourceId=version-movie-1",
+      DirectStreamUrl: "/Videos/movie-1/stream?MediaSourceId=version-movie-1"
+    })
     expect(body.Items[0]).not.toHaveProperty("Path")
     expect(body.Items[0]).not.toHaveProperty("SeriesId")
     expect(body.Items[0]).not.toHaveProperty("SeasonId")
@@ -176,6 +252,46 @@ describe("Emby catalog routes", () => {
       Codec: "h264"
     })
     expect(JSON.stringify(body)).not.toContain("private-token")
+  })
+
+  it("advertises canonical image routes without exposing upstream image tags", async () => {
+    const imageItem = item("movie-1", "Movie", {
+      displayMetadata: {
+        Name: "Movie movie-1",
+        ImageTags: {
+          Primary: "upstream-primary-tag",
+          Logo: "upstream-logo-tag",
+          Thumb: "upstream-thumb-tag"
+        },
+        BackdropImageTags: ["upstream-backdrop-tag", "upstream-backdrop-tag-2"]
+      }
+    })
+    const app = makeEmbyHandler(services({
+      federation: {
+        list: () => Effect.succeed({
+          items: [imageItem],
+          totalRecordCount: 1,
+          exhausted: true,
+          incompleteSourceIds: []
+        }),
+        search: () => Effect.die("unused"),
+        detail: () => Effect.die("unused"),
+        lookupMembership: () => Effect.die("unused")
+      }
+    }))
+
+    const response = await Effect.runPromise(app(get(
+      "/Users/owner/Items?ParentId=library-1&Limit=20"
+    )))
+
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toMatchObject({
+      Items: [{
+        Id: "movie-1",
+        ImageTags: { Primary: "local", Logo: "local", Thumb: "local" },
+        BackdropImageTags: ["local", "local"]
+      }]
+    })
   })
 
   it.each([
@@ -205,6 +321,30 @@ describe("Emby catalog routes", () => {
 
     expect(response.status).toBe(200)
     expect(observed).toMatchObject({ itemTypes: ["Movie", "Series"] })
+  })
+
+  it("accepts collection types in an Emby movie browse request", async () => {
+    let observed: FederatedQuery | undefined
+    const app = makeEmbyHandler(services({
+      federation: {
+        list: (query) => {
+          observed = query
+          return Effect.succeed({ items: [], totalRecordCount: 0, exhausted: true, incompleteSourceIds: [] })
+        },
+        search: () => Effect.die("unused"),
+        detail: () => Effect.succeed(null),
+        lookupMembership: () => Effect.succeed(null)
+      }
+    }))
+
+    const response = await Effect.runPromise(app(get(
+      "/emby/Users/owner/Items?ParentId=library-1&IncludeItemTypes=Movie,BoxSet" +
+      "&SortBy=SortName&SortOrder=Ascending&StartIndex=0&Limit=50" +
+      "&Fields=PrimaryImageAspectRatio,MediaSources&EnableImageTypes=Primary,Backdrop&Recursive=true"
+    )))
+
+    expect(response.status).toBe(200)
+    expect(observed).toMatchObject({ itemTypes: ["Movie", "BoxSet"] })
   })
 
   it("decodes search, sort, fields, and local filters before Federation", async () => {
@@ -268,6 +408,19 @@ describe("Emby catalog routes", () => {
       })
     }
   )
+
+  it("returns an empty query result for a known item's Similar endpoint", async () => {
+    const response = await Effect.runPromise(makeEmbyHandler(services())(get(
+      "/emby/Items/movie-1/Similar?UserId=owner&Limit=20&IncludeItemTypes=Movie&Recursive=true"
+    )))
+
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toEqual({
+      Items: [],
+      TotalRecordCount: 0,
+      StartIndex: 0
+    })
+  })
 
   it("preserves provisional count corrections exactly", async () => {
     let total = 21

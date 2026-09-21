@@ -992,6 +992,7 @@ const makeRepositories = Effect.gen(function*() {
   interface EligibleSourceRow {
     readonly virtual_library_id: string
     readonly server_id: string
+    readonly server_name: string
     readonly source_library_id: string
     readonly source_library_name: string
     readonly media_type: unknown
@@ -1011,6 +1012,7 @@ const makeRepositories = Effect.gen(function*() {
   const eligibleSource = (row: EligibleSourceRow): EligibleSource => ({
     virtualLibraryId: decodeVirtualLibraryId(row.virtual_library_id),
     serverId: decodeServerId(row.server_id),
+    name: row.server_name,
     sourceLibraryId: decodeSourceLibraryId(row.source_library_id),
     sourceLibraryName: row.source_library_name,
     mediaType: mediaType(row.media_type),
@@ -1034,6 +1036,7 @@ const makeRepositories = Effect.gen(function*() {
       SELECT
         ls.virtual_library_id,
         ls.server_id,
+        us.name AS server_name,
         ls.source_library_id,
         ls.source_library_name,
         ls.media_type,
@@ -2084,6 +2087,7 @@ const makeRepositories = Effect.gen(function*() {
       SELECT DISTINCT
         target.virtual_library_id,
         target.server_id,
+        server.name AS server_name,
         target.source_library_id,
         target.source_library_name,
         target.media_type,

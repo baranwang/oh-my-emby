@@ -45,6 +45,7 @@ const version = (
 const eligible = (serverId: string, sourceOrder: number): EligibleSource => ({
   virtualLibraryId: "library-1" as any,
   serverId,
+  name: serverId,
   sourceLibraryId: `library:${serverId}` as any,
   sourceLibraryName: serverId,
   mediaType: "movies",
@@ -105,6 +106,7 @@ const makeFixture = (options: {
     incompleteSourceIds: []
   }
   const resolutions: Array<string> = []
+  const redirects: Array<string> = []
   let videoBodyReads = 0
   const repositories = Layer.succeed(Repositories, Repositories.of({
     readCatalogItems: () => Effect.succeed([record]),
@@ -124,6 +126,10 @@ const makeFixture = (options: {
       const details = candidate.capabilities as { url: string; serverId: string }
       return Effect.succeed({ serverId: details.serverId, generation: 1, url: details.url })
     },
+    resolvePlaybackRedirect: (resolved: { readonly url: string }) => {
+      redirects.push(resolved.url)
+      return Effect.succeed(new URL(`https://cdn.example.com/${new URL(resolved.url).searchParams.get("MediaSourceId")}`))
+    },
     requestResource: () => options.resourceRequest?.() ?? Effect.succeed(new Response("image", {
       headers: { "content-type": "image/png" }
     }))
@@ -135,7 +141,15 @@ const makeFixture = (options: {
     Layer.provide(Layer.mergeAll(repositories, federation, upstream))
   )
   const run = <A>(effect: Effect.Effect<A, any, Playback>) => Effect.runPromise(effect.pipe(Effect.provide(layer)))
-  return { item, record, run, resolutions, get videoBodyReads() { return videoBodyReads }, readVideo: () => videoBodyReads++ }
+  return {
+    item,
+    record,
+    run,
+    resolutions,
+    redirects,
+    get videoBodyReads() { return videoBodyReads },
+    readVideo: () => videoBodyReads++
+  }
 }
 
 const principal = {
@@ -255,7 +269,7 @@ describe("playback decisions", () => {
     expect(perHopAllowed).toEqual([true, false])
   })
 
-  it("redirects the selected version without reading video bytes", async () => {
+  it("brokers the selected version without reading video bytes", async () => {
     const fixture = makeFixture()
     const playback = await fixture.run(Playback)
     const response = await Effect.runPromise(makeEmbyHandler(services(playback, fixture.item))(new Request(
@@ -265,9 +279,10 @@ describe("playback decisions", () => {
 
     expect(response.status).toBe(302)
     expect(response.headers.get("cache-control")).toBe("private, no-store")
-    expect(response.headers.get("location")).toBe(
+    expect(response.headers.get("location")).toBe("https://cdn.example.com/media-b")
+    expect(fixture.redirects).toEqual([
       "https://b.example.com/Videos/item-b/stream?MediaSourceId=media-b&Static=true&api_key=token-b"
-    )
+    ])
     expect(fixture.videoBodyReads).toBe(0)
   })
 
@@ -277,7 +292,7 @@ describe("playback decisions", () => {
     const resolved = await Effect.runPromise(playback.resolveVideoRedirect({ canonicalId: "movie-1" }))
 
     expect(fixture.resolutions).toEqual(["version-a-1", "version-a-2"])
-    expect(resolved.href).toContain("MediaSourceId=media-a-2")
+    expect(resolved.href).toBe("https://cdn.example.com/media-a-2")
   })
 
   it("keeps multiple media sources from one upstream item independently selectable", async () => {
@@ -294,8 +309,8 @@ describe("playback decisions", () => {
 
     const first = await Effect.runPromise(playback.resolveVideoRedirect({ canonicalId: "movie-1", mediaSourceId: "cut-a" }))
     const second = await Effect.runPromise(playback.resolveVideoRedirect({ canonicalId: "movie-1", mediaSourceId: "cut-b" }))
-    expect(first.href).toContain("MediaSourceId=media-a")
-    expect(second.href).toContain("MediaSourceId=media-b")
+    expect(first.href).toBe("https://cdn.example.com/media-a")
+    expect(second.href).toBe("https://cdn.example.com/media-b")
   })
 
   it("rejects obsolete generations and bindings removed immediately before resolution", async () => {
@@ -397,6 +412,37 @@ describe("playback decisions", () => {
     expect(decision._tag === "Proxy" && decision.request.url.href).toBe(
       "https://a.example.com/Items/item-a/Images/Primary/0?api_key=token-a"
     )
+  })
+
+  it("builds image requests from a source item when media versions are absent", async () => {
+    const fixture = makeFixture({ versions: [] })
+    const playback = await fixture.run(Playback)
+
+    const decision = await Effect.runPromise(playback.resolveImage({
+      canonicalId: "movie-1",
+      imageType: "Primary"
+    }))
+
+    expect(decision).toMatchObject({
+      _tag: "Proxy",
+      request: { key: "image:movie-1:Primary:default:source-a:1" }
+    })
+    expect(decision._tag === "Proxy" && decision.request.url.href).toBe(
+      "https://a.example.com/Items/item-a/Images/Primary?api_key=token-a"
+    )
+  })
+
+  it("redirects source-item images when the platform marks them client-usable", async () => {
+    const fixture = makeFixture({ versions: [], clientUsable: true })
+    const playback = await fixture.run(Playback)
+
+    await expect(Effect.runPromise(playback.resolveImage({
+      canonicalId: "movie-1",
+      imageType: "Primary"
+    }))).resolves.toMatchObject({
+      _tag: "Redirect",
+      location: new URL("https://a.example.com/Items/item-a/Images/Primary?api_key=token-a")
+    })
   })
 
   it("distinguishes omitted and zero image indexes and includes registration generation in cache keys", async () => {

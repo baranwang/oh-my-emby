@@ -59,7 +59,8 @@ export interface ServerServiceApi {
     result: ServerResult
   ) => Effect.Effect<UpstreamServer, ObsoleteGeneration | import("./errors.js").RepositoryError>
   readonly testConnection: (
-    serverId: string
+    serverId: string,
+    includeDiagnostic?: boolean
   ) => Effect.Effect<ConnectionTestResult, UpstreamFailure>
   readonly listSourceLibraries: (
     serverId: string
@@ -191,10 +192,10 @@ export const makeServerServiceLayer: Layer.Layer<ServerService, never, Repositor
         : Effect.succeed(saved)))
     }
 
-    const testConnection: ServerServiceApi["testConnection"] = (serverId) => Effect.gen(function*() {
+    const testConnection: ServerServiceApi["testConnection"] = (serverId, includeDiagnostic = false) => Effect.gen(function*() {
       const server = yield* getRecord(serverId)
       const fence = { serverId, generation: server.generation }
-      const identity = yield* upstream.getServerIdentity(serverId)
+      const identity = yield* upstream.getServerIdentity(serverId, includeDiagnostic)
       if (server.verifiedCatalogId !== null && identity !== server.verifiedCatalogId) {
         yield* persistResult(fence, { accessToken: null, upstreamUserId: null, health: "unknown" })
         return yield* Effect.fail(identity === null

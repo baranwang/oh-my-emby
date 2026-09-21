@@ -1,14 +1,3 @@
-import { useEffect, useState, type ReactNode } from "react"
-import { useQuery, useQueryClient } from "@tanstack/react-query"
-import { Link, useNavigate, useRouter, useRouterState } from "@tanstack/react-router"
-import {
-  ActivityIcon,
-  HouseIcon,
-  LibraryIcon,
-  LogOutIcon,
-  ServerIcon
-} from "lucide-react"
-
 import { useTheme } from "@/components/theme-provider"
 import {
   Breadcrumb,
@@ -18,7 +7,6 @@ import {
   BreadcrumbPage,
   BreadcrumbSeparator
 } from "@/components/ui/breadcrumb"
-import { Button } from "@/components/ui/button"
 import {
   Sidebar,
   SidebarContent,
@@ -37,6 +25,16 @@ import {
 import { logout, sessionQueryOptions } from "@/modules/auth/services/auth-service"
 import { m } from "@/paraglide/messages.js"
 import { getLocale, setLocale } from "@/paraglide/runtime.js"
+import { useQuery, useQueryClient } from "@tanstack/react-query"
+import { Link, useNavigate, useRouter, useRouterState } from "@tanstack/react-router"
+import {
+  ActivityIcon,
+  HouseIcon,
+  LibraryIcon,
+  LogOutIcon,
+  ServerIcon
+} from "lucide-react"
+import { useEffect, useState, type ReactNode } from "react"
 
 type AppShellProps = { readonly children: ReactNode }
 
@@ -89,9 +87,9 @@ export const AppShell = ({ children }: AppShellProps) => {
       close: m.navigation_close()
     }}>
       <Sidebar collapsible="icon">
-        <SidebarHeader className="border-b border-sidebar-border p-3">
+        <SidebarHeader>
           <Link className="min-w-0 rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring" to="/">
-            <span className="block truncate text-sm font-semibold">{m.app_name()}</span>
+            <span className="block truncate font-semibold font-heading">{m.app_name()}</span>
             <span className="block truncate text-xs text-sidebar-foreground/70 group-data-[collapsible=icon]:hidden">
               {m.app_description()}
             </span>
@@ -119,16 +117,14 @@ export const AppShell = ({ children }: AppShellProps) => {
             </SidebarGroupContent>
           </SidebarGroup>
         </SidebarContent>
-        <SidebarFooter className="border-t border-sidebar-border">
-          <Button
-            variant="ghost"
-            className="w-full justify-start group-data-[collapsible=icon]:px-2"
+        <SidebarFooter>
+          <SidebarMenuButton
             disabled={isLoggingOut}
             onClick={() => void logOut()}
           >
             <LogOutIcon aria-hidden="true" />
             <span className="group-data-[collapsible=icon]:hidden">{m.logout()}</span>
-          </Button>
+          </SidebarMenuButton>
         </SidebarFooter>
         <SidebarRail />
       </Sidebar>

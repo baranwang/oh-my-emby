@@ -19,9 +19,25 @@ type ServerFormProps = {
 const serverValidator = Schema.toStandardSchemaV1(ServerInputSchema)
 const preservePassword: SecretPatch = { _tag: "Preserve" }
 
+const connectionFailure = (error: unknown): { readonly status?: number; readonly detail?: string } | null => {
+  if (
+    typeof error !== "object" ||
+    error === null ||
+    !("_tag" in error) ||
+    (error._tag !== "UpstreamRejected" && error._tag !== "UpstreamUnavailable")
+  ) {
+    return null
+  }
+  const detail = "detail" in error && typeof error.detail === "string" ? error.detail : undefined
+  if (error._tag === "UpstreamUnavailable") return detail === undefined ? {} : { detail }
+  if (!("status" in error) || typeof error.status !== "number") return null
+  return detail === undefined ? { status: error.status } : { status: error.status, detail }
+}
+
 export const ServerForm = ({ server, onSave, onTestConnection }: ServerFormProps) => {
   const [formError, setFormError] = useState<string | null>(null)
   const [connectionState, setConnectionState] = useState<"idle" | "pending" | "success" | "error">("idle")
+  const [connectionError, setConnectionError] = useState<ReturnType<typeof connectionFailure>>(null)
   const [confirmingClear, setConfirmingClear] = useState(false)
   const defaultValues: typeof ServerInputSchema.Encoded = {
     name: server?.name ?? "",
@@ -49,10 +65,12 @@ export const ServerForm = ({ server, onSave, onTestConnection }: ServerFormProps
   const testConnection = async () => {
     if (!onTestConnection) return
     setConnectionState("pending")
+    setConnectionError(null)
     try {
       await onTestConnection()
       setConnectionState("success")
-    } catch {
+    } catch (error) {
+      setConnectionError(connectionFailure(error))
       setConnectionState("error")
     }
   }
@@ -233,11 +251,21 @@ export const ServerForm = ({ server, onSave, onTestConnection }: ServerFormProps
         )}
       </form.Field>
       {connectionState !== "idle" && (
-        <p role="status" className={connectionState === "error" ? "text-sm text-destructive" : "text-sm text-muted-foreground"}>
-          {connectionState === "pending" ? m.server_testing_connection()
-            : connectionState === "success" ? m.server_test_reachable()
-            : m.server_test_failed()}
-        </p>
+        <div className="space-y-2">
+          <p role="status" className={connectionState === "error" ? "text-sm text-destructive" : "text-sm text-muted-foreground"}>
+            {connectionState === "pending" ? m.server_testing_connection()
+              : connectionState === "success" ? m.server_test_reachable()
+              : <>{m.server_test_failed()} {connectionError?.status !== undefined && `HTTP ${connectionError.status}.`}</>}
+          </p>
+          {connectionState === "error" && connectionError?.detail && (
+            <details className="text-sm text-destructive">
+              <summary className="cursor-pointer font-medium">{m.server_test_response_details()}</summary>
+              <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-md bg-destructive/10 p-3 font-mono text-xs leading-5 text-foreground">
+                {connectionError.detail}
+              </pre>
+            </details>
+          )}
+        </div>
       )}
       <div className="flex flex-wrap gap-2">
         <form.Subscribe selector={(state) => [state.canSubmit, state.isSubmitting]}>

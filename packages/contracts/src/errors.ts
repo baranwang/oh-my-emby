@@ -15,11 +15,13 @@ export const Conflict = Schema.TaggedStruct("Conflict", {
   code: Schema.NonEmptyString
 }).pipe(HttpApiSchema.status(409))
 export const UpstreamUnavailable = Schema.TaggedStruct("UpstreamUnavailable", {
-  serverId: ServerId
+  serverId: ServerId,
+  detail: Schema.optional(Schema.String)
 }).pipe(HttpApiSchema.status(503))
 export const UpstreamRejected = Schema.TaggedStruct("UpstreamRejected", {
   serverId: ServerId,
-  status: Schema.Int
+  status: Schema.Int,
+  detail: Schema.optional(Schema.String)
 }).pipe(HttpApiSchema.status(502))
 export const Timeout = Schema.TaggedStruct("Timeout", {}).pipe(HttpApiSchema.status(504))
 export const MaterializationLimit = Schema.TaggedStruct("MaterializationLimit", {

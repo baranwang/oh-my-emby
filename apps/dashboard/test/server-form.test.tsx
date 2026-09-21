@@ -131,6 +131,42 @@ describe("server credentials", () => {
     expect(onSave).toHaveBeenCalledOnce()
   })
 
+  it("shows an upstream response after a rejected connection test", async () => {
+    const onSave = vi.fn<(input: ServerInput) => Promise<void>>().mockResolvedValue(undefined)
+    const onTestConnection = vi.fn().mockRejectedValue({
+      _tag: "UpstreamRejected",
+      serverId: "server-1",
+      status: 401,
+      detail: "Invalid username or password"
+    })
+    const container = await render(
+      <ServerForm server={configuredServer} onSave={onSave} onTestConnection={onTestConnection} />
+    )
+
+    await click(byButton(container, m.server_test_connection()))
+
+    expect(container.textContent).toContain("HTTP 401")
+    expect(container.textContent).toContain("Invalid username or password")
+  })
+
+  it("shows a transport reason after an unavailable connection test", async () => {
+    const onSave = vi.fn<(input: ServerInput) => Promise<void>>().mockResolvedValue(undefined)
+    const onTestConnection = vi.fn().mockRejectedValue({
+      _tag: "UpstreamUnavailable",
+      serverId: "server-1",
+      detail: "connection refused"
+    })
+    const container = await render(
+      <ServerForm server={configuredServer} onSave={onSave} onTestConnection={onTestConnection} />
+    )
+
+    await click(byButton(container, m.server_test_connection()))
+
+    expect(container.textContent).toContain(m.server_test_failed())
+    expect(container.textContent).toContain("connection refused")
+    expect(container.textContent).not.toContain("HTTP undefined")
+  })
+
   it("uses the shared Effect Standard Schema for field errors and a separate non-field alert", async () => {
     const onSave = vi.fn<(input: ServerInput) => Promise<void>>().mockRejectedValue(new Error("failed"))
     const container = await render(<ServerForm server={configuredServer} onSave={onSave} />)

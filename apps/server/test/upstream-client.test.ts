@@ -6,7 +6,7 @@ import { join } from "node:path"
 import { Effect, Layer, Schema } from "effect"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
-import { MAX_CONTROL_RESPONSE_BYTES } from "../src/core/limits.js"
+import { MAX_CONNECTION_DIAGNOSTIC_BYTES, MAX_CONTROL_RESPONSE_BYTES } from "../src/core/limits.js"
 import type { UpstreamServer } from "../src/core/model.js"
 import { Repositories } from "../src/core/repositories.js"
 import {
@@ -175,6 +175,27 @@ describe("UpstreamClient", () => {
       }, JsonOk)
     }), { rawBaseUrl: baseUrl })).rejects.toMatchObject({ _tag: tag })
     expect(called).toBe(false)
+  })
+
+  it("allows a public Docker IP upstream without a private-host allowlist", async () => {
+    const urls: Array<string> = []
+    await run(async (input, init) => {
+      urls.push(new Request(input, init).url)
+      return Response.json({ ok: true })
+    }, Effect.gen(function*() {
+      const client = yield* UpstreamClient
+      return yield* client.request({
+        serverId: "server-1",
+        generation: 1,
+        path: "/System/Info",
+        method: "GET"
+      }, JsonOk)
+    }), {
+      server: server({ baseUrl: "http://203.0.113.9:8096" as any }),
+      policy: { platform: "docker" }
+    })
+
+    expect(urls).toEqual(["http://203.0.113.9:8096/System/Info"])
   })
 
   it("normalizes mixed-case hosts and allows an administrator-configured Docker LAN target", async () => {
@@ -434,6 +455,72 @@ describe("UpstreamClient", () => {
     expect(calls.map((request) => new URL(request.url).pathname)).toEqual(["/state"])
   })
 
+  it("does not attach a rejection body to regular requests", async () => {
+    const failure = await run(async () => new Response("do not expose", { status: 401 }), Effect.gen(function*() {
+      const client = yield* UpstreamClient
+      return yield* Effect.flip(client.request({
+        serverId: "server-1",
+        generation: 1,
+        path: "/state",
+        method: "POST",
+        body: new TextEncoder().encode("{}")
+      }, JsonOk))
+    }))
+
+    expect(failure).toMatchObject({ _tag: "UpstreamRejected", status: 401 })
+    expect(failure).not.toHaveProperty("detail")
+  })
+
+  it("captures a bounded, redacted rejection body for connection diagnostics", async () => {
+    const body = [
+      'password="alpha beta gamma"',
+      "Authorization: Bearer bearer-secret",
+      "client_secret=client-secret",
+      `message=${"x".repeat(MAX_CONNECTION_DIAGNOSTIC_BYTES)}`
+    ].join("\n")
+    const failure = await run(async () => new Response(body, { status: 401 }), Effect.gen(function*() {
+      const client = yield* UpstreamClient
+      return yield* Effect.flip(client.getServerIdentity("server-1", true))
+    }))
+
+    expect(failure).toMatchObject({ _tag: "UpstreamRejected", status: 401 })
+    if (failure._tag !== "UpstreamRejected") throw new Error("expected an upstream rejection")
+    expect(failure.detail).toContain('password="[redacted]"')
+    expect(failure.detail).toContain("Authorization: [redacted]")
+    expect(failure.detail).toContain("client_secret=[redacted]")
+    expect(failure.detail).not.toContain("alpha beta gamma")
+    expect(failure.detail).not.toContain("bearer-secret")
+    expect(failure.detail).not.toContain("client-secret")
+    expect(new TextEncoder().encode(failure.detail).byteLength).toBeLessThanOrEqual(MAX_CONNECTION_DIAGNOSTIC_BYTES)
+  })
+
+  it("captures a redacted transport error only for connection diagnostics", async () => {
+    const unavailable: typeof globalThis.fetch = async () => {
+      throw new Error("connection refused: Authorization: Bearer bearer-secret")
+    }
+    const diagnostic = await run(unavailable, Effect.gen(function*() {
+      const client = yield* UpstreamClient
+      return yield* Effect.flip(client.getServerIdentity("server-1", true))
+    }))
+    const ordinary = await run(unavailable, Effect.gen(function*() {
+      const client = yield* UpstreamClient
+      return yield* Effect.flip(client.request({
+        serverId: "server-1",
+        generation: 1,
+        path: "/state",
+        method: "POST",
+        body: new TextEncoder().encode("{}")
+      }, JsonOk))
+    }))
+
+    expect(diagnostic).toMatchObject({
+      _tag: "UpstreamUnavailable",
+      detail: "connection refused: Authorization: [redacted]"
+    })
+    expect(ordinary).toMatchObject({ _tag: "UpstreamUnavailable" })
+    expect(ordinary).not.toHaveProperty("detail")
+  })
+
   it("refreshes and replays an explicitly replay-safe POST rejected with 401", async () => {
     const calls: Array<Request> = []
     await expect(run(async (input, init) => {
@@ -564,6 +651,34 @@ describe("UpstreamClient", () => {
       const client = yield* UpstreamClient
       return yield* client.resolvePlayback({ ...version, serverGeneration: 0 })
     }))).rejects.toMatchObject({ _tag: "ObsoleteGeneration" })
+  })
+
+  it("brokers a media redirect with the configured Emby authorization headers", async () => {
+    let observed: Request | undefined
+    const result = await run(async (input, init) => {
+      observed = new Request(input, init)
+      return new Response(null, {
+        status: 302,
+        headers: { location: "https://cdn.example.net/video.mp4?auth_key=signed" }
+      })
+    }, Effect.gen(function*() {
+      const client = yield* UpstreamClient
+      return yield* client.resolvePlaybackRedirect({
+        serverId: "server-1",
+        generation: 1,
+        url: "https://example.com/Videos/item/stream?api_key=signed"
+      })
+    }))
+
+    expect(result.href).toBe("https://cdn.example.net/video.mp4?auth_key=signed")
+    expect(observed?.method).toBe("GET")
+    expect(observed?.headers.get("accept")).toBe("*/*")
+    expect(observed?.headers.get("range")).toBe("bytes=0-")
+    expect(observed?.headers.get("user-agent")).toBe("Configured-Agent/1")
+    expect(observed?.headers.get("x-emby-token")).toBe("token-1")
+    expect(observed?.headers.get("x-emby-authorization")).toBe(
+      "MediaBrowser Client=\"oh-my-emby\", Device=\"oh-my-emby\", DeviceId=\"server-1\", Version=\"0.0.0\""
+    )
   })
 
   it("enforces registered resource origins on Workers", async () => {

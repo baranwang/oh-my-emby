@@ -374,4 +374,23 @@ export const crossPlatformAcceptance = (
       })
     }
   })
+
+  it.skipIf(name !== "docker")("redirects image URLs from the Bun production runtime", async () => {
+    await claimOwner(app)
+    const accessToken = await loginEmby(app)
+    const scenario = await prepareFederation(app)
+
+    for (const prefix of ["", "/emby"]) {
+      const image = await app.request(`${prefix}/Items/${scenario.page.items[0]!.id}/Images/Primary`, {
+        headers: { authorization: `Bearer ${accessToken}` },
+        redirect: "manual"
+      })
+
+      expect(image.status, `${prefix || "root"} image`).toBe(302)
+      expect(image.headers.get("cache-control")).toBe("private, no-store")
+      expect(image.headers.get("location")).toBe(
+        "https://server-0.example.com/Items/server-0-movie/Images/Primary?api_key=token-0"
+      )
+    }
+  })
 })

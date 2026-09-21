@@ -22,7 +22,8 @@ import {
   dashboardSessionResponse,
   guardDashboardRequest,
   makeDashboardAuthLayers,
-  makeDashboardRequestPolicy
+  makeDashboardRequestPolicy,
+  publicFailure
 } from "../src/api/dashboard.js"
 import { makeAuthLayer } from "../src/core/auth.js"
 import { makeSqliteRepositoriesLayer } from "../src/platform/bun/sqlite-repositories.js"
@@ -118,6 +119,61 @@ describe("Dashboard authentication boundary", () => {
     const body = JSON.parse(new TextDecoder().decode(response.body.body))
     expect(body).toEqual({ authenticated: true, username: "owner" })
     expect(body).not.toHaveProperty("token")
+  })
+
+  it("limits upstream rejection diagnostics to opted-in callers", () => {
+    const failure = {
+      _tag: "UpstreamRejected",
+      serverId: "server-1",
+      status: 401,
+      detail: "Invalid username or password"
+    }
+    const publicFailureWithDiagnostic = publicFailure as (
+      error: typeof failure,
+      includeDiagnostic?: boolean
+    ) => ReturnType<typeof publicFailure>
+    const response = publicFailure(failure)
+    const diagnosticResponse = publicFailureWithDiagnostic(failure, true)
+
+    expect(response.body._tag).toBe("Uint8Array")
+    if (response.body._tag !== "Uint8Array") throw new Error("expected encoded JSON response")
+    expect(JSON.parse(new TextDecoder().decode(response.body.body))).toEqual({
+      _tag: "UpstreamRejected",
+      serverId: "server-1",
+      status: 401
+    })
+    expect(diagnosticResponse.body._tag).toBe("Uint8Array")
+    if (diagnosticResponse.body._tag !== "Uint8Array") throw new Error("expected encoded JSON response")
+    expect(JSON.parse(new TextDecoder().decode(diagnosticResponse.body.body))).toEqual({
+      _tag: "UpstreamRejected",
+      serverId: "server-1",
+      status: 401,
+      detail: "Invalid username or password"
+    })
+  })
+
+  it("limits upstream unavailability diagnostics to opted-in callers", () => {
+    const failure = {
+      _tag: "UpstreamUnavailable",
+      serverId: "server-1",
+      detail: "connection refused"
+    }
+    const response = publicFailure(failure)
+    const diagnosticResponse = publicFailure(failure, true)
+
+    expect(response.body._tag).toBe("Uint8Array")
+    if (response.body._tag !== "Uint8Array") throw new Error("expected encoded JSON response")
+    expect(JSON.parse(new TextDecoder().decode(response.body.body))).toEqual({
+      _tag: "UpstreamUnavailable",
+      serverId: "server-1"
+    })
+    expect(diagnosticResponse.body._tag).toBe("Uint8Array")
+    if (diagnosticResponse.body._tag !== "Uint8Array") throw new Error("expected encoded JSON response")
+    expect(JSON.parse(new TextDecoder().decode(diagnosticResponse.body.body))).toEqual({
+      _tag: "UpstreamUnavailable",
+      serverId: "server-1",
+      detail: "connection refused"
+    })
   })
 
   it("executes the real typed auth routes with cookie issuance, session lookup, and logout expiry", async () => {

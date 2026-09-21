@@ -1,4 +1,5 @@
 import { Effect, Schema } from "effect"
+import { getLogger } from "@logtape/logtape"
 
 import type { AuthService } from "../core/auth.js"
 import { InvalidCredentials } from "../core/errors.js"
@@ -78,10 +79,13 @@ const failure = (status: number, code: string, message: string): Response =>
 
 const notFound = (): Response => failure(404, "NotFound", "Resource not found")
 
-const publicFailure = (error: unknown): Response => {
-  const tag = typeof error === "object" && error !== null && "_tag" in error
+const failureTag = (error: unknown): string =>
+  typeof error === "object" && error !== null && "_tag" in error
     ? String(error._tag)
     : "Internal"
+
+const publicFailure = (error: unknown): Response => {
+  const tag = failureTag(error)
   switch (tag) {
     case "InvalidEmbyRequest": return failure(400, "InvalidRequest", "Invalid request")
     case "FederationLimitExceeded": return failure(400, "InvalidRequest", "Invalid request")
@@ -120,6 +124,78 @@ const readJson = (request: Request) => Effect.tryPromise({
 const split = (value: string | null): ReadonlyArray<string> | undefined => value === null
   ? undefined
   : value.split(",").map((entry) => entry.trim())
+
+const embyLogger = getLogger(["oh-my-emby", "emby"])
+const sensitiveQueryParameter = /(?:^|[_-])(?:access[_-]?token|api[_-]?key|authorization|bearer|client[_-]?secret|credential|password|pass|pwd|pw|secret|signature|sig|token|jwt|session|cookie|key|hash)(?:$|[_-])/i
+const privateQueryParameter = /^(?:q|query|search(?:[_-]?term)?)$/i
+
+const queryAudit = (url: URL) => {
+  const queryKeys = [...new Set(url.searchParams.keys())].sort()
+  return {
+    queryKeys: queryKeys.filter((key) => !sensitiveQueryParameter.test(key)),
+    query: Object.fromEntries(queryKeys.map((key) => [key,
+      sensitiveQueryParameter.test(key) || privateQueryParameter.test(key)
+        ? ["[redacted]"]
+        : url.searchParams.getAll(key)
+    ])),
+    hasParentId: url.searchParams.has("ParentId"),
+    hasSensitiveQuery: queryKeys.some((key) => sensitiveQueryParameter.test(key))
+  }
+}
+
+const requestAudit = (request: Request) => {
+  const url = new URL(request.url)
+  return {
+    method: request.method,
+    path: url.pathname,
+    userAgent: request.headers.get("user-agent") ?? undefined,
+    ...queryAudit(url),
+    hasParentId: url.searchParams.has("ParentId")
+  }
+}
+
+const redirectAudit = (request: Request, response: Response) => {
+  const location = response.headers.get("location")
+  if (location === null) return { protocol: "missing" }
+  try {
+    const url = new URL(location, request.url)
+    return {
+      protocol: url.protocol,
+      ...(url.protocol === "http:" || url.protocol === "https:" ? { origin: url.origin } : {}),
+      path: url.pathname,
+      ...queryAudit(url)
+    }
+  } catch {
+    return { protocol: "invalid" }
+  }
+}
+
+const logRequest = (request: Request, response: Response, startedAt: number, error?: unknown): void => {
+  const redirect = response.status >= 300 && response.status < 400
+    ? redirectAudit(request, response)
+    : undefined
+  const properties = {
+    ...requestAudit(request),
+    ...(redirect === undefined ? {} : { redirect }),
+    status: response.status,
+    durationMs: Date.now() - startedAt
+  }
+  if (error === undefined) {
+    embyLogger.info(
+      `Emby request {method} {path} ua={userAgent} keys={queryKeys} query={query} parent={hasParentId} ` +
+        `sensitiveQuery={hasSensitiveQuery}${redirect === undefined ? "" : " redirect={redirect}"} ` +
+        "completed with {status} in {durationMs}ms",
+      properties
+    )
+    return
+  }
+  embyLogger.warn(
+    `Emby request {method} {path} ua={userAgent} keys={queryKeys} query={query} parent={hasParentId} ` +
+      `sensitiveQuery={hasSensitiveQuery}${redirect === undefined ? "" : " redirect={redirect}"} ` +
+      "failed with {status} ({failure}) in {durationMs}ms",
+    { ...properties, failure: failureTag(error) }
+  )
+}
 
 const number = (value: string | null): number | undefined => value === null
   ? undefined
@@ -255,12 +331,32 @@ const mediaSourceDto = (
   } as EmbyMediaSourceDtoValue
 }
 
-const itemDto = (item: CanonicalItemView): EmbyItemDtoValue => {
+const streamPath = (canonicalId: string, mediaSourceId: string) =>
+  `/Videos/${encodeURIComponent(canonicalId)}/stream?MediaSourceId=${encodeURIComponent(mediaSourceId)}`
+
+const imageTagTypes = (metadata: Readonly<Record<string, JsonValue>>) => Object.fromEntries(
+  Object.entries(object(metadata.ImageTags ?? null)).flatMap(([type, tag]) =>
+    /^[A-Za-z][A-Za-z0-9_-]{0,31}$/.test(type) && typeof tag === "string" && tag.length > 0
+      ? [[type, "local"]]
+      : []
+  )
+)
+
+const backdropImageTags = (metadata: Readonly<Record<string, JsonValue>>) => Array.isArray(metadata.BackdropImageTags)
+  ? metadata.BackdropImageTags.flatMap((tag) => typeof tag === "string" && tag.length > 0 ? ["local"] : [])
+  : []
+
+const itemDto = (item: CanonicalItemView, serverId: string): EmbyItemDtoValue => {
   const metadata = object(item.displayMetadata)
+  const imageTags = imageTagTypes(metadata)
+  const backdrops = backdropImageTags(metadata)
   return {
     ...pickScalars(metadata, itemScalarFields),
     Id: item.id,
+    ServerId: serverId,
     Type: item.itemType,
+    ...(Object.keys(imageTags).length > 0 ? { ImageTags: imageTags } : {}),
+    ...(backdrops.length > 0 ? { BackdropImageTags: backdrops } : {}),
     ...(Array.isArray(metadata.Genres) && metadata.Genres.every((entry) => typeof entry === "string" && entry.length > 0)
       ? { Genres: metadata.Genres }
       : {}),
@@ -271,7 +367,9 @@ const itemDto = (item: CanonicalItemView): EmbyItemDtoValue => {
         name: version.label,
         streams: version.streams
       })
-      return mapped === null ? [] : [mapped]
+      if (mapped === null) return []
+      const path = streamPath(item.id, version.id)
+      return [{ ...mapped, Path: path, DirectStreamUrl: path }]
     })
   } as EmbyItemDtoValue
 }
@@ -443,11 +541,16 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
   }
 
   const system = method === "GET" && path === "/System/Info"
+  const virtualFolders = method === "GET" && path === "/Library/VirtualFolders"
+  const displayPreferences = method === "GET" ? path.match(/^\/DisplayPreferences\/([^/]+)$/) : null
+  const userProfile = method === "GET" ? path.match(/^\/Users\/([^/]+)$/) : null
   const views = method === "GET" ? path.match(/^\/Users\/([^/]+)\/Views$/) : null
   const userItems = method === "GET" ? path.match(/^\/Users\/([^/]+)\/Items$/) : null
+  const latestItems = method === "GET" ? path.match(/^\/Users\/([^/]+)\/Items\/Latest$/) : null
   const allItems = method === "GET" && path === "/Items"
   const userDetail = method === "GET" ? path.match(/^\/Users\/([^/]+)\/Items\/([^/]+)$/) : null
   const itemDetail = method === "GET" ? path.match(/^\/Items\/([^/]+)$/) : null
+  const similar = method === "GET" ? path.match(/^\/Items\/([^/]+)\/Similar$/) : null
   const userDataRoute = method === "POST" ? path.match(/^\/Users\/([^/]+)\/Items\/([^/]+)\/UserData$/) : null
   const favorite = path.match(/^\/Users\/([^/]+)\/FavoriteItems\/([^/]+)$/)
   const played = path.match(/^\/Users\/([^/]+)\/PlayedItems\/([^/]+)$/)
@@ -471,18 +574,52 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
           : null
     : null
 
-  if (!system && !views && !userItems && !allItems && !userDetail && !itemDetail && !userDataRoute &&
+  if (!system && !virtualFolders && !displayPreferences && !userProfile && !views && !userItems && !latestItems && !allItems && !userDetail && !itemDetail && !similar && !userDataRoute &&
     !favorite && !played && !playbackInfo && !videoStream && !videoDownload && !image && !subtitle &&
     !playbackKind) return notFound()
 
   const principal = yield* principalFor(services, request, url)
   if (system) return json(serverInfo(services))
 
+  if (userProfile) return json(user(services, yield* requireUser(principal, userProfile[1]!)))
+
+  if (displayPreferences) {
+    const id = yield* pathSegment(displayPreferences[1]!)
+    const userId = url.searchParams.get("userId")
+    if (userId !== null && userId !== principal.username) {
+      return yield* Effect.fail(new EmbyForbidden())
+    }
+    return json({
+      Id: id,
+      Client: url.searchParams.get("client") || "emby",
+      RememberIndexing: false,
+      PrimaryImageHeight: 250,
+      PrimaryImageWidth: 250,
+      CustomPrefs: {},
+      ScrollDirection: "Horizontal",
+      ShowBackdrop: true,
+      RememberSorting: false,
+      SortOrder: "Ascending",
+      ShowSidebar: false
+    })
+  }
+
+  if (virtualFolders) {
+    const libraries = yield* services.libraries.list()
+    return json(libraries.filter(({ enabled }) => enabled).map((library) => ({
+      Name: library.name,
+      Locations: [],
+      CollectionType: library.mediaType === "series" ? "tvshows" : "movies",
+      ItemId: library.id
+    })))
+  }
+
   if (views) {
     yield* requireUser(principal, views[1]!)
     const libraries = yield* services.libraries.list()
     const items = libraries.filter(({ enabled }) => enabled).map((library) => ({
       Id: library.id,
+      ServerId: services.config.serverId,
       Name: library.name,
       Type: "CollectionFolder",
       CollectionType: library.mediaType === "series" ? "tvshows" : "movies",
@@ -490,6 +627,17 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
       UserData: userData(null, library.id)
     }))
     return json({ Items: items, TotalRecordCount: items.length, StartIndex: 0 })
+  }
+
+  if (latestItems) {
+    yield* requireUser(principal, latestItems[1]!)
+    const decoded = yield* decodeItemsQuery(url)
+    const input: FederatedQuery = {
+      ...query(principal, decoded),
+      sort: [{ field: "DateCreated", direction: "Descending" }]
+    }
+    const page = yield* services.federation.list(input)
+    return json(page.items.map((item) => itemDto(item, services.config.serverId)))
   }
 
   if (userItems || allItems) {
@@ -500,7 +648,7 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
       ? yield* services.federation.search({ ...input, searchTerm: decoded.SearchTerm })
       : yield* services.federation.list(input)
     return json({
-      Items: page.items.map(itemDto),
+      Items: page.items.map((item) => itemDto(item, services.config.serverId)),
       TotalRecordCount: page.totalRecordCount,
       StartIndex: input.startIndex
     })
@@ -509,9 +657,27 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
   if (userDetail || itemDetail) {
     if (userDetail) yield* requireUser(principal, userDetail[1]!)
     const canonicalId = yield* pathSegment((userDetail?.[2] ?? itemDetail?.[1])!)
+    const library = (yield* services.libraries.list()).find(({ id, enabled }) => enabled && id === canonicalId)
+    if (library !== undefined) return json({
+      Id: library.id,
+      ServerId: services.config.serverId,
+      Name: library.name,
+      Type: "CollectionFolder",
+      CollectionType: library.mediaType === "series" ? "tvshows" : "movies",
+      IsFolder: true,
+      UserData: userData(null, library.id)
+    })
     const item = yield* services.federation.detail(canonicalId)
     if (item === null) return yield* Effect.fail(new EmbyNotFound())
-    return json(itemDto(item))
+    return json(itemDto(item, services.config.serverId))
+  }
+
+  if (similar) {
+    const canonicalId = yield* pathSegment(similar[1]!)
+    if ((yield* services.federation.lookupMembership(canonicalId)) === null) {
+      return yield* Effect.fail(new EmbyNotFound())
+    }
+    return json({ Items: [], TotalRecordCount: 0, StartIndex: 0 })
   }
 
   if (userDataRoute) {
@@ -631,7 +797,15 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
 })
 
 export const makeEmbyHandler = (services: EmbyServices) =>
-  (request: Request): Effect.Effect<Response> => handle(services, request).pipe(
-    Effect.catch((error) => Effect.succeed(publicFailure(error))),
-    Effect.raceFirst(interruptWhenAborted(request.signal))
-  )
+  (request: Request): Effect.Effect<Response> => {
+    const startedAt = Date.now()
+    return handle(services, request).pipe(
+      Effect.tap((response) => Effect.sync(() => logRequest(request, response, startedAt))),
+      Effect.catch((error) => Effect.sync(() => {
+        const response = publicFailure(error)
+        logRequest(request, response, startedAt, error)
+        return response
+      })),
+      Effect.raceFirst(interruptWhenAborted(request.signal))
+    )
+  }

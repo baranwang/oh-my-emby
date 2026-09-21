@@ -60,6 +60,7 @@ export const EmbyMediaSourceDto = Schema.Struct({
 
 export const EmbyItemDto = Schema.Struct({
   Id: Schema.NonEmptyString,
+  ServerId: Schema.NonEmptyString,
   Type: Schema.NonEmptyString,
   Name: Schema.optionalKey(Schema.String),
   OriginalTitle: Schema.optionalKey(Schema.String),
@@ -78,6 +79,8 @@ export const EmbyItemDto = Schema.Struct({
   ChildCount: Schema.optionalKey(Schema.Number),
   IsFolder: Schema.optionalKey(Schema.Boolean),
   IsHD: Schema.optionalKey(Schema.Boolean),
+  ImageTags: Schema.optionalKey(Schema.Record(Schema.String, Schema.NonEmptyString)),
+  BackdropImageTags: Schema.optionalKey(StringList),
   Genres: Schema.optionalKey(StringList),
   UserData: EmbyUserDataDto,
   MediaSources: Schema.Array(EmbyMediaSourceDto)
@@ -112,12 +115,7 @@ export const EmbyItemsQuery = Schema.Struct({
     "IsUnplayed",
     "IsResumable"
   ]))),
-  IncludeItemTypes: Schema.optionalKey(Schema.Array(Schema.Literals([
-    "Movie",
-    "Series",
-    "Season",
-    "Episode"
-  ])))
+  IncludeItemTypes: Schema.optionalKey(StringList)
 })
 
 export const EmbyUserDataPatch = Schema.Struct({

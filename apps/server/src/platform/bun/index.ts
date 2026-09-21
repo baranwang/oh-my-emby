@@ -2,6 +2,7 @@ import { BunRuntime as EffectBunRuntime } from "@effect/platform-bun"
 import { dirname, join, resolve } from "node:path"
 import { mkdir } from "node:fs/promises"
 import { Effect, Layer, ManagedRuntime, Option } from "effect"
+import { configure, getConsoleSink } from "@logtape/logtape"
 import * as HttpRouter from "effect/unstable/http/HttpRouter"
 import * as HttpServer from "effect/unstable/http/HttpServer"
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest"
@@ -31,6 +32,16 @@ import { openBunResourceCache } from "./cache.js"
 import { applySqliteMigrations, makeSqliteRepositoriesLayer } from "./sqlite-repositories.js"
 
 export const BUN_MAINTENANCE_INTERVAL_MS = 5 * 60_000
+
+let logTapeConfiguration: Promise<void> | undefined
+
+const configureLogTape = (): Promise<void> => logTapeConfiguration ??= configure({
+  sinks: { console: getConsoleSink() },
+  loggers: [
+    { category: ["oh-my-emby"], lowestLevel: "info", sinks: ["console"] },
+    { category: ["logtape"], lowestLevel: "warning", sinks: ["console"] }
+  ]
+})
 
 export interface BunRuntimeConfig {
   readonly hostname: string
@@ -98,7 +109,9 @@ const makeBunCoreLayer = (config: BunRuntimeConfig) => {
   const userState = makeUserStateLayer().pipe(Layer.provide(repositories))
   const serverService = makeServerServiceLayer.pipe(Layer.provide(foundation))
   const libraryService = makeLibraryServiceLayer.pipe(Layer.provide(foundation))
-  const playback = makePlaybackLayer().pipe(Layer.provide(Layer.merge(foundation, federation)))
+  const playback = makePlaybackLayer({
+    isClientUsableResource: ({ kind }) => kind === "image"
+  }).pipe(Layer.provide(Layer.merge(foundation, federation)))
   const outbox = makeOutboxLayer().pipe(Layer.provide(foundation))
   return Layer.mergeAll(
     foundation,
@@ -138,6 +151,7 @@ const internalFailure = (error: unknown): Response => {
 }
 
 export const startBunRuntime = async (config: BunRuntimeConfig): Promise<BunRuntime> => {
+  await configureLogTape()
   await mkdir(dirname(config.sqlitePath), { recursive: true })
   await mkdir(dirname(config.cachePath), { recursive: true })
   await applySqliteMigrations(config.sqlitePath, config.migrationsDir)

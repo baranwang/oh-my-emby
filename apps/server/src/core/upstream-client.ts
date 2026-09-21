@@ -18,6 +18,7 @@ import {
   type UpstreamFailure
 } from "./errors.js"
 import {
+  MAX_CONNECTION_DIAGNOSTIC_BYTES,
   MAX_CONTROL_RESPONSE_BYTES,
   UPSTREAM_DETAIL_DEADLINE_MS,
   UPSTREAM_LIST_DEADLINE_MS
@@ -29,6 +30,7 @@ import { Repositories } from "./repositories.js"
 const MAX_REDIRECTS = 3
 const redirects = new Set([301, 302, 303, 307, 308])
 const utf8 = new TextDecoder()
+const utf8Encoder = new TextEncoder()
 
 export interface DestinationPolicy {
   readonly platform: "workers" | "docker"
@@ -80,15 +82,22 @@ export interface UpstreamClientService {
     schema: Schema.Schema<A>
   ) => Effect.Effect<A, UpstreamFailure>
   readonly authenticate: (
-    server: UpstreamServer
+    server: UpstreamServer,
+    includeDiagnostic?: boolean
   ) => Effect.Effect<AuthenticatedServer, UpstreamFailure>
-  readonly getServerIdentity: (serverId: string) => Effect.Effect<string | null, UpstreamFailure>
+  readonly getServerIdentity: (
+    serverId: string,
+    includeDiagnostic?: boolean
+  ) => Effect.Effect<string | null, UpstreamFailure>
   readonly listSourceLibraries: (
     serverId: string
   ) => Effect.Effect<ReadonlyArray<SourceLibrary>, UpstreamFailure>
   readonly resolvePlayback: (
     version: SourceMediaVersion
   ) => Effect.Effect<ResolvedPlayback, UpstreamFailure>
+  readonly resolvePlaybackRedirect: (
+    playback: ResolvedPlayback
+  ) => Effect.Effect<URL, UpstreamFailure>
   readonly requestResource: (
     request: RegisteredUpstreamResourceRequest
   ) => Effect.Effect<Response, UpstreamFailure, Scope.Scope>
@@ -236,7 +245,7 @@ const validateDestination = (
     if (isIpLiteral(hostname) || isPrivateHostname(hostname)) {
       return Effect.fail(new DestinationRejected({ serverId: server.id }))
     }
-  } else if (isPrivateHostname(hostname) || isIpLiteral(hostname)) {
+  } else if (isPrivateHostname(hostname)) {
     if (resourcePolicy === "control" && url.origin !== configuredBase.origin) {
       return Effect.fail(new DestinationRejected({ serverId: server.id }))
     }
@@ -253,24 +262,45 @@ const validateDestination = (
   return Effect.void
 }
 
-const classifyStatus = (serverId: string, response: Response): Effect.Effect<void, UpstreamFailure> => {
-  if (response.ok) return Effect.void
-  if (response.status === 404) return Effect.fail(new UpstreamNotFound({ serverId }))
-  return Effect.fail(new UpstreamRejected({ serverId, status: response.status }))
+const sensitiveDiagnosticValue = /(["']?(?:access[_-]?token|token|password|pw|(?:x[_-])?api[_-]?key|client[_-]?secret|authorization|(?:set[_-])?cookie)["']?\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\r\n,}&]+)/gi
+
+const redactDiagnostic = (value: string): string => value
+  .replace(sensitiveDiagnosticValue, (match, prefix: string) => {
+    const rawValue = match.slice(prefix.length)
+    const quote = rawValue[0]
+    return quote === '"' || quote === "'" ? `${prefix}${quote}[redacted]${quote}` : `${prefix}[redacted]`
+  })
+  .replace(/\bBearer\s+[^\s,;]+/gi, "Bearer [redacted]")
+
+const limitDiagnostic = (value: string): string => {
+  const bytes = utf8Encoder.encode(value)
+  if (bytes.byteLength <= MAX_CONNECTION_DIAGNOSTIC_BYTES) return value
+  const suffix = "\n…"
+  let end = MAX_CONNECTION_DIAGNOSTIC_BYTES - utf8Encoder.encode(suffix).byteLength
+  while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end--
+  return `${utf8.decode(bytes.slice(0, end))}${suffix}`
 }
 
-const readBoundedJson = (
+const transportDiagnostic = (error: unknown): string | undefined => {
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined
+  return message === undefined || message === "" ? undefined : limitDiagnostic(redactDiagnostic(message))
+}
+
+const readBoundedText = (
   response: Response,
-  serverId: string
-): Effect.Effect<unknown, ResponseTooLarge | UpstreamInvalidResponse | UpstreamUnavailable> => Effect.gen(function*() {
+  serverId: string,
+  maxBytes: number,
+  truncate = false
+): Effect.Effect<string | undefined, ResponseTooLarge | UpstreamUnavailable> => Effect.gen(function*() {
   const declared = response.headers.get("content-length")
-  if (declared !== null && Number(declared) > MAX_CONTROL_RESPONSE_BYTES) {
+  if (!truncate && declared !== null && Number(declared) > maxBytes) {
     return yield* Effect.fail(new ResponseTooLarge({ serverId }))
   }
   if (response.body === null) return undefined
   const reader = response.body.getReader()
   const chunks: Array<Uint8Array> = []
   let size = 0
+  let truncated = false
   while (true) {
     const result = yield* Effect.tryPromise({
       try: (signal) => {
@@ -281,11 +311,19 @@ const readBoundedJson = (
       catch: () => new UpstreamUnavailable({ serverId })
     })
     if (result.done) break
-    size += result.value.byteLength
-    if (size > MAX_CONTROL_RESPONSE_BYTES) {
+    const remaining = maxBytes - size
+    if (result.value.byteLength > remaining) {
+      if (!truncate) {
+        yield* Effect.promise(() => reader.cancel()).pipe(Effect.ignore)
+        return yield* Effect.fail(new ResponseTooLarge({ serverId }))
+      }
+      if (remaining > 0) chunks.push(result.value.slice(0, remaining))
+      size = maxBytes
+      truncated = true
       yield* Effect.promise(() => reader.cancel()).pipe(Effect.ignore)
-      return yield* Effect.fail(new ResponseTooLarge({ serverId }))
+      break
     }
+    size += result.value.byteLength
     chunks.push(result.value)
   }
   const bytes = new Uint8Array(size)
@@ -295,11 +333,51 @@ const readBoundedJson = (
     offset += chunk.byteLength
   }
   if (size === 0) return undefined
-  return yield* Effect.try({
-    try: () => JSON.parse(utf8.decode(bytes)) as unknown,
+  return `${utf8.decode(bytes)}${truncated ? "\n…" : ""}`
+})
+
+const classifyStatus = (
+  serverId: string,
+  response: Response,
+  includeDiagnostic = false
+): Effect.Effect<void, UpstreamFailure> => {
+  if (response.ok) return Effect.void
+  if (!includeDiagnostic) {
+    return Effect.fail(response.status === 404
+      ? new UpstreamNotFound({ serverId })
+      : new UpstreamRejected({ serverId, status: response.status }))
+  }
+  return Effect.gen(function*() {
+    const detail = yield* readBoundedText(
+      response,
+      serverId,
+      MAX_CONNECTION_DIAGNOSTIC_BYTES,
+      true
+    ).pipe(
+      Effect.map((value) => value === undefined ? undefined : limitDiagnostic(redactDiagnostic(value))),
+      Effect.orElseSucceed(() => undefined)
+    )
+    const diagnostic = detail === undefined ? {} : { detail }
+    return yield* Effect.fail(response.status === 404
+      ? new UpstreamNotFound({ serverId, ...diagnostic })
+      : new UpstreamRejected({ serverId, status: response.status, ...diagnostic }))
+  })
+}
+
+const readBoundedJson = (
+  response: Response,
+  serverId: string
+): Effect.Effect<unknown, ResponseTooLarge | UpstreamInvalidResponse | UpstreamUnavailable> => readBoundedText(
+  response,
+  serverId,
+  MAX_CONTROL_RESPONSE_BYTES
+).pipe(Effect.flatMap((text) => {
+  if (text === undefined) return Effect.succeed(undefined)
+  return Effect.try({
+    try: () => JSON.parse(text) as unknown,
     catch: () => new UpstreamInvalidResponse({ serverId })
   })
-})
+}))
 
 const AuthenticationResponse = Schema.Struct({
   AccessToken: Schema.String,
@@ -341,21 +419,29 @@ export const makeUpstreamClientLayer = (
   const fetchOnce = (
     server: UpstreamServer,
     url: URL,
-    init: RequestInit
+    init: RequestInit,
+    includeDiagnostic = false
   ): Effect.Effect<Response, UpstreamUnavailable | UpstreamTimeout> => Effect.tryPromise({
     try: (signal) => config.fetch(new Request(url, { ...init, signal }), { signal }),
-    catch: () => new UpstreamUnavailable({ serverId: server.id })
+    catch: (error) => {
+      const detail = includeDiagnostic ? transportDiagnostic(error) : undefined
+      return new UpstreamUnavailable({ serverId: server.id, ...(detail === undefined ? {} : { detail }) })
+    }
   }).pipe(
     Effect.timeout(timeoutMs),
     Effect.catchTag("TimeoutError", () => Effect.fail(new UpstreamTimeout({ serverId: server.id })))
   )
+
+  const embyAuthorization = (server: UpstreamServer): string =>
+    `MediaBrowser Client="oh-my-emby", Device="oh-my-emby", DeviceId="${server.id}", Version="0.0.0"`
 
   const fetchWithRedirects = (
     server: UpstreamServer,
     request: UpstreamRequest,
     token: string | null,
     transportRetry = true,
-    trace: { retried: boolean } = { retried: false }
+    trace: { retried: boolean } = { retried: false },
+    includeDiagnostic = false
   ): Effect.Effect<Response, UpstreamFailure> => Effect.gen(function*() {
     const base = yield* Effect.try({
       try: () => normalizedBaseUrl(server.baseUrl),
@@ -373,7 +459,7 @@ export const makeUpstreamClientLayer = (
     let headers = new Headers({
       accept: "application/json",
       "user-agent": server.userAgent,
-      "x-emby-authorization": `MediaBrowser Client="oh-my-emby", Device="oh-my-emby", DeviceId="${server.id}", Version="0.0.0"`
+      "x-emby-authorization": embyAuthorization(server)
     })
     if (body !== undefined) headers.set("content-type", "application/json")
     if (token !== null) headers.set("x-emby-token", token)
@@ -383,11 +469,11 @@ export const makeUpstreamClientLayer = (
       const init: RequestInit = body === undefined
         ? { method, headers, redirect: "manual" }
         : { method, headers, body: Uint8Array.from(body).buffer, redirect: "manual" }
-      const response = yield* fetchOnce(server, current, init).pipe(
+      const response = yield* fetchOnce(server, current, init, includeDiagnostic).pipe(
         Effect.catchTag("UpstreamUnavailable", (failure) => {
           if (transportRetry && request.method === "GET" && (request.resourcePolicy ?? "control") === "control") {
             trace.retried = true
-            return fetchWithRedirects(server, request, token, false, trace)
+            return fetchWithRedirects(server, request, token, false, trace, includeDiagnostic)
           }
           return Effect.fail(failure)
         })
@@ -424,9 +510,10 @@ export const makeUpstreamClientLayer = (
   const decodeResponse = <A>(
     response: Response,
     serverId: string,
-    schema: Schema.Schema<A>
+    schema: Schema.Schema<A>,
+    includeDiagnostic = false
   ): Effect.Effect<A, UpstreamFailure> => Effect.gen(function*() {
-    yield* classifyStatus(serverId, response)
+    yield* classifyStatus(serverId, response, includeDiagnostic)
     const value = yield* readBoundedJson(response, serverId)
     const decode = Schema.decodeUnknownEffect(schema) as (
       input: unknown
@@ -436,7 +523,7 @@ export const makeUpstreamClientLayer = (
     )
   })
 
-  const authenticate: UpstreamClientService["authenticate"] = (server) => deadline(Effect.gen(function*() {
+  const authenticate: UpstreamClientService["authenticate"] = (server, includeDiagnostic = false) => deadline(Effect.gen(function*() {
     if (server.password === null) return yield* Effect.fail(new UpstreamRejected({ serverId: server.id, status: 401 }))
     const body = new TextEncoder().encode(JSON.stringify({ Username: server.username, Pw: server.password }))
     const response = yield* fetchWithRedirects(server, {
@@ -445,8 +532,8 @@ export const makeUpstreamClientLayer = (
       path: "/Users/AuthenticateByName",
       method: "POST",
       body
-    }, null, false)
-    const authenticated = yield* decodeResponse(response, server.id, AuthenticationResponse)
+    }, null, false, undefined, includeDiagnostic)
+    const authenticated = yield* decodeResponse(response, server.id, AuthenticationResponse, includeDiagnostic)
     const saved = yield* repositories.saveServerResult({
       serverId: server.id,
       expectedGeneration: server.generation,
@@ -511,17 +598,17 @@ export const makeUpstreamClientLayer = (
     )
   }
 
-  const getServerIdentity: UpstreamClientService["getServerIdentity"] = (serverId) => deadline(Effect.gen(function*() {
+  const getServerIdentity: UpstreamClientService["getServerIdentity"] = (serverId, includeDiagnostic = false) => deadline(Effect.gen(function*() {
     const server = yield* getServer(serverId)
-    const authenticated = yield* authenticate(server)
+    const authenticated = yield* authenticate(server, includeDiagnostic)
     if (authenticated.catalogId !== null) return authenticated.catalogId
     const response = yield* fetchWithRedirects(authenticated.server, {
       serverId,
       generation: server.generation,
       path: "/System/Info/Public",
       method: "GET"
-    }, null)
-    const info = yield* decodeResponse(response, serverId, PublicSystemInfo)
+    }, null, true, undefined, includeDiagnostic)
+    const info = yield* decodeResponse(response, serverId, PublicSystemInfo, includeDiagnostic)
     return info.Id?.trim() || null
   }), serverId)
 
@@ -569,6 +656,47 @@ export const makeUpstreamClientLayer = (
     })
     yield* validateDestination(url, server, config.destinationPolicy, "registered-resource")
     return { serverId: server.id, generation: server.generation, url: url.href }
+  })
+
+  const resolvePlaybackRedirect: UpstreamClientService["resolvePlaybackRedirect"] = (playback) => Effect.gen(function*() {
+    const server = yield* getServer(playback.serverId)
+    if (server.generation !== playback.generation) {
+      return yield* Effect.fail(new ObsoleteGeneration({ serverId: server.id }))
+    }
+    if (!server.enabled || server.health !== "healthy" || server.verifiedBaseUrl === null) {
+      return yield* Effect.fail(new UpstreamUnavailable({ serverId: server.id }))
+    }
+    const current = yield* Effect.try({
+      try: () => new URL(playback.url),
+      catch: () => new InvalidUpstreamUrl()
+    })
+    const base = yield* Effect.try({
+      try: () => normalizedBaseUrl(server.baseUrl),
+      catch: () => new InvalidUpstreamUrl()
+    })
+    if (current.origin !== base.origin) return yield* Effect.fail(new UpstreamInvalidResponse({ serverId: server.id }))
+    yield* validateDestination(current, server, config.destinationPolicy)
+    const headers = new Headers({
+      accept: "*/*",
+      range: "bytes=0-",
+      "icy-metadata": "1",
+      "user-agent": server.userAgent,
+      "x-emby-authorization": embyAuthorization(server)
+    })
+    if (server.accessToken !== null) headers.set("x-emby-token", server.accessToken)
+    const response = yield* fetchOnce(server, current, { method: "GET", headers, redirect: "manual" })
+    void response.body?.cancel().catch(() => undefined)
+    if (!redirects.has(response.status)) return current
+    const location = response.headers.get("location")
+    if (location === null) return yield* Effect.fail(new UpstreamInvalidResponse({ serverId: server.id }))
+    const next = yield* Effect.try({
+      try: () => new URL(location, current),
+      catch: () => new InvalidUpstreamUrl()
+    })
+    if ((next.protocol !== "http:" && next.protocol !== "https:") || next.username !== "" || next.password !== "") {
+      return yield* Effect.fail(new UpstreamInvalidResponse({ serverId: server.id }))
+    }
+    return next
   })
 
   const requestResource: UpstreamClientService["requestResource"] = (input) => Effect.gen(function*() {
@@ -639,6 +767,7 @@ export const makeUpstreamClientLayer = (
     getServerIdentity,
     listSourceLibraries,
     resolvePlayback,
+    resolvePlaybackRedirect,
     requestResource
   })
 }))

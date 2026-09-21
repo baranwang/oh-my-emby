@@ -17,12 +17,14 @@ export class InvalidCredentials extends Schema.TaggedError<InvalidCredentials>()
 export class RateLimited extends Schema.TaggedError<RateLimited>()("RateLimited", {}) {}
 
 export class UpstreamUnavailable extends Schema.TaggedError<UpstreamUnavailable>()("UpstreamUnavailable", {
-  serverId: Schema.String
+  serverId: Schema.String,
+  detail: Schema.optional(Schema.String)
 }) {}
 
 export class UpstreamRejected extends Schema.TaggedError<UpstreamRejected>()("UpstreamRejected", {
   serverId: Schema.String,
-  status: Schema.Int
+  status: Schema.Int,
+  detail: Schema.optional(Schema.String)
 }) {}
 
 export class InvalidUpstreamUrl extends Schema.TaggedError<InvalidUpstreamUrl>()("InvalidUpstreamUrl", {}) {}
@@ -53,7 +55,8 @@ export class UpstreamTimeout extends Schema.TaggedError<UpstreamTimeout>()("Upst
 }) {}
 
 export class UpstreamNotFound extends Schema.TaggedError<UpstreamNotFound>()("UpstreamNotFound", {
-  serverId: Schema.String
+  serverId: Schema.String,
+  detail: Schema.optional(Schema.String)
 }) {}
 
 export class UpstreamInvalidResponse extends Schema.TaggedError<UpstreamInvalidResponse>()(

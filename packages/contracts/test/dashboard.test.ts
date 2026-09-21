@@ -1,6 +1,6 @@
 import { Schema } from "effect"
 import { describe, expect, it } from "vitest"
-import { ServerInput, ServerView } from "../src/index.js"
+import { PublicError, ServerInput, ServerView } from "../src/index.js"
 
 describe("Dashboard contracts", () => {
   it("accepts write-only credentials but never returns them", async () => {
@@ -54,5 +54,35 @@ describe("Dashboard contracts", () => {
       userAgent: "SenPlayer/1",
       enabled: true
     })).rejects.toBeDefined()
+  })
+
+  it("keeps an upstream rejection diagnostic in the public contract", async () => {
+    const error = await Schema.decodeUnknownPromise(PublicError)({
+      _tag: "UpstreamRejected",
+      serverId: "server-1",
+      status: 401,
+      detail: "Invalid username or password"
+    })
+
+    expect(error).toEqual({
+      _tag: "UpstreamRejected",
+      serverId: "server-1",
+      status: 401,
+      detail: "Invalid username or password"
+    })
+  })
+
+  it("keeps an upstream unavailability diagnostic in the public contract", async () => {
+    const error = await Schema.decodeUnknownPromise(PublicError)({
+      _tag: "UpstreamUnavailable",
+      serverId: "server-1",
+      detail: "connection refused"
+    })
+
+    expect(error).toEqual({
+      _tag: "UpstreamUnavailable",
+      serverId: "server-1",
+      detail: "connection refused"
+    })
   })
 })

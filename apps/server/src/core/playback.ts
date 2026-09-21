@@ -125,6 +125,23 @@ const orderedVersions = (
   })
 }
 
+const orderedSourceItems = (
+  record: CatalogItemRecord,
+  eligibleSources: ReadonlyArray<EligibleSource>
+): ReadonlyArray<SourceItemRecord> => {
+  const order = new Map(eligibleSources.map((source) => [
+    sourceKey(source.serverId, source.sourceLibraryId),
+    source.sourceOrder
+  ]))
+  return [...record.sourceItems].sort((left, right) =>
+    (order.get(sourceKey(left.serverId, left.sourceLibraryId)) ?? Number.MAX_SAFE_INTEGER) -
+      (order.get(sourceKey(right.serverId, right.sourceLibraryId)) ?? Number.MAX_SAFE_INTEGER) ||
+    left.serverId.localeCompare(right.serverId) ||
+    left.upstreamItemId.localeCompare(right.upstreamItemId) ||
+    left.id.localeCompare(right.id)
+  )
+}
+
 const appendPath = (baseUrl: string, path: string): URL => {
   const url = new URL(baseUrl)
   url.pathname = `${url.pathname.replace(/\/+$/, "")}${path}`
@@ -232,16 +249,12 @@ export const makePlaybackLayer = (
       return { current, eligibleSources }
     })
 
-    const registration = (
+    const sourceRegistration = (
       item: SourceItemRecord,
-      version: SourceMediaVersion,
       eligibleSources: ReadonlyArray<EligibleSource>,
       build: (source: EligibleSource) => URL
-    ): Effect.Effect<{ readonly source: EligibleSource; readonly resolved: URL }, PlaybackUnavailable> =>
+    ): Effect.Effect<{ readonly source: EligibleSource; readonly url: URL }, PlaybackUnavailable> =>
       Effect.gen(function*() {
-        if (item.serverGeneration !== version.serverGeneration) {
-          return yield* Effect.fail(new PlaybackUnavailable())
-        }
         const eligible = yield* repositories.isSourceEligible(item.serverId, item.sourceLibraryId)
           .pipe(Effect.mapError(() => new PlaybackUnavailable()))
         const source = eligibleSources.find((candidate) =>
@@ -250,14 +263,27 @@ export const makePlaybackLayer = (
           candidate.serverGeneration === item.serverGeneration
         )
         if (!eligible || source === undefined) return yield* Effect.fail(new PlaybackUnavailable())
-        const url = build(source)
-        const capabilities = jsonObject(version.capabilities) ? version.capabilities : {}
-        const resolved = yield* upstream.resolvePlayback({
-          ...version,
-          capabilities: { ...capabilities, serverId: source.serverId, url: url.href }
-        }).pipe(Effect.mapError(() => new PlaybackUnavailable()))
-        return { source, resolved: new URL(resolved.url) }
+        return { source, url: build(source) }
       })
+
+    const registration = (
+      item: SourceItemRecord,
+      version: SourceMediaVersion,
+      eligibleSources: ReadonlyArray<EligibleSource>,
+      build: (source: EligibleSource) => URL
+    ): Effect.Effect<{ readonly source: EligibleSource; readonly resolved: URL }, PlaybackUnavailable> =>
+      item.serverGeneration !== version.serverGeneration
+        ? Effect.fail(new PlaybackUnavailable())
+        : sourceRegistration(item, eligibleSources, build).pipe(Effect.flatMap(({ source, url }) => {
+            const capabilities = jsonObject(version.capabilities) ? version.capabilities : {}
+            return upstream.resolvePlayback({
+              ...version,
+              capabilities: { ...capabilities, serverId: source.serverId, url: url.href }
+            }).pipe(
+              Effect.mapError(() => new PlaybackUnavailable()),
+              Effect.map((resolved) => ({ source, resolved: new URL(resolved.url) }))
+            )
+          }))
 
     const versionRegistration = (
       record: CatalogItemRecord,
@@ -271,7 +297,7 @@ export const makePlaybackLayer = (
         : registration(item, version, eligibleSources, (source) => build(source, item))
     }
 
-    const video = (
+    const registeredVideo = (
       record: CatalogItemRecord,
       eligibleSources: ReadonlyArray<EligibleSource>,
       version: SourceMediaVersion
@@ -280,7 +306,25 @@ export const makePlaybackLayer = (
       url.searchParams.set("MediaSourceId", version.upstreamMediaSourceId)
       url.searchParams.set("Static", "true")
       return tokenized(url, source)
-    }).pipe(Effect.map(({ resolved }) => resolved))
+    })
+
+    const video = (
+      record: CatalogItemRecord,
+      eligibleSources: ReadonlyArray<EligibleSource>,
+      version: SourceMediaVersion
+    ) => registeredVideo(record, eligibleSources, version).pipe(Effect.map(({ resolved }) => resolved))
+
+    const videoRedirect = (
+      record: CatalogItemRecord,
+      eligibleSources: ReadonlyArray<EligibleSource>,
+      version: SourceMediaVersion
+    ) => registeredVideo(record, eligibleSources, version).pipe(Effect.flatMap(({ source, resolved }) =>
+      upstream.resolvePlaybackRedirect({
+        serverId: source.serverId,
+        generation: source.serverGeneration,
+        url: resolved.href
+      }).pipe(Effect.mapError(() => new PlaybackUnavailable()))
+    ))
 
     const getInfo: PlaybackService["getInfo"] = (canonicalId) => Effect.gen(function*() {
       const { current, eligibleSources } = yield* record(canonicalId, true)
@@ -301,10 +345,10 @@ export const makePlaybackLayer = (
       if (input.mediaSourceId !== undefined) {
         const selected = versions.find(({ id }) => id === input.mediaSourceId)
         if (selected === undefined) return yield* Effect.fail(new PlaybackNotFound())
-        return yield* video(current, eligibleSources, selected)
+        return yield* videoRedirect(current, eligibleSources, selected)
       }
       for (const candidate of versions) {
-        const attempted = yield* Effect.result(video(current, eligibleSources, candidate))
+        const attempted = yield* Effect.result(videoRedirect(current, eligibleSources, candidate))
         if (attempted._tag === "Success") return attempted.success
       }
       return yield* Effect.fail(new PlaybackUnavailable())
@@ -355,6 +399,45 @@ export const makePlaybackLayer = (
             }).pipe(Effect.mapError(() => new ResourceUnavailable()))
           }
         }
+      }
+      for (const item of orderedSourceItems(current, eligibleSources)) {
+        const attempted = yield* Effect.result(sourceRegistration(
+          item,
+          eligibleSources,
+          (source) => tokenized(appendPath(
+            source.baseUrl,
+            `/Items/${encodeURIComponent(item.upstreamItemId)}/Images/${encodeURIComponent(input.imageType)}` +
+              (input.imageIndex === undefined ? "" : `/${input.imageIndex}`)
+          ), source)
+        ))
+        if (attempted._tag === "Failure") continue
+        if (isClientUsableResource({
+          kind: "image",
+          serverId: attempted.success.source.serverId,
+          url: attempted.success.url
+        })) {
+          return { _tag: "Redirect", location: attempted.success.url }
+        }
+        return {
+          _tag: "Proxy",
+          request: {
+            key: `image:${current.canonical.id}:${input.imageType}:` +
+              `${input.imageIndex === undefined ? "default" : input.imageIndex}:${item.id}:` +
+              `${attempted.success.source.serverGeneration}`,
+            kind: "image",
+            serverId: attempted.success.source.serverId,
+            generation: attempted.success.source.serverGeneration,
+            url: attempted.success.url,
+            maxBytes: MAX_IMAGE_BYTES,
+            acceptedMimeTypes: imageMimeTypes,
+            open: () => upstream.requestResource({
+              serverId: attempted.success.source.serverId,
+              generation: attempted.success.source.serverGeneration,
+              url: attempted.success.url,
+              accept: imageMimeTypes
+            }).pipe(Effect.mapError(() => new ResourceUnavailable()))
+          }
+        } as const
       }
       return yield* Effect.fail(new ResourceRejected())
     })

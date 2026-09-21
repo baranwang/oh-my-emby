@@ -178,9 +178,14 @@ const statusFor = (tag: string): number => {
   }
 }
 
-export const publicFailure = (error: { readonly _tag?: string }): HttpServerResponse.HttpServerResponse => {
+export const publicFailure = (
+  error: { readonly _tag?: string },
+  includeDiagnostic = false
+): HttpServerResponse.HttpServerResponse => {
   const tag = error._tag ?? "RepositoryError"
   const serverId = "serverId" in error && typeof error.serverId === "string" ? error.serverId : "unknown"
+  const detail = includeDiagnostic && "detail" in error && typeof error.detail === "string" ? error.detail : undefined
+  const diagnostic = detail === undefined ? {} : { detail }
   const body = tag === "AlreadyInitialized"
     ? { _tag: "Conflict", code: "already_initialized" }
     : tag === "ForbiddenOrigin"
@@ -200,14 +205,14 @@ export const publicFailure = (error: { readonly _tag?: string }): HttpServerResp
       ? "obsolete_generation"
       : "server_limit_exceeded" }
     : tag === "UpstreamRejected"
-    ? { _tag: "UpstreamRejected", serverId, status: "status" in error && typeof error.status === "number" ? error.status : 502 }
+    ? { _tag: "UpstreamRejected", serverId, status: "status" in error && typeof error.status === "number" ? error.status : 502, ...diagnostic }
     : tag === "UpstreamNotFound"
-    ? { _tag: "UpstreamRejected", serverId, status: 404 }
+    ? { _tag: "UpstreamRejected", serverId, status: 404, ...diagnostic }
     : tag === "UpstreamTimeout"
     ? { _tag: "Timeout" }
     : tag === "UpstreamUnavailable" || tag === "DestinationRejected" || tag === "RedirectLimitExceeded" ||
         tag === "RedirectLoop" || tag === "HttpsDowngrade" || tag === "ResponseTooLarge" || tag === "UpstreamInvalidResponse"
-    ? { _tag: "UpstreamUnavailable", serverId }
+    ? { _tag: "UpstreamUnavailable", serverId, ...diagnostic }
     : { _tag: "Internal", requestId: crypto.randomUUID() }
   return HttpServerResponse.jsonUnsafe(body, { status: statusFor(tag) })
 }
@@ -351,7 +356,8 @@ export const makeDashboardControlPlaneLayers = (
       testServerConnection: ({ params, request }) => Effect.gen(function*() {
         const access = yield* authorized(policy, request, auth).pipe(Effect.result)
         if (Result.isFailure(access)) return publicFailure(access.failure)
-        return yield* resultOrFailure(service.testConnection(params.id))
+        const result = yield* service.testConnection(params.id, true).pipe(Effect.result)
+        return Result.isFailure(result) ? publicFailure(result.failure, true) : result.success
       }),
       getServerHealth: ({ params, request }) => Effect.gen(function*() {
         const access = yield* authorized(policy, request, auth).pipe(Effect.result)

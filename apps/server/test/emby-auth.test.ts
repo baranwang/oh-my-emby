@@ -1,4 +1,5 @@
 import { Effect, Layer } from "effect"
+import { configure, reset, type LogRecord } from "@logtape/logtape"
 import { describe, expect, it } from "vitest"
 
 import {
@@ -56,6 +57,105 @@ const json = (path: string, body: unknown, headers: HeadersInit = {}) => new Req
 })
 
 describe("Emby authentication and application routing", () => {
+  it("audits useful Emby query values while redacting credentials and search terms", async () => {
+    const records: Array<LogRecord> = []
+    await configure({
+      reset: true,
+      sinks: { capture: (record) => records.push(record) },
+      loggers: [{ category: ["oh-my-emby"], sinks: ["capture"], lowestLevel: "info" }]
+    })
+    try {
+      const response = await Effect.runPromise(makeEmbyHandler(services())(new Request(
+        "https://local/Users/owner/Items?ParentId=library-1&MediaSourceId=version-a&Static=true" +
+          "&SearchTerm=confidential&api_key=private-key&X-Emby-Token=another-secret",
+        {
+          headers: {
+            authorization: "Bearer very-secret-token",
+            "user-agent": "SenPlayer/3.0 (macOS)"
+          }
+        }
+      )))
+
+      expect(response.status).toBe(200)
+      expect(records).toHaveLength(1)
+      expect(records[0]).toMatchObject({
+        category: ["oh-my-emby", "emby"],
+        level: "info",
+        properties: {
+          method: "GET",
+          path: "/Users/owner/Items",
+          status: 200,
+          userAgent: "SenPlayer/3.0 (macOS)",
+          queryKeys: ["MediaSourceId", "ParentId", "SearchTerm", "Static"],
+          query: {
+            ParentId: ["library-1"],
+            MediaSourceId: ["version-a"],
+            Static: ["true"],
+            SearchTerm: ["[redacted]"],
+            api_key: ["[redacted]"],
+            "X-Emby-Token": ["[redacted]"]
+          },
+          hasParentId: true,
+          hasSensitiveQuery: true
+        }
+      })
+      expect(String(records[0]!.rawMessage)).toContain("{queryKeys}")
+      expect(String(records[0]!.rawMessage)).toContain("{query}")
+      expect(String(records[0]!.rawMessage)).toContain("{userAgent}")
+      expect(String(records[0]!.rawMessage)).toContain("{hasParentId}")
+      expect(JSON.stringify(records[0])).not.toContain("private-key")
+      expect(JSON.stringify(records[0])).not.toContain("another-secret")
+      expect(JSON.stringify(records[0])).not.toContain("very-secret-token")
+      expect(JSON.stringify(records[0])).not.toContain("confidential")
+    } finally {
+      await reset()
+    }
+  })
+
+  it("audits a stream redirect target without exposing its token", async () => {
+    const records: Array<LogRecord> = []
+    await configure({
+      reset: true,
+      sinks: { capture: (record) => records.push(record) },
+      loggers: [{ category: ["oh-my-emby"], sinks: ["capture"], lowestLevel: "info" }]
+    })
+    try {
+      const response = await Effect.runPromise(makeEmbyHandler(services({
+        playback: {
+          getInfo: () => Effect.die("unused"),
+          resolveVideoRedirect: () => Effect.succeed(new URL(
+            "https://upstream.example/emby/Videos/remote-1/stream?Static=true&api_key=upstream-secret"
+          ))
+        }
+      }))(new Request(
+        "https://local/Videos/canonical-1/stream?MediaSourceId=version-a&X-Emby-Token=local-secret",
+        { headers: { authorization: "Bearer local-token" } }
+      )))
+
+      expect(response.status).toBe(302)
+      expect(records).toHaveLength(1)
+      expect(records[0]).toMatchObject({
+        properties: {
+          redirect: {
+            protocol: "https:",
+            origin: "https://upstream.example",
+            path: "/emby/Videos/remote-1/stream",
+            queryKeys: ["Static"],
+            query: {
+              Static: ["true"],
+              api_key: ["[redacted]"]
+            },
+            hasSensitiveQuery: true
+          }
+        }
+      })
+      expect(JSON.stringify(records[0])).not.toContain("upstream-secret")
+      expect(JSON.stringify(records[0])).not.toContain("local-secret")
+    } finally {
+      await reset()
+    }
+  })
+
   it.each(["/System/Info/Public", "/emby/System/Info/Public"])(
     "returns the same public identity for %s",
     async (path) => {
@@ -70,6 +170,44 @@ describe("Emby authentication and application routing", () => {
       })
     }
   )
+
+  it("returns default display preferences for an authenticated Emby user", async () => {
+    const response = await Effect.runPromise(makeEmbyHandler(services())(new Request(
+      "https://local/DisplayPreferences/usersettings?userId=owner&client=emby",
+      { headers: { authorization: "Bearer token" } }
+    )))
+
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toEqual({
+      Id: "usersettings",
+      Client: "emby",
+      RememberIndexing: false,
+      PrimaryImageHeight: 250,
+      PrimaryImageWidth: 250,
+      CustomPrefs: {},
+      ScrollDirection: "Horizontal",
+      ShowBackdrop: true,
+      RememberSorting: false,
+      SortOrder: "Ascending",
+      ShowSidebar: false
+    })
+  })
+
+  it("returns the authenticated user profile for Infuse's post-login check", async () => {
+    const response = await Effect.runPromise(makeEmbyHandler(services())(new Request(
+      "https://local/Users/owner",
+      { headers: { authorization: "Bearer token" } }
+    )))
+
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toMatchObject({
+      Id: "owner",
+      Name: "owner",
+      ServerId: "virtual-server",
+      HasPassword: true,
+      HasConfiguredPassword: true
+    })
+  })
 
   it.each(["/Users/AuthenticateByName", "/emby/Users/AuthenticateByName"])(
     "authenticates a SenPlayer login at %s",
@@ -198,6 +336,8 @@ describe("Emby authentication and application routing", () => {
 
     const dashboard = await request("/api/dashboard/emby/System/Info")
     const emby = await request("/emby/Not/A/Route")
+    const virtualFolders = await request("/Library/VirtualFolders")
+    const displayPreferences = await request("/DisplayPreferences/usersettings?userId=owner&client=emby")
     const unknownApi = await request("/api/not-dashboard")
     const asset = await request("/dashboard/app.js")
     const health = await request("/health")
@@ -205,10 +345,14 @@ describe("Emby authentication and application routing", () => {
     expect(calls).toEqual([
       "dashboard:/api/dashboard/emby/System/Info",
       "emby:/emby/Not/A/Route",
+      "emby:/Library/VirtualFolders",
+      "emby:/DisplayPreferences/usersettings",
       "asset:/dashboard/app.js"
     ])
     expect(dashboard.headers.get("content-type")).toContain("application/json")
     expect(emby.headers.get("content-type")).toContain("application/json")
+    expect(virtualFolders.headers.get("content-type")).toContain("application/json")
+    expect(displayPreferences.headers.get("content-type")).toContain("application/json")
     expect(unknownApi.status).toBe(404)
     expect(unknownApi.headers.get("content-type")).toContain("application/json")
     expect(asset.headers.get("content-type")).toContain("text/html")
