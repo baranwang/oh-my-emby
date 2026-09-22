@@ -1,7 +1,18 @@
 import type { ServerView } from "@oh-my-emby/contracts"
 import { Link } from "@tanstack/react-router"
+import { ArrowRightIcon, PlusIcon } from "lucide-react"
 
+import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import {
+  Card,
+  CardAction,
+  CardContent,
+  CardDescription,
+  CardFooter,
+  CardHeader,
+  CardTitle
+} from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/skeleton"
 import { m } from "@/paraglide/messages.js"
 
@@ -16,12 +27,16 @@ const healthLabel = (health: ServerView["health"]) => health === "healthy"
   ? m.status_healthy()
   : health === "degraded" ? m.status_degraded() : m.status_unknown()
 
+const policyLabel = (policy: ServerView["userAgentPolicy"]) => policy === "fixed"
+  ? m.server_user_agent_fixed()
+  : policy === "client-preferred" ? m.server_user_agent_client_preferred() : m.server_user_agent_passthrough()
+
 export const ServerList = ({ state, servers, onRetry, onCreate }: ServerListProps) => {
   if (state === "pending") {
     return (
-      <div aria-label={m.servers_loading()} className="space-y-3">
-        <Skeleton className="h-24 w-full" />
-        <Skeleton className="h-24 w-full" />
+      <div aria-label={m.servers_loading()} className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+        <Skeleton className="h-52 w-full" />
+        <Skeleton className="h-52 w-full" />
       </div>
     )
   }
@@ -35,36 +50,65 @@ export const ServerList = ({ state, servers, onRetry, onCreate }: ServerListProp
     )
   }
 
-  if (servers.length === 0) {
-    return (
-      <div className="space-y-3 rounded-lg border border-dashed p-6">
-        <p className="text-sm text-muted-foreground">{m.servers_empty()}</p>
-        <Button type="button" onClick={onCreate}>{m.add_server()}</Button>
-      </div>
-    )
-  }
-
   return (
-    <ul className="grid gap-3 md:grid-cols-2">
+    <ul className="grid auto-rows-fr items-stretch gap-4 md:grid-cols-2 xl:grid-cols-3">
       {servers.map((server) => (
-        <li key={server.id} className="rounded-lg border bg-card p-4 text-card-foreground">
-          <Link
-            className="block rounded-md outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            to="/servers/$id"
-            params={{ id: server.id }}
-          >
-            <div className="flex items-start justify-between gap-4">
-              <div className="min-w-0">
-                <h2 className="truncate font-medium">{server.name}</h2>
-                <p className="truncate text-sm text-muted-foreground">{server.baseUrl}</p>
+        <li key={server.id}>
+          <Card className="h-full min-h-52">
+            <CardHeader>
+              <CardTitle><span className="block truncate">{server.name}</span></CardTitle>
+              <CardDescription><span className="block truncate">{server.endpoints[0]?.displayUrl}</span></CardDescription>
+              <CardAction>
+                <Badge variant={server.health === "healthy" ? "secondary" : server.health === "degraded" ? "destructive" : "outline"}>
+                  {healthLabel(server.health)}
+                </Badge>
+              </CardAction>
+            </CardHeader>
+            <CardContent className="mt-auto">
+              <dl className="space-y-2 text-sm">
+                <div className="flex items-center justify-between gap-4">
+                  <dt className="text-muted-foreground">{m.server_endpoints()}</dt>
+                  <dd>{m.server_endpoint_count({ count: server.endpoints.length })}</dd>
+                </div>
+                <div className="flex items-center justify-between gap-4">
+                  <dt className="text-muted-foreground">{m.server_catalog()}</dt>
+                  <dd className="max-w-44 truncate">{server.verifiedCatalogId ?? m.server_catalog_unverified()}</dd>
+                </div>
+              </dl>
+            </CardContent>
+            <CardFooter>
+              <div className="flex w-full items-center justify-between gap-3">
+                <span className="min-w-0 truncate text-xs text-muted-foreground">
+                  {server.username} · {policyLabel(server.userAgentPolicy)}
+                </span>
+                <Button
+                  nativeButton={false}
+                  render={<Link to="/servers/$id" params={{ id: server.id }} />}
+                  size="sm"
+                  variant="outline"
+                >
+                  {m.server_edit_title()}
+                  <ArrowRightIcon />
+                </Button>
               </div>
-              <span className="shrink-0 rounded-md bg-muted px-2 py-1 text-xs">
-                {healthLabel(server.health)}
-              </span>
-            </div>
-          </Link>
+            </CardFooter>
+          </Card>
         </li>
       ))}
+      <li>
+        <Button
+          type="button"
+          variant="outline"
+          className="h-full min-h-52 w-full flex-col whitespace-normal"
+          onClick={onCreate}
+        >
+          <PlusIcon />
+          <span>{m.add_server()}</span>
+          {servers.length === 0 && (
+            <span className="max-w-xs text-balance text-xs font-normal text-muted-foreground">{m.servers_empty()}</span>
+          )}
+        </Button>
+      </li>
     </ul>
   )
 }

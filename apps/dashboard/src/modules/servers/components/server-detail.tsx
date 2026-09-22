@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react"
 import type { ServerHealthView, SourceLibraryView } from "@oh-my-emby/contracts"
-import { useNavigate } from "@tanstack/react-router"
 
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -20,6 +19,9 @@ const STALE_HEALTH_MS = 60_000
 const healthLabel = (health: ServerHealthView["health"]) => health === "healthy"
   ? m.status_healthy()
   : health === "degraded" ? m.status_degraded() : m.status_unknown()
+
+const isNotFound = (error: unknown) =>
+  typeof error === "object" && error !== null && "_tag" in error && error._tag === "NotFound"
 
 export const ServerHealthStatus = ({
   health,
@@ -79,8 +81,13 @@ const SourceLibraries = ({ sources }: { readonly sources: ReadonlyArray<SourceLi
   </section>
 )
 
-export const ServerDetailPage = ({ id }: { readonly id: Parameters<typeof useServer>[0] }) => {
-  const navigate = useNavigate()
+export const ServerDetailPage = ({
+  id,
+  onClose
+}: {
+  readonly id: Parameters<typeof useServer>[0]
+  readonly onClose?: () => void
+}) => {
   const server = useServer(id)
   const health = useServerHealth(id)
   const update = useUpdateServer(id)
@@ -90,11 +97,22 @@ export const ServerDetailPage = ({ id }: { readonly id: Parameters<typeof useSer
   const sources = useServerLibraries(id, eligible)
 
   if (server.isPending) {
-    return <div aria-label={m.loading()} className="max-w-3xl space-y-4"><Skeleton className="h-10 w-52" /><Skeleton className="h-96 w-full" /></div>
+    return <div aria-label={m.loading()} className="space-y-4"><Skeleton className="h-10 w-52" /><Skeleton className="h-96 w-full" /></div>
   }
   if (server.isError || !server.data) {
+    if (isNotFound(server.error)) {
+      return (
+        <div role="alert" className="space-y-4 rounded-lg border border-destructive/40 p-4">
+          <div>
+            <h2 className="font-medium text-destructive">{m.server_not_found_title()}</h2>
+            <p className="mt-1 text-sm text-muted-foreground">{m.server_not_found_description()}</p>
+          </div>
+          {onClose && <Button variant="outline" onClick={onClose}>{m.server_back_to_list()}</Button>}
+        </div>
+      )
+    }
     return (
-      <div role="alert" className="max-w-3xl space-y-3 rounded-lg border border-destructive/40 p-4">
+      <div role="alert" className="space-y-3 rounded-lg border border-destructive/40 p-4">
         <p className="text-sm text-destructive">{m.servers_load_failed()}</p>
         <Button variant="outline" onClick={() => void server.refetch()}>{m.retry()}</Button>
       </div>
@@ -102,13 +120,10 @@ export const ServerDetailPage = ({ id }: { readonly id: Parameters<typeof useSer
   }
 
   return (
-    <div className="max-w-3xl space-y-8">
-      <header className="space-y-2">
-        <h1 className="font-heading text-2xl font-medium">{server.data.name}</h1>
-        <p className="text-sm text-muted-foreground">
-          {m.server_catalog()}: {server.data.verifiedCatalogId ?? m.server_catalog_unverified()}
-        </p>
-      </header>
+    <div className="space-y-8">
+      <p className="text-sm text-muted-foreground">
+        {m.server_catalog()}: {server.data.verifiedCatalogId ?? m.server_catalog_unverified()}
+      </p>
       {health.isPending ? (
         <Skeleton aria-label={m.server_health_loading()} className="h-28 w-full" />
       ) : health.isError || !health.data ? (
@@ -117,14 +132,15 @@ export const ServerDetailPage = ({ id }: { readonly id: Parameters<typeof useSer
           <Button variant="outline" onClick={() => void health.refetch()}>{m.retry()}</Button>
         </div>
       ) : <ServerHealthStatus health={health.data} />}
-      <section className="space-y-4 rounded-lg border p-5" aria-labelledby="server-edit-title">
-        <h2 id="server-edit-title" className="font-heading text-xl font-medium">{m.server_edit_title()}</h2>
-        <ServerForm
-          server={server.data}
-          onSave={(input) => update.mutateAsync(input).then(() => undefined)}
-          onTestConnection={() => connection.mutateAsync()}
-        />
-      </section>
+      <ServerForm
+        server={server.data}
+        {...(onClose ? { onCancel: onClose } : {})}
+        onSave={async (input) => {
+          await update.mutateAsync(input)
+          onClose?.()
+        }}
+        onTestConnection={() => connection.mutateAsync()}
+      />
       {!eligible ? (
         <p className="rounded-lg border p-4 text-sm text-muted-foreground">{m.source_libraries_unavailable()}</p>
       ) : sources.isPending ? (
@@ -143,7 +159,7 @@ export const ServerDetailPage = ({ id }: { readonly id: Parameters<typeof useSer
             if (!window.confirm(m.server_delete_confirm())) return
             try {
               await remove.mutateAsync()
-              await navigate({ to: "/servers", search: { new: false } })
+              onClose?.()
             } catch {
               // Mutation state renders the localized failure below.
             }

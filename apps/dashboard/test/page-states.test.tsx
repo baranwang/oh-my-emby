@@ -38,7 +38,6 @@ import { m } from "../src/paraglide/messages.js"
 const server = {
   id: "server-1",
   name: "Home",
-  baseUrl: "https://emby.example.com",
   endpoints: [{
     id: "endpoint-1",
     protocol: "https",

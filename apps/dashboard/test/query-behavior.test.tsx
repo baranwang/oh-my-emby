@@ -20,17 +20,33 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true
 
 const input = {
   name: "Home",
-  baseUrl: "https://emby.example.com",
+  endpoints: [{ protocol: "https", host: "emby.example.com", port: null, path: "" }],
   username: "alice",
   password: { _tag: "Preserve" },
+  userAgentPolicy: "fixed",
   userAgent: "SenPlayer/1",
   enabled: true
 } as ServerInput
 
 const server = {
   id: "server-1",
-  ...input,
+  name: input.name,
+  endpoints: [{
+    id: "endpoint-1",
+    protocol: "https",
+    host: "emby.example.com",
+    port: null,
+    path: "",
+    displayUrl: "https://emby.example.com/",
+    verifiedCatalogId: "catalog-1",
+    health: "healthy",
+    lastSuccessAtMs: 1
+  }],
+  username: input.username,
   hasPassword: true,
+  userAgentPolicy: input.userAgentPolicy,
+  userAgent: input.userAgent,
+  enabled: input.enabled,
   verifiedCatalogId: "catalog-1",
   generation: 2,
   health: "healthy"
@@ -54,7 +70,7 @@ describe("server query behavior", () => {
     expect(queryKeys.serverLibraries("server-1")).toEqual(["servers", "server-1", "libraries"])
   })
 
-  it("invalidates only the saved server family without optimistic cache writes", async () => {
+  it("invalidates the saved server and every existing Overview constituent without optimistic writes", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => json(server)))
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     const invalidate = vi.spyOn(queryClient, "invalidateQueries").mockResolvedValue()
@@ -62,9 +78,13 @@ describe("server query behavior", () => {
 
     await updateServer("server-1", input, queryClient)
 
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: queryKeys.server("server-1") })
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: queryKeys.servers })
-    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: queryKeys.libraries })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: queryKeys.server("server-1"), exact: true })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: queryKeys.servers, exact: true })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: queryKeys.serverHealth("server-1"), exact: true })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: queryKeys.serverLibraries("server-1"), exact: true })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: queryKeys.libraries, exact: true })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: queryKeys.system, exact: true })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: queryKeys.outboxFailures, exact: true })
     expect(write).not.toHaveBeenCalled()
   })
 
@@ -125,18 +145,27 @@ describe("server query behavior", () => {
   })
 
   it("refreshes the server family after a successful connection test", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => json({ reachable: true, catalogId: "catalog-1" })))
+    vi.stubGlobal("fetch", vi.fn(async () => json({
+      reachable: true,
+      catalogId: "catalog-1",
+      endpoints: [{
+        endpointId: "endpoint-1",
+        reachable: true,
+        catalogId: "catalog-1",
+        health: "healthy"
+      }]
+    })))
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     const invalidate = vi.spyOn(queryClient, "invalidateQueries").mockResolvedValue()
 
     await testServerConnection("server-1", queryClient)
 
-    expect(invalidate).toHaveBeenCalledTimes(2)
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: queryKeys.server("server-1") })
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: queryKeys.servers })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: queryKeys.server("server-1"), exact: true })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: queryKeys.servers, exact: true })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: queryKeys.serverHealth("server-1"), exact: true })
   })
 
-  it("invalidates only the created server list without optimistic writes", async () => {
+  it("invalidates the list and Overview constituents after creating a server", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => json(server)))
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     const invalidate = vi.spyOn(queryClient, "invalidateQueries").mockResolvedValue()
@@ -144,8 +173,10 @@ describe("server query behavior", () => {
 
     await createServer({ ...input, password: { _tag: "Set", value: "secret" } }, queryClient)
 
-    expect(invalidate).toHaveBeenCalledOnce()
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: queryKeys.servers })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: queryKeys.servers, exact: true })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: queryKeys.libraries, exact: true })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: queryKeys.system, exact: true })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: queryKeys.outboxFailures, exact: true })
     expect(write).not.toHaveBeenCalled()
   })
 })
