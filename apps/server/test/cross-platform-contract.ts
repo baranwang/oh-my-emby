@@ -1,4 +1,4 @@
-import { Effect, Layer } from "effect"
+import { Effect, Layer, Schema } from "effect"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import { UpstreamUnavailable } from "../src/core/errors.js"
@@ -7,7 +7,7 @@ import { makeIdentityLayer } from "../src/core/identity.js"
 import { MetadataProviders } from "../src/core/metadata-providers.js"
 import type { UpstreamServer } from "../src/core/model.js"
 import { Repositories, type RepositoriesService } from "../src/core/repositories.js"
-import { UpstreamClient } from "../src/core/upstream-client.js"
+import { makeUpstreamClientLayer, UpstreamClient } from "../src/core/upstream-client.js"
 
 export interface AcceptanceApp {
   readonly publicOrigin: string
@@ -33,6 +33,7 @@ const serverFixture = (index: number): UpstreamServer => ({
   verifiedBaseUrl: `https://server-${index}.example.com`,
   generation: 1,
   name: `Server ${index}`,
+  baseUrl: `https://server-${index}.example.com/` as any,
   endpoints: [{
     id: `server-${index}:endpoint`,
     protocol: "https",
@@ -80,7 +81,8 @@ const upstreamItem = (serverId: string) => ({
   Id: `${serverId}-movie`,
   Type: "Movie",
   Name: serverId === "server-0" ? "Zulu" : "Alpha",
-  ProviderIds: { Tmdb: "10" },
+  Overview: "Upstream overview",
+  ProviderIds: { Imdb: "tt10", Tmdb: "10" },
   MediaSources: [{
     Id: `${serverId}-media`,
     Name: `${serverId} version`,
@@ -95,8 +97,14 @@ const upstreamItem = (serverId: string) => ({
 export const acceptanceUpstreamFetch: typeof fetch = async (input, init) => {
   const request = new Request(input, init)
   const url = new URL(request.url)
-  if (url.origin === "https://setup.example.com" &&
-    url.pathname === "/Users/AuthenticateByName" && request.method === "POST") {
+  if (url.hostname === "api.themoviedb.org") {
+    return new Response("Unavailable", { status: 503 })
+  }
+  if (url.hostname === "api.trakt.tv") {
+    return Response.json({ title: "Trakt title", ids: { imdb: "tt10" } })
+  }
+  if (["setup.example.com", "primary.example.com", "secondary.example.com"].includes(url.hostname) &&
+    url.pathname.endsWith("/Users/AuthenticateByName") && request.method === "POST") {
     return Response.json({
       AccessToken: "setup-access-token",
       ServerId: "setup-catalog-id",
@@ -284,6 +292,176 @@ export const crossPlatformAcceptance = (
     publicBodies.push(await deepLink.clone().text())
     expect(deepLink.status).toBe(200)
     expect(publicBodies.join("\n")).not.toContain("upstream-password")
+  })
+
+  it("aligns ordered endpoints, User-Agent policy, and metadata fallback without exposing secrets", async () => {
+    const cookie = await claimOwner(app)
+    const secretValues = ["upstream-password", "tmdb-secret", "trakt-secret"]
+    const created = await app.request("/api/dashboard/servers", {
+      method: "POST",
+      headers: { ...jsonHeaders(app.publicOrigin), cookie },
+      body: JSON.stringify({
+        name: "Acceptance server",
+        endpoints: [
+          { protocol: "https", host: "primary.example.com", port: null, path: "" },
+          { protocol: "https", host: "secondary.example.com", port: null, path: "/emby" }
+        ],
+        username: "upstream-user",
+        password: { _tag: "Set", value: secretValues[0] },
+        userAgentPolicy: "fixed",
+        userAgent: "Fixed/1",
+        enabled: true
+      })
+    })
+    expect(created.status).toBe(200)
+    const createdBody = await created.clone().text()
+    let server = await created.json() as {
+      id: string
+      generation: number
+      endpoints: ReadonlyArray<{
+        id: string
+        protocol: "http" | "https"
+        host: string
+        port: number | null
+        path: string
+      }>
+    }
+    expect(server.endpoints.map(({ host, path }) => ({ host, path }))).toEqual([
+      { host: "primary.example.com", path: "" },
+      { host: "secondary.example.com", path: "/emby" }
+    ])
+
+    const verified = await app.request(`/api/dashboard/servers/${server.id}/test`, {
+      method: "POST",
+      headers: { origin: app.publicOrigin, cookie }
+    })
+    expect(verified.status).toBe(200)
+    await expect(verified.json()).resolves.toMatchObject({
+      reachable: true,
+      catalogId: "setup-catalog-id",
+      endpoints: [
+        { reachable: true, catalogId: "setup-catalog-id", health: "healthy" },
+        { reachable: true, catalogId: "setup-catalog-id", health: "healthy" }
+      ]
+    })
+
+    const requests: Array<{ host: string; userAgent: string | null }> = []
+    const upstreamFetch: typeof fetch = async (input, init) => {
+      const request = new Request(input, init)
+      const url = new URL(request.url)
+      requests.push({ host: url.host, userAgent: request.headers.get("user-agent") })
+      return url.hostname === "primary.example.com"
+        ? new Response("Unavailable", { status: 503 })
+        : Response.json({ Items: [], TotalRecordCount: 0 })
+    }
+    const upstream = makeUpstreamClientLayer({
+      fetch: upstreamFetch,
+      destinationPolicy: { platform: name === "workers" ? "workers" : "docker" }
+    }).pipe(Layer.provide(app.repositories))
+    const requestItems = (clientUserAgent?: string) => Effect.runPromise(Effect.gen(function*() {
+      return yield* (yield* UpstreamClient).request({
+        serverId: server.id,
+        generation: server.generation,
+        path: "/Items",
+        method: "GET",
+        ...(clientUserAgent === undefined ? {} : { clientUserAgent })
+      }, Schema.Unknown)
+    }).pipe(Effect.provide(upstream)))
+    const updatePolicy = async (
+      userAgentPolicy: "fixed" | "client-preferred" | "passthrough",
+      userAgent: string | null
+    ) => {
+      const response = await app.request(`/api/dashboard/servers/${server.id}`, {
+        method: "PUT",
+        headers: { ...jsonHeaders(app.publicOrigin), cookie },
+        body: JSON.stringify({
+          name: "Acceptance server",
+          endpoints: server.endpoints,
+          username: "upstream-user",
+          password: { _tag: "Preserve" },
+          userAgentPolicy,
+          userAgent,
+          enabled: true
+        })
+      })
+      expect(response.status).toBe(200)
+      server = await response.json() as typeof server
+    }
+    const expectUserAgents = async (client: string, background: string) => {
+      const start = requests.length
+      await requestItems("SenPlayer/9")
+      await requestItems()
+      expect(requests.slice(start)).toEqual([
+        { host: "primary.example.com", userAgent: client },
+        { host: "secondary.example.com", userAgent: client },
+        { host: "primary.example.com", userAgent: background },
+        { host: "secondary.example.com", userAgent: background }
+      ])
+    }
+
+    await expectUserAgents("Fixed/1", "Fixed/1")
+    await updatePolicy("client-preferred", "Preferred/1")
+    await expectUserAgents("SenPlayer/9", "Preferred/1")
+    await updatePolicy("passthrough", null)
+    await expectUserAgents("SenPlayer/9", "oh-my-emby/0.0.0")
+
+    const savedSettings = await app.request("/api/dashboard/metadata-settings", {
+      method: "PUT",
+      headers: { ...jsonHeaders(app.publicOrigin), cookie },
+      body: JSON.stringify({ providers: [
+        { id: "tmdb", enabled: true, order: 0, language: "en-US", credential: { _tag: "Set", value: secretValues[1] } },
+        { id: "trakt", enabled: true, order: 1, language: null, credential: { _tag: "Set", value: secretValues[2] } }
+      ] })
+    })
+    expect(savedSettings.status).toBe(200)
+    const savedSettingsBody = await savedSettings.clone().text()
+    expect(await savedSettings.clone().json()).toEqual({ providers: [
+      { id: "tmdb", enabled: true, order: 0, language: "en-US", hasCredential: true, status: "ready" },
+      { id: "trakt", enabled: true, order: 1, language: null, hasCredential: true, status: "ready" }
+    ] })
+
+    const reorderedSettings = await app.request("/api/dashboard/metadata-settings", {
+      method: "PUT",
+      headers: { ...jsonHeaders(app.publicOrigin), cookie },
+      body: JSON.stringify({ providers: [
+        { id: "trakt", enabled: true, order: 0, language: null, credential: { _tag: "Preserve" } },
+        { id: "tmdb", enabled: true, order: 1, language: "en-US", credential: { _tag: "Preserve" } }
+      ] })
+    })
+    expect(reorderedSettings.status).toBe(200)
+    const reorderedSettingsBody = await reorderedSettings.clone().text()
+    expect(await reorderedSettings.clone().json()).toEqual({ providers: [
+      { id: "trakt", enabled: true, order: 0, language: null, hasCredential: true, status: "ready" },
+      { id: "tmdb", enabled: true, order: 1, language: "en-US", hasCredential: true, status: "ready" }
+    ] })
+
+    const federation = await prepareFederation(app)
+    const accessToken = await loginEmby(app)
+    const detail = await app.request(`/Items/${federation.page.items[0]!.id}`, {
+      headers: { authorization: `Bearer ${accessToken}`, "user-agent": "SenPlayer/9" }
+    })
+    expect(detail.status).toBe(200)
+    await expect(detail.json()).resolves.toMatchObject({
+      Name: "Trakt title",
+      Overview: "Upstream overview"
+    })
+
+    const publicSettings = await app.request("/api/dashboard/metadata-settings", { headers: { cookie } })
+    const publicServers = await app.request("/api/dashboard/servers", { headers: { cookie } })
+    expect(publicSettings.status).toBe(200)
+    expect(publicServers.status).toBe(200)
+    await expect(publicSettings.clone().json()).resolves.toEqual({ providers: [
+      { id: "trakt", enabled: true, order: 0, language: null, hasCredential: true, status: "ready" },
+      { id: "tmdb", enabled: true, order: 1, language: "en-US", hasCredential: true, status: "degraded" }
+    ] })
+    const publicBodies = [
+      createdBody,
+      savedSettingsBody,
+      reorderedSettingsBody,
+      await publicSettings.text(),
+      await publicServers.text()
+    ].join("\n")
+    for (const secret of secretValues) expect(publicBodies).not.toContain(secret)
   })
 
   it("preserves repository encoding, source order, and applied migrations", async () => {

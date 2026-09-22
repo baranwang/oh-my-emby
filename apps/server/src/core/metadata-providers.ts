@@ -255,7 +255,7 @@ export const makeMetadataProvidersLayer = (
       request: Request
     ): Effect.Effect<{ readonly found: boolean; readonly value: unknown }, MetadataProviderFailure> => Effect.gen(function*() {
       const response = yield* Effect.tryPromise({
-        try: (signal) => config.fetch(new Request(request, { signal, redirect: "error" })),
+        try: (signal) => config.fetch(new Request(request, { signal, redirect: "manual" })),
         catch: () => providerFailure(setting.id, "unavailable")
       })
       if (response.status === 404) return { found: false, value: null }
