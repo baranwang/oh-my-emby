@@ -13,6 +13,7 @@ import * as HttpApiClient from "effect/unstable/httpapi/HttpApiClient"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import { runMaintenance, ResourceCache } from "../src/core/maintenance.js"
+import { makeMetadataSettingsLayer } from "../src/core/metadata-settings.js"
 import { Outbox, makeOutboxLayer } from "../src/core/outbox.js"
 import { Repositories } from "../src/core/repositories.js"
 import { UserState, makeUserStateLayer } from "../src/core/user-state.js"
@@ -228,10 +229,13 @@ describe("bounded maintenance", () => {
         'upstream_rejected_401', 95000, 1, 95000)
     `))
     const auth = makeAuthLayer({ now: () => nowMs }).pipe(Layer.provide(harness.repositories))
+    const metadataSettings = makeMetadataSettingsLayer.pipe(Layer.provide(harness.repositories))
     const config = { publicOrigin, trustedProxyAddresses: [] }
     const handlers = Layer.merge(
       makeDashboardAuthLayers(config).pipe(Layer.provide(auth)),
-      makeDashboardSystemLayer(config).pipe(Layer.provide(Layer.merge(auth, harness.repositories)))
+      makeDashboardSystemLayer(config).pipe(
+        Layer.provide(Layer.mergeAll(auth, harness.repositories, metadataSettings))
+      )
     )
     const apiLayer = Layer.mergeAll(handlers, placeholderGroups, HttpServer.layerServices)
     const requestHeaders: Record<string, string> = { origin: publicOrigin }

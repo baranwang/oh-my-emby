@@ -21,6 +21,7 @@ import { Federation, makeFederationLayer } from "../../core/federation.js"
 import { makeIdentityLayer } from "../../core/identity.js"
 import { LibraryService, makeLibraryServiceLayer } from "../../core/library-service.js"
 import { ResourceCache, runMaintenance } from "../../core/maintenance.js"
+import { makeMetadataSettingsLayer } from "../../core/metadata-settings.js"
 import { makeOutboxLayer } from "../../core/outbox.js"
 import { Playback, makePlaybackLayer } from "../../core/playback.js"
 import { Repositories } from "../../core/repositories.js"
@@ -109,6 +110,7 @@ const makeBunCoreLayer = (config: BunRuntimeConfig) => {
   const userState = makeUserStateLayer().pipe(Layer.provide(repositories))
   const serverService = makeServerServiceLayer.pipe(Layer.provide(foundation))
   const libraryService = makeLibraryServiceLayer.pipe(Layer.provide(foundation))
+  const metadataSettings = makeMetadataSettingsLayer.pipe(Layer.provide(repositories))
   const playback = makePlaybackLayer({
     isClientUsableResource: ({ kind }) => kind === "image"
   }).pipe(Layer.provide(Layer.merge(foundation, federation)))
@@ -120,6 +122,7 @@ const makeBunCoreLayer = (config: BunRuntimeConfig) => {
     userState,
     serverService,
     libraryService,
+    metadataSettings,
     playback,
     outbox
   )

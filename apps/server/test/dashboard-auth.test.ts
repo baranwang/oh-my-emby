@@ -23,9 +23,11 @@ import {
   guardDashboardRequest,
   makeDashboardAuthLayers,
   makeDashboardRequestPolicy,
+  makeDashboardSystemLayer,
   publicFailure
 } from "../src/api/dashboard.js"
 import { makeAuthLayer } from "../src/core/auth.js"
+import { makeMetadataSettingsLayer } from "../src/core/metadata-settings.js"
 import { makeSqliteRepositoriesLayer } from "../src/platform/bun/sqlite-repositories.js"
 
 const publicOrigin = "https://dashboard.example.com"
@@ -35,7 +37,7 @@ const migration = await Bun.file(new URL("../migrations/0001_initial.sql", impor
 const placeholderGroups = Layer.effectContext(Effect.gen(function*() {
   const services = yield* Effect.context<any>()
   let context = Context.empty()
-  for (const identifier of ["servers", "libraries", "system"] as const) {
+  for (const identifier of ["servers", "libraries"] as const) {
     const group = DashboardApi.groups[identifier] as any
     const handlers = new Map<string, any>()
     const routes: Array<any> = []
@@ -55,7 +57,10 @@ const placeholderGroups = Layer.effectContext(Effect.gen(function*() {
   return context
 }))
 
-const makeClient = (headers: () => Readonly<Record<string, string>>) => Effect.gen(function*() {
+const makeClient = (
+  headers: () => Readonly<Record<string, string>>,
+  baseUrl = publicOrigin
+) => Effect.gen(function*() {
   const handler = yield* HttpRouter.toHttpEffect(HttpApiBuilder.layer(DashboardApi))
   const localClient = HttpClient.make((request) => {
     const serverRequest = HttpServerRequest.fromClientRequest(request)
@@ -65,7 +70,7 @@ const makeClient = (headers: () => Readonly<Record<string, string>>) => Effect.g
       Effect.map((response) => HttpServerResponse.toClientResponse(response, { request }))
     )
   }).pipe(HttpClient.mapRequest((request) => HttpClientRequest.setHeaders(request, headers())))
-  return yield* HttpApiClient.makeWith(DashboardApi, { httpClient: localClient, baseUrl: publicOrigin })
+  return yield* HttpApiClient.makeWith(DashboardApi, { httpClient: localClient, baseUrl })
 })
 
 describe("Dashboard authentication boundary", () => {
@@ -81,10 +86,17 @@ describe("Dashboard authentication boundary", () => {
     database.close()
     const repositories = makeSqliteRepositoriesLayer({ filename })
     const auth = makeAuthLayer().pipe(Layer.provide(repositories))
-    const handlers = makeDashboardAuthLayers({
+    const metadataSettings = makeMetadataSettingsLayer.pipe(Layer.provide(repositories))
+    const config = {
       publicOrigin,
       trustedProxyAddresses: []
-    }).pipe(Layer.provide(auth))
+    }
+    const handlers = Layer.merge(
+      makeDashboardAuthLayers(config).pipe(Layer.provide(auth)),
+      makeDashboardSystemLayer(config).pipe(
+        Layer.provide(Layer.mergeAll(repositories, auth, metadataSettings))
+      )
+    )
     layer = Layer.mergeAll(handlers, placeholderGroups, HttpServer.layerServices)
   })
 
@@ -94,9 +106,10 @@ describe("Dashboard authentication boundary", () => {
 
   const withClient = <A>(
     headers: () => Readonly<Record<string, string>>,
-    use: (client: HttpApiClient.Client<any>) => Effect.Effect<A, any, any>
+    use: (client: HttpApiClient.Client<any>) => Effect.Effect<A, any, any>,
+    baseUrl = publicOrigin
   ) => Effect.runPromise(Effect.scoped(Effect.gen(function*() {
-    const client = yield* makeClient(headers)
+    const client = yield* makeClient(headers, baseUrl)
     return yield* use(client)
   })).pipe(Effect.provide(layer)))
 
@@ -224,6 +237,71 @@ describe("Dashboard authentication boundary", () => {
       expect(Object.keys(result.failure).sort()).toEqual(["_tag", "requestId"])
       expect(JSON.stringify(result.failure)).not.toContain(credentials.password)
       expect(JSON.stringify(result.failure)).not.toContain("auth_rate_limits")
+    }))
+  })
+
+  it("authenticates and origin-checks both metadata settings routes", async () => {
+    const requestHeaders: Record<string, string> = { origin: publicOrigin }
+    await withClient(() => requestHeaders, (client) => Effect.gen(function*() {
+      const unauthenticatedGet = yield* client.system.getMetadataSettings().pipe(Effect.result)
+      expect(Result.isFailure(unauthenticatedGet) && unauthenticatedGet.failure).toEqual({ _tag: "Unauthorized" })
+      const unauthenticatedPut = yield* client.system.updateMetadataSettings({ payload: {
+        providers: [
+          { id: "tmdb", enabled: false, order: 0, language: null, credential: { _tag: "Preserve" } },
+          { id: "trakt", enabled: false, order: 1, language: null, credential: { _tag: "Preserve" } }
+        ]
+      } }).pipe(Effect.result)
+      expect(Result.isFailure(unauthenticatedPut) && unauthenticatedPut.failure).toEqual({ _tag: "Unauthorized" })
+
+      const [, response] = yield* client.auth.claim({
+        payload: credentials,
+        responseMode: "decoded-and-response"
+      })
+      requestHeaders.cookie = Cookies.toCookieHeader(response.cookies)
+      expect((yield* client.system.getMetadataSettings()).providers.map(({ id }) => id)).toEqual(["tmdb", "trakt"])
+
+      requestHeaders.origin = "https://evil.example.com"
+      const forbiddenPut = yield* client.system.updateMetadataSettings({ payload: {
+        providers: [
+          { id: "tmdb", enabled: true, order: 0, language: "zh-CN", credential: { _tag: "Set", value: "secret-token" } },
+          { id: "trakt", enabled: false, order: 1, language: null, credential: { _tag: "Preserve" } }
+        ]
+      } }).pipe(Effect.result)
+      expect(Result.isFailure(forbiddenPut) && forbiddenPut.failure).toEqual({ _tag: "ForbiddenOrigin" })
+    }))
+
+    await withClient(
+      () => ({ origin: "https://evil.example.com", cookie: requestHeaders.cookie! }),
+      (client) => Effect.gen(function*() {
+        const forbiddenGet = yield* client.system.getMetadataSettings().pipe(Effect.result)
+        expect(Result.isFailure(forbiddenGet)).toBe(true)
+        if (Result.isSuccess(forbiddenGet)) return
+        expect((forbiddenGet.failure as any)._tag).toBe("HttpClientError")
+        expect((forbiddenGet.failure as any).reason.response.status).toBe(403)
+      }),
+      "https://evil.example.com"
+    )
+  })
+
+  it("returns only hasCredential after updating metadata settings", async () => {
+    const requestHeaders: Record<string, string> = { origin: publicOrigin }
+    await withClient(() => requestHeaders, (client) => Effect.gen(function*() {
+      const [, response] = yield* client.auth.claim({
+        payload: credentials,
+        responseMode: "decoded-and-response"
+      })
+      requestHeaders.cookie = Cookies.toCookieHeader(response.cookies)
+      const updated = yield* client.system.updateMetadataSettings({ payload: { providers: [
+        { id: "trakt", enabled: true, order: 0, language: null, credential: { _tag: "Set", value: "trakt-client" } },
+        { id: "tmdb", enabled: true, order: 1, language: "zh-CN", credential: { _tag: "Set", value: "tmdb-token" } }
+      ] } })
+      expect(updated.providers.map(({ id, hasCredential, status }) => ({ id, hasCredential, status }))).toEqual([
+        { id: "trakt", hasCredential: true, status: "ready" },
+        { id: "tmdb", hasCredential: true, status: "ready" }
+      ])
+      expect(JSON.stringify(updated)).not.toContain("trakt-client")
+      expect(JSON.stringify(updated)).not.toContain("tmdb-token")
+      expect(JSON.stringify(updated)).not.toContain("credential")
     }))
   })
 

@@ -10,6 +10,7 @@ import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder"
 import { Auth, type AuthService, type DashboardSession } from "../core/auth.js"
 import { InvalidCredentials } from "../core/errors.js"
 import { LibraryService } from "../core/library-service.js"
+import { MetadataSettings } from "../core/metadata-settings.js"
 import { Repositories } from "../core/repositories.js"
 import { ServerService } from "../core/server-service.js"
 
@@ -416,6 +417,7 @@ export const makeDashboardSystemLayer = (
   const policy = makeDashboardRequestPolicy(config)
   return HttpApiBuilder.group(DashboardApi, "system", (handlers) => Effect.gen(function*() {
     const auth = yield* Auth
+    const metadataSettings = yield* MetadataSettings
     const repositories = yield* Repositories
     return handlers.handleAll({
       getSystemStatus: ({ request }) => Effect.gen(function*() {
@@ -427,6 +429,16 @@ export const makeDashboardSystemLayer = (
         const access = yield* authorized(policy, request, auth).pipe(Effect.result)
         if (Result.isFailure(access)) return publicFailure(access.failure)
         return yield* resultOrFailure(repositories.listOutboxFailures())
+      }),
+      getMetadataSettings: ({ request }) => Effect.gen(function*() {
+        const access = yield* authorized(policy, request, auth).pipe(Effect.result)
+        if (Result.isFailure(access)) return publicFailure(access.failure)
+        return yield* resultOrFailure(metadataSettings.get())
+      }),
+      updateMetadataSettings: ({ payload, request }) => Effect.gen(function*() {
+        const access = yield* authorized(policy, request, auth).pipe(Effect.result)
+        if (Result.isFailure(access)) return publicFailure(access.failure)
+        return yield* resultOrFailure(metadataSettings.update(payload))
       })
     })
   }))

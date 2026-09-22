@@ -14,14 +14,14 @@ import {
 import { makeEmbyHandler } from "../../api/emby.js"
 import { Auth, makeAuthLayer } from "../../core/auth.js"
 import { Federation, makeFederationLayer } from "../../core/federation.js"
-import { Identity, makeIdentityLayer } from "../../core/identity.js"
+import { makeIdentityLayer } from "../../core/identity.js"
 import { LibraryService, makeLibraryServiceLayer } from "../../core/library-service.js"
 import { ResourceCache, runMaintenance } from "../../core/maintenance.js"
-import { Outbox, makeOutboxLayer } from "../../core/outbox.js"
+import { makeMetadataSettingsLayer } from "../../core/metadata-settings.js"
+import { makeOutboxLayer } from "../../core/outbox.js"
 import { Playback, makePlaybackLayer } from "../../core/playback.js"
-import { Repositories } from "../../core/repositories.js"
-import { ServerService, makeServerServiceLayer } from "../../core/server-service.js"
-import { UpstreamClient, makeUpstreamClientLayer } from "../../core/upstream-client.js"
+import { makeServerServiceLayer } from "../../core/server-service.js"
+import { makeUpstreamClientLayer } from "../../core/upstream-client.js"
 import { UserState, makeUserStateLayer } from "../../core/user-state.js"
 import { serveDashboardAsset } from "./assets.js"
 import { makeWorkersResourceCache, type WorkersCacheBinding } from "./cache.js"
@@ -62,6 +62,7 @@ export const makeWorkersCoreLayer = (
   const userState = makeUserStateLayer().pipe(Layer.provide(repositories))
   const serverService = makeServerServiceLayer.pipe(Layer.provide(foundation))
   const libraryService = makeLibraryServiceLayer.pipe(Layer.provide(foundation))
+  const metadataSettings = makeMetadataSettingsLayer.pipe(Layer.provide(repositories))
   const playback = makePlaybackLayer().pipe(
     Layer.provide(Layer.merge(foundation, federation))
   )
@@ -73,6 +74,7 @@ export const makeWorkersCoreLayer = (
     userState,
     serverService,
     libraryService,
+    metadataSettings,
     playback,
     outbox
   )
