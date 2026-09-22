@@ -82,14 +82,14 @@ export const ServerList = ({ state, servers, onRetry, onCreate }: ServerListProp
                   {server.username} · {policyLabel(server.userAgentPolicy)}
                 </span>
                 <Button
+                  aria-label={m.server_edit_action({ name: server.name })}
                   nativeButton={false}
                   render={<Link to="/servers/$id" params={{ id: server.id }} />}
                   size="sm"
                   variant="outline"
                 >
-                  <span className="sr-only">{m.server_edit_action({ name: server.name })}</span>
-                  <span aria-hidden="true">{m.server_edit_title()}</span>
-                  <ArrowRightIcon />
+                  {m.server_edit_title()}
+                  <ArrowRightIcon aria-hidden="true" />
                 </Button>
               </div>
             </CardFooter>

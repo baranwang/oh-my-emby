@@ -79,7 +79,7 @@
   "add_server": "添加服务器",
   "server_create_title": "添加上游服务器",
   "server_edit_title": "服务器设置",
-  "server_edit_action": "编辑{name}",
+  "server_edit_action": "服务器设置：{name}",
   "server_name": "名称",
   "server_name_required": "请输入服务器名称。",
   "server_endpoints": "连接线路",

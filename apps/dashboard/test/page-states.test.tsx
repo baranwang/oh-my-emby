@@ -1,4 +1,4 @@
-import { act, type ReactElement, type ReactNode } from "react"
+import { act, type ComponentProps, type ReactElement } from "react"
 import { createRoot, type Root } from "react-dom/client"
 import { renderToStaticMarkup } from "react-dom/server"
 import type {
@@ -17,7 +17,10 @@ vi.mock("@tanstack/react-router", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@tanstack/react-router")>()
   return {
     ...actual,
-    Link: ({ children }: { readonly children?: ReactNode }) => <a>{children}</a>,
+    Link: ({ to, params, children, ...props }: ComponentProps<"a"> & {
+      readonly to: string
+      readonly params?: Record<string, string>
+    }) => <a {...props} href={to.replace(/\$(\w+)/g, (_, key: string) => params?.[key] ?? `$${key}`)}>{children}</a>,
     useNavigate: () => vi.fn(),
     useRouter: () => ({ invalidate: vi.fn() }),
     useRouterState: () => "/dashboard/"
@@ -34,6 +37,7 @@ import { ServerDetailPage, ServerHealthStatus } from "../src/modules/servers/com
 import { ServerList } from "../src/modules/servers/components/server-list.js"
 import { OutboxFailures } from "../src/modules/system/components/outbox-failures.js"
 import { m } from "../src/paraglide/messages.js"
+import { getLocale, setLocale } from "../src/paraglide/runtime.js"
 
 const server = {
   id: "server-1",
@@ -299,13 +303,32 @@ describe("server page states", () => {
     expect(markup).toContain("https://emby.example.com")
   })
 
-  it("names each server edit action", () => {
+  it.each([
+    ["en", "Server settings"],
+    ["zh-CN", "服务器设置"]
+  ] as const)("includes the visible label and server name in each edit link in %s", async (locale, label) => {
+    const previousLocale = getLocale()
     const archive = { ...server, id: "server-2", name: "Archive" }
-    const markup = renderToStaticMarkup(
-      <ServerList state="success" servers={[server, archive]} onRetry={vi.fn()} onCreate={vi.fn()} />
-    )
-    expect(markup).toContain(m.server_edit_action({ name: "Home" }))
-    expect(markup).toContain(m.server_edit_action({ name: "Archive" }))
+    setLocale(locale, { reload: false })
+    try {
+      const { container } = await render(
+        <ServerList state="success" servers={[server, archive]} onRetry={vi.fn()} onCreate={vi.fn()} />
+      )
+      const links = [...container.querySelectorAll("a")]
+      expect(links).toHaveLength(2)
+      for (const [index, name] of ["Home", "Archive"].entries()) {
+        const link = links[index]!
+        expect(link.getAttribute("aria-label")).toContain(label)
+        expect(link.getAttribute("aria-label")).toContain(name)
+        expect(link.hasAttribute("aria-labelledby")).toBe(false)
+        expect(link.textContent).toBe(label)
+        expect(link.querySelector(".sr-only, span[aria-hidden='true']")).toBeNull()
+        expect(link.querySelector("svg")?.getAttribute("aria-hidden")).toBe("true")
+      }
+      expect(new Set(links.map((link) => link.getAttribute("aria-label"))).size).toBe(2)
+    } finally {
+      setLocale(previousLocale, { reload: false })
+    }
   })
 })
 

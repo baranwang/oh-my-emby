@@ -79,7 +79,7 @@
   "add_server": "Add server",
   "server_create_title": "Add upstream server",
   "server_edit_title": "Server settings",
-  "server_edit_action": "Edit {name}",
+  "server_edit_action": "Server settings: {name}",
   "server_name": "Name",
   "server_name_required": "Enter a server name.",
   "server_endpoints": "Connection endpoints",
