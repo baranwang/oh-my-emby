@@ -1150,6 +1150,51 @@ describe("UpstreamClient", () => {
     ])
   })
 
+  it("never revisits an earlier endpoint after a configured redirect", async () => {
+    const calls: Array<string> = []
+    const received = await run(
+      async () => { throw new Error("control fetch must not run") },
+      Effect.scoped(Effect.gen(function*() {
+        const client = yield* UpstreamClient
+        const response = yield* client.requestResource({
+          serverId: "server-1",
+          generation: 1,
+          url: new URL("https://a.example.com/Items/item/asset"),
+          accept: ["image/png"]
+        })
+        return { status: response.status, endpoint: response.headers.get("x-endpoint") }
+      })),
+      {
+        server: server({
+          endpoints: [
+            endpoint("b.example.com"),
+            endpoint("a.example.com", 1),
+            endpoint("c.example.com", 2)
+          ]
+        }),
+        fetchRegisteredResource: async (request) => {
+          calls.push(request.url)
+          if (request.url === "https://a.example.com/Items/item/asset") {
+            return new Response(null, {
+              status: 302,
+              headers: { location: "https://b.example.com/redirected?tag=signed" }
+            })
+          }
+          if (request.url.startsWith("https://a.example.com/")) return new Response(null, { status: 418 })
+          if (request.url.startsWith("https://b.example.com/")) return new Response(null, { status: 503 })
+          return new Response(null, { headers: { "x-endpoint": "c" } })
+        }
+      }
+    )
+
+    expect(received).toEqual({ status: 200, endpoint: "c" })
+    expect(calls).toEqual([
+      "https://a.example.com/Items/item/asset",
+      "https://b.example.com/redirected?tag=signed",
+      "https://c.example.com/redirected?tag=signed"
+    ])
+  })
+
   it("attributes same-origin URLs to the longest configured base path", async () => {
     const calls: Array<string> = []
     const status = await run(

@@ -925,7 +925,11 @@ export const makeUpstreamClientLayer = (
       return yield* Effect.fail(new UpstreamUnavailable({ serverId: server.id }))
     }
     const initial = new URL(input.url)
+    const configuredEndpoints = eligibleEndpoints(server)
     const endpointAttempts = endpointAttemptsForUrl(server, initial)
+    let endpointFloor = endpointAttempts.length === 0
+      ? -1
+      : configuredEndpoints.indexOf(endpointAttempts[0]!.endpoint)
     const attempts: Array<{ readonly endpoint?: UpstreamEndpoint; readonly url: URL }> =
       endpointAttempts.length === 0 ? [{ url: initial }] : [...endpointAttempts]
     attempts: for (let attemptIndex = 0; attemptIndex < attempts.length; attemptIndex++) {
@@ -958,9 +962,15 @@ export const makeUpstreamClientLayer = (
           Effect.catchTag("TimeoutError", () => Effect.fail(new UpstreamTimeout({ serverId: server.id }))),
           Effect.result
         )
-        const nextAttempt = endpointForUrl(server, current) === undefined
+        const currentEndpoint = endpointForUrl(server, current)
+        if (currentEndpoint !== undefined) {
+          endpointFloor = Math.max(endpointFloor, configuredEndpoints.indexOf(currentEndpoint))
+        }
+        const nextAttempt = currentEndpoint === undefined
           ? undefined
-          : endpointAttemptsForUrl(server, current)[1]
+          : endpointAttemptsForUrl(server, current).find(({ endpoint }) =>
+            configuredEndpoints.indexOf(endpoint) > endpointFloor
+          )
         if (fetched._tag === "Failure") {
           if (nextAttempt !== undefined && endpointFailure(fetched.failure)) {
             attempts[attemptIndex + 1] = nextAttempt
