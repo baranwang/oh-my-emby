@@ -115,6 +115,7 @@
   "server_user_agent_fallback_value": "备用 User-Agent",
   "server_user_agent_required": "请输入用于固定覆写的 User-Agent。",
   "server_enabled": "将此服务器用于聚合",
+  "server_validation_failed": "保存前请检查无效的服务器设置。",
   "server_save_failed": "无法保存服务器。请检查字段后重试。",
   "server_test_connection": "测试连接",
   "server_testing_connection": "正在测试…",

@@ -90,6 +90,7 @@ const isTagged = (error: unknown, tag: string) =>
 
 export const ServerForm = ({ server, onSave, onCancel, onTestConnection }: ServerFormProps) => {
   const [formError, setFormError] = useState<string | null>(null)
+  const [validationError, setValidationError] = useState(false)
   const [connectionState, setConnectionState] = useState<"idle" | "pending" | "success" | "error">("idle")
   const [connectionResult, setConnectionResult] = useState<ConnectionTestView | null>(null)
   const [connectionDetail, setConnectionDetail] = useState<string | null>(null)
@@ -108,7 +109,12 @@ export const ServerForm = ({ server, onSave, onCancel, onTestConnection }: Serve
   const form = useForm({
     defaultValues,
     validators: { onSubmit: serverValidator as never },
+    onSubmitInvalid: () => {
+      setFormError(null)
+      setValidationError(true)
+    },
     onSubmit: async ({ value }) => {
+      setValidationError(false)
       setFormError(null)
       try {
         const input = await Schema.decodeUnknownPromise(ServerInputSchema)(value)
@@ -121,8 +127,8 @@ export const ServerForm = ({ server, onSave, onCancel, onTestConnection }: Serve
   })
 
   useEffect(() => {
-    if (formError) formErrorRef.current?.focus()
-  }, [formError])
+    if (formError || validationError) formErrorRef.current?.focus()
+  }, [formError, validationError])
 
   const testConnection = async () => {
     if (!onTestConnection) return
@@ -132,7 +138,7 @@ export const ServerForm = ({ server, onSave, onCancel, onTestConnection }: Serve
     try {
       const result = await onTestConnection()
       setConnectionResult(result)
-      setConnectionState("success")
+      setConnectionState(result.reachable ? "success" : "error")
     } catch (error) {
       setConnectionDetail(
         typeof error === "object" && error !== null && "detail" in error && typeof error.detail === "string"
@@ -146,15 +152,16 @@ export const ServerForm = ({ server, onSave, onCancel, onTestConnection }: Serve
   return (
     <form
       className="space-y-6"
+      aria-describedby={formError || validationError ? "server-form-error" : undefined}
       onSubmit={(event) => {
         event.preventDefault()
         event.stopPropagation()
         void form.handleSubmit()
       }}
     >
-      {formError && (
-        <Alert ref={formErrorRef} tabIndex={-1} variant="destructive">
-          <AlertDescription>{formError}</AlertDescription>
+      {(formError || validationError) && (
+        <Alert id="server-form-error" ref={formErrorRef} tabIndex={-1} variant="destructive">
+          <AlertDescription>{formError ?? m.server_validation_failed()}</AlertDescription>
         </Alert>
       )}
 

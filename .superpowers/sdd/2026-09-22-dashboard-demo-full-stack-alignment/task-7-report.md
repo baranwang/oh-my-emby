@@ -73,3 +73,35 @@ Coverage includes endpoint defaults/add/remove/reorder/validation, the three UA 
 ## Concern
 
 - The exact `bun --bun vitest` command still cannot collect jsdom tests because of the existing Bun/Vitest worker EventTarget incompatibility. The repository-owned `bun run test` path is green for both the focused tests and the full Dashboard suite. No browser screenshot pass was requested or performed, so the report makes no browser-render claim.
+
+## Fix round 1 — connection truth and cross-field validation feedback
+
+### Root causes
+
+- The connection handler treated a fulfilled request as success and ignored the fulfilled payload's aggregate `reachable` value.
+- The shared `ServerInput` schema correctly rejected duplicate canonical endpoint URLs and invalid fixed User-Agent state, but those form/root issues only stopped TanStack Form submission. The component rendered field-level errors and API save failures, not invalid-submit feedback.
+
+### RED
+
+Three focused regressions were added before production edits. The repository-owned focused command reported 21 passes and exactly three expected failures:
+
+- a fulfilled `{ reachable: false }` result rendered “Connection succeeded.”;
+- duplicate canonical endpoints blocked `onSave` but produced no alert;
+- an empty fixed User-Agent blocked `onSave` but produced no alert.
+
+### GREEN
+
+The connection state now derives from `result.reachable` while preserving the ordered endpoint result rows. TanStack Form's `onSubmitInvalid` now exposes one localized destructive summary, associates the form with it through `aria-describedby`, and focuses it without duplicating the shared schema rules. Existing inline field errors and API save-failure handling remain intact.
+
+Fresh verification:
+
+- focused form/drawer/query suite: 3 files, 24/24 tests passed;
+- full Dashboard suite: 6 files, 64/64 tests passed;
+- `bun run typecheck`: PASS;
+- `bun run build`: PASS, Vite transformed 2,748 modules;
+- `bunx oxlint apps/dashboard/src`: PASS.
+
+### Self-review and deferred findings
+
+- Confirmed the change is limited to the Server form, its regression tests, and English/Simplified Chinese validation copy. Generated shadcn primitives, endpoint ordering, draft values, Task 8, and the progress ledger are untouched.
+- Kept both existing P2 findings deferred and out of scope: invalidation after a typed connection-test failure that may persist health, and adding each Server name to the card edit action's accessible label.

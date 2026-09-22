@@ -151,6 +151,33 @@ describe("server endpoints", () => {
     expect(document.getElementById(host.getAttribute("aria-describedby") ?? "")?.textContent)
       .toContain("Backup endpoint 1")
   })
+
+  it("focuses an accessible validation summary for duplicate canonical endpoints", async () => {
+    const onSave = vi.fn<(input: ServerInput) => Promise<void>>().mockResolvedValue(undefined)
+    const duplicateEndpointServer = {
+      ...configuredServer,
+      endpoints: [
+        configuredServer.endpoints[0],
+        {
+          ...configuredServer.endpoints[1],
+          protocol: "https",
+          host: "PRIMARY.EXAMPLE.COM",
+          port: 443,
+          path: "/emby"
+        }
+      ]
+    } as ServerView
+    const container = await render(<ServerForm server={duplicateEndpointServer} onSave={onSave} />)
+
+    await click(byButton(container, m.save()))
+
+    const summary = container.querySelector('[role="alert"]')
+    const form = container.querySelector("form")
+    expect(onSave).not.toHaveBeenCalled()
+    expect(summary).toBeInstanceOf(HTMLElement)
+    expect(document.activeElement).toBe(summary)
+    expect(form?.getAttribute("aria-describedby")).toBe(summary?.id)
+  })
 })
 
 describe("server User-Agent policy", () => {
@@ -170,6 +197,21 @@ describe("server User-Agent policy", () => {
 
     await click(radios[1] as HTMLButtonElement)
     expect(byLabel(container, "Fallback User-Agent")).toBeInstanceOf(HTMLInputElement)
+  })
+
+  it("focuses an accessible validation summary when fixed User-Agent is empty", async () => {
+    const onSave = vi.fn<(input: ServerInput) => Promise<void>>().mockResolvedValue(undefined)
+    const container = await render(<ServerForm server={configuredServer} onSave={onSave} />)
+
+    await change(byLabel(container, "Fixed User-Agent") as HTMLInputElement, "")
+    await click(byButton(container, m.save()))
+
+    const summary = container.querySelector('[role="alert"]')
+    const form = container.querySelector("form")
+    expect(onSave).not.toHaveBeenCalled()
+    expect(summary).toBeInstanceOf(HTMLElement)
+    expect(document.activeElement).toBe(summary)
+    expect(form?.getAttribute("aria-describedby")).toBe(summary?.id)
   })
 })
 
@@ -225,6 +267,30 @@ describe("server credentials and failures", () => {
 
     await click(byButton(container, m.server_test_connection()))
     const rows = [...container.querySelectorAll("[data-connection-result]")]
+    expect(rows).toHaveLength(2)
+    expect(rows[0]?.textContent).toContain("primary.example.com")
+    expect(rows[1]?.textContent).toContain("backup.example.com")
+  })
+
+  it("reports a fulfilled unreachable connection test as failed and preserves endpoint order", async () => {
+    const onTestConnection = vi.fn<() => Promise<ConnectionTestView>>().mockResolvedValue({
+      reachable: false,
+      catalogId: null,
+      endpoints: [
+        { endpointId: "endpoint-1", reachable: false, catalogId: null, health: "degraded" },
+        { endpointId: "endpoint-2", reachable: false, catalogId: null, health: "unknown" }
+      ]
+    })
+    const container = await render(
+      <ServerForm server={configuredServer} onSave={vi.fn()} onTestConnection={onTestConnection} />
+    )
+
+    await click(byButton(container, m.server_test_connection()))
+
+    const status = container.querySelector('[role="status"]')
+    const rows = [...container.querySelectorAll("[data-connection-result]")]
+    expect(status?.textContent).toContain(m.server_test_failed())
+    expect(status?.textContent).not.toContain(m.server_test_reachable())
     expect(rows).toHaveLength(2)
     expect(rows[0]?.textContent).toContain("primary.example.com")
     expect(rows[1]?.textContent).toContain("backup.example.com")

@@ -115,6 +115,7 @@
   "server_user_agent_fallback_value": "Fallback User-Agent",
   "server_user_agent_required": "Enter a User-Agent for fixed override.",
   "server_enabled": "Use this server for aggregation",
+  "server_validation_failed": "Review the invalid server settings before saving.",
   "server_save_failed": "The server could not be saved. Review the fields and try again.",
   "server_test_connection": "Test connection",
   "server_testing_connection": "Testing…",
