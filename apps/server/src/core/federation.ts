@@ -35,6 +35,7 @@ import type {
   SourceMediaVersion,
   UserStateRecord,
 } from "./model.js";
+import { MetadataProviders } from "./metadata-providers.js";
 import { Repositories, type CatalogItemRecord } from "./repositories.js";
 import { UpstreamClient } from "./upstream-client.js";
 
@@ -468,12 +469,13 @@ const view = (
 
 export const makeFederationLayer = (
   config: FederationConfig = {},
-): Layer.Layer<Federation, never, Repositories | Identity | UpstreamClient> =>
+): Layer.Layer<Federation, never, Repositories | Identity | MetadataProviders | UpstreamClient> =>
   Layer.effect(
     Federation,
     Effect.gen(function* () {
       const repositories = yield* Repositories;
       const identity = yield* Identity;
+      const metadataProviders = yield* MetadataProviders;
       const upstream = yield* UpstreamClient;
       const now = config.now ?? Date.now;
       const listDeadlineMs = config.listDeadlineMs ?? UPSTREAM_LIST_DEADLINE_MS;
@@ -882,8 +884,9 @@ export const makeFederationLayer = (
             const totalRecordCount = exhausted
               ? published.length
               : Math.max(published.length, requestedEnd + 1);
+            const overlaid = yield* Effect.forEach(records, metadataProviders.overlayCached);
             return {
-              items: records.map((record) => view(record, incompleteSourceIds)),
+              items: overlaid.map((record) => view(record, incompleteSourceIds)),
               totalRecordCount,
               exhausted,
               incompleteSourceIds,
@@ -901,7 +904,9 @@ export const makeFederationLayer = (
           let record = (yield* repositories.readCatalogItems([activeId], now()))[0];
           if (!record) return null;
           const claim = exactClaim(record);
-          if (claim === null || record.sourceItems.length === 0) return view(record, []);
+          if (claim === null || record.sourceItems.length === 0) {
+            return view(yield* metadataProviders.refresh(record), []);
+          }
 
           const currentRecord = record;
           const sources = yield* repositories.resolveEligibleSourcesForCanonical(activeId);
@@ -1123,7 +1128,9 @@ export const makeFederationLayer = (
             { concurrency: MAX_FANOUT_CONCURRENCY },
           );
           record = (yield* repositories.readCatalogItems([activeId], now()))[0];
-          return record ? view(record, [...incomplete].sort()) : null;
+          return record
+            ? view(yield* metadataProviders.refresh(record), [...incomplete].sort())
+            : null;
         });
 
       const lookupMembership = (
@@ -1140,7 +1147,7 @@ export const makeFederationLayer = (
               ? null
               : (record.mediaVersions.find(({ id }) => id === versionId) ?? null);
           if (versionId !== undefined && version === null) return null;
-          return { item: view(record, []), version };
+          return { item: view(yield* metadataProviders.overlayCached(record), []), version };
         });
 
       return Federation.of({

@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest"
 import { UpstreamInvalidResponse, UpstreamUnavailable } from "../src/core/errors.js"
 import { Federation, makeFederationLayer } from "../src/core/federation.js"
 import { makeIdentityLayer } from "../src/core/identity.js"
+import { MetadataProviders } from "../src/core/metadata-providers.js"
 import type { UpstreamServer } from "../src/core/model.js"
 import { Repositories } from "../src/core/repositories.js"
 import { UpstreamClient } from "../src/core/upstream-client.js"
@@ -188,7 +189,12 @@ const runBudgetScenario = async (): Promise<BudgetEvidence> => {
       requestResource: () => Effect.die("unused")
     }))
     const identity = makeIdentityLayer.pipe(Layer.provide(measuredRepositories))
-    const dependencies = Layer.mergeAll(measuredRepositories, identity, upstream)
+    const metadataProviders = Layer.succeed(MetadataProviders, MetadataProviders.of({
+      refresh: (record) => Effect.succeed(record),
+      overlayCached: (record) => Effect.succeed(record),
+      resolveCachedImage: () => Effect.succeed(null)
+    }))
+    const dependencies = Layer.mergeAll(measuredRepositories, identity, upstream, metadataProviders)
     const federation = makeFederationLayer().pipe(Layer.provide(dependencies))
     const { page, detailed } = await Effect.runPromise(Effect.gen(function*() {
       const service = yield* Federation

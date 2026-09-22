@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import { Federation, makeFederationLayer, type FederatedQuery } from "../src/core/federation.js"
 import { makeIdentityLayer } from "../src/core/identity.js"
+import { MetadataProviders } from "../src/core/metadata-providers.js"
 import type { UpstreamServer } from "../src/core/model.js"
 import { Repositories } from "../src/core/repositories.js"
 import { UpstreamClient } from "../src/core/upstream-client.js"
@@ -121,7 +122,12 @@ describe("federated pagination generations", () => {
     const dependencies = Layer.mergeAll(
       repositories,
       makeIdentityLayer.pipe(Layer.provide(repositories)),
-      upstream
+      upstream,
+      Layer.succeed(MetadataProviders, MetadataProviders.of({
+        refresh: (record) => Effect.succeed(record),
+        overlayCached: (record) => Effect.succeed(record),
+        resolveCachedImage: () => Effect.succeed(null)
+      }))
     )
     return { layer: makeFederationLayer().pipe(Layer.provide(dependencies)), repositories }
   }

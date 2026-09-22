@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { UpstreamUnavailable } from "../src/core/errors.js"
 import { Federation, makeFederationLayer } from "../src/core/federation.js"
 import { makeIdentityLayer } from "../src/core/identity.js"
+import { MetadataProviders } from "../src/core/metadata-providers.js"
 import type { UpstreamServer } from "../src/core/model.js"
 import { Repositories, type RepositoriesService } from "../src/core/repositories.js"
 import { UpstreamClient } from "../src/core/upstream-client.js"
@@ -178,7 +179,12 @@ const prepareFederation = async (app: AcceptanceApp) => {
     requestResource: () => Effect.die("unused")
   }))
   const identity = makeIdentityLayer.pipe(Layer.provide(app.repositories))
-  const dependencies = Layer.mergeAll(app.repositories, identity, upstream)
+  const metadataProviders = Layer.succeed(MetadataProviders, MetadataProviders.of({
+    refresh: (record) => Effect.succeed(record),
+    overlayCached: (record) => Effect.succeed(record),
+    resolveCachedImage: () => Effect.succeed(null)
+  }))
+  const dependencies = Layer.mergeAll(app.repositories, identity, upstream, metadataProviders)
   const federation = makeFederationLayer().pipe(Layer.provide(dependencies))
   const layer = Layer.mergeAll(dependencies, federation)
   const query = {

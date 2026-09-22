@@ -15,12 +15,16 @@ import {
 } from "../src/core/errors.js";
 import { makeIdentityLayer } from "../src/core/identity.js";
 import {
+  MetadataProviders,
+  type MetadataProvidersApi,
+} from "../src/core/metadata-providers.js";
+import {
   MAX_FANOUT_CONCURRENCY,
   METADATA_FRESH_MS,
   METADATA_STALE_MS,
 } from "../src/core/limits.js";
 import type { UpstreamServer } from "../src/core/model.js";
-import { Repositories } from "../src/core/repositories.js";
+import { Repositories, type CatalogItemRecord } from "../src/core/repositories.js";
 import { UpstreamClient } from "../src/core/upstream-client.js";
 import { makeSqliteRepositoriesLayer } from "../src/platform/bun/sqlite-repositories.js";
 
@@ -120,6 +124,7 @@ describe("Federation", () => {
       readonly now?: () => number;
       readonly listDeadlineMs?: number;
       readonly detailDeadlineMs?: number;
+      readonly metadataProviders?: MetadataProvidersApi;
     } = {},
   ) => {
     await Effect.runPromise(
@@ -162,9 +167,57 @@ describe("Federation", () => {
       }),
     );
     const identity = makeIdentityLayer.pipe(Layer.provide(repositories));
-    const dependencies = Layer.mergeAll(repositories, identity, upstream);
+    const metadataProviders = Layer.succeed(
+      MetadataProviders,
+      MetadataProviders.of(options.metadataProviders ?? {
+        refresh: (record) => Effect.succeed(record),
+        overlayCached: (record) => Effect.succeed(record),
+        resolveCachedImage: () => Effect.succeed(null),
+      }),
+    );
+    const dependencies = Layer.mergeAll(repositories, identity, upstream, metadataProviders);
     return makeFederationLayer(options).pipe(Layer.provide(dependencies));
   };
+
+  it("uses cache-only overlays for list rows and refreshes external metadata only for detail", async () => {
+    let cached = 0;
+    let refreshed = 0;
+    const overlay = (name: string) => (catalog: CatalogItemRecord) => Effect.sync(() => ({
+      ...catalog,
+      canonical: {
+        ...catalog.canonical,
+        displayMetadata: { ...catalog.canonical.displayMetadata as object, Name: name },
+      },
+    }));
+    const layer = await setup(1, () => Effect.succeed({
+      Items: [item("movie-10", "Upstream", { ProviderIds: { Tmdb: "10", Imdb: "tt10" } })],
+      TotalRecordCount: 1,
+    }), {
+      metadataProviders: {
+        overlayCached: (catalog) => {
+          cached++;
+          return overlay("Cached title")(catalog);
+        },
+        refresh: (catalog) => {
+          refreshed++;
+          return overlay("Fresh title")(catalog);
+        },
+        resolveCachedImage: () => Effect.succeed(null),
+      },
+    });
+
+    await Effect.runPromise(Effect.gen(function*() {
+      const federation = yield* Federation;
+      const page = yield* federation.list(query());
+      expect(page.items[0]?.displayMetadata).toMatchObject({ Name: "Cached title" });
+      expect(cached).toBe(1);
+      expect(refreshed).toBe(0);
+
+      const detailed = yield* federation.detail(page.items[0]!.id);
+      expect(detailed?.displayMetadata).toMatchObject({ Name: "Fresh title" });
+      expect(refreshed).toBe(1);
+    }).pipe(Effect.provide(layer)));
+  });
 
   it("caps ten-source fan-out at four, cancels deadlines, and keeps partial successes", async () => {
     let active = 0;

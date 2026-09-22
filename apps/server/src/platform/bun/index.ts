@@ -22,6 +22,7 @@ import { makeIdentityLayer } from "../../core/identity.js"
 import { LibraryService, makeLibraryServiceLayer } from "../../core/library-service.js"
 import { ResourceCache, runMaintenance } from "../../core/maintenance.js"
 import { makeMetadataSettingsLayer } from "../../core/metadata-settings.js"
+import { makeMetadataProvidersLayer } from "../../core/metadata-providers.js"
 import { makeOutboxLayer } from "../../core/outbox.js"
 import { Playback, makePlaybackLayer } from "../../core/playback.js"
 import { Repositories } from "../../core/repositories.js"
@@ -104,7 +105,10 @@ const makeBunCoreLayer = (config: BunRuntimeConfig) => {
     }
   }).pipe(Layer.provide(repositories))
   const identity = makeIdentityLayer.pipe(Layer.provide(repositories))
-  const foundation = Layer.mergeAll(repositories, upstream, identity)
+  const metadataProviders = makeMetadataProvidersLayer({
+    fetch: config.upstreamFetch ?? fetch
+  }).pipe(Layer.provide(repositories))
+  const foundation = Layer.mergeAll(repositories, upstream, identity, metadataProviders)
   const federation = makeFederationLayer().pipe(Layer.provide(foundation))
   const auth = makeAuthLayer().pipe(Layer.provide(repositories))
   const userState = makeUserStateLayer().pipe(Layer.provide(repositories))

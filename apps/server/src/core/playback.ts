@@ -1,6 +1,6 @@
 import { Context, Effect, Exit, Layer, Schema, Scope } from "effect"
 
-import type { CanonicalItemView, FederationFailure } from "./federation.js"
+import type { FederationFailure } from "./federation.js"
 import { Federation } from "./federation.js"
 import {
   AUXILIARY_PROXY_DEADLINE_MS,
@@ -9,6 +9,7 @@ import {
   MAX_SUBTITLE_BYTES
 } from "./limits.js"
 import type { EligibleSource, JsonValue, SourceItemRecord, SourceMediaVersion } from "./model.js"
+import { MetadataProviders } from "./metadata-providers.js"
 import {
   ResourceCacheError,
   type CachedResource,
@@ -16,7 +17,7 @@ import {
   type ResourceCacheService
 } from "./resource-cache.js"
 import { Repositories, type CatalogItemRecord } from "./repositories.js"
-import { UpstreamClient, endpointUrl, type UpstreamClientService } from "./upstream-client.js"
+import { UpstreamClient, endpointUrl } from "./upstream-client.js"
 
 export class PlaybackNotFound extends Schema.TaggedError<PlaybackNotFound>()("PlaybackNotFound", {}) {}
 export class PlaybackUnavailable extends Schema.TaggedError<PlaybackUnavailable>()("PlaybackUnavailable", {}) {}
@@ -232,10 +233,11 @@ const subtitleMimeTypes: Readonly<Record<string, ReadonlyArray<string>>> = {
 
 export const makePlaybackLayer = (
   config: PlaybackConfig = {}
-): Layer.Layer<Playback, never, Federation | Repositories | UpstreamClient> => Layer.effect(
+): Layer.Layer<Playback, never, Federation | MetadataProviders | Repositories | UpstreamClient> => Layer.effect(
   Playback,
   Effect.gen(function*() {
     const federation = yield* Federation
+    const metadataProviders = yield* MetadataProviders
     const repositories = yield* Repositories
     const upstream = yield* UpstreamClient
     const sessionId = config.sessionId ?? (() => crypto.randomUUID())
@@ -370,6 +372,12 @@ export const makePlaybackLayer = (
         return yield* Effect.fail(new ResourceRejected())
       }
       const { current, eligibleSources } = yield* record(input.canonicalId, false)
+      const external = yield* metadataProviders.resolveCachedImage(
+        current,
+        input.imageType,
+        input.imageIndex
+      )
+      if (external !== null) return { _tag: "Redirect", location: external }
       for (const version of orderedVersions(current, eligibleSources)) {
         const attempted = yield* Effect.result(versionRegistration(
           current,

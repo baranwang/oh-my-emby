@@ -93,6 +93,25 @@ describe("bounded auxiliary resources", () => {
     expect(responseCache.gets).toBe(0)
   })
 
+  it("delivers validated external artwork through the existing Emby image route", async () => {
+    const response = await Effect.runPromise(makeEmbyHandler(baseServices({
+      playback: {
+        getInfo: () => Effect.die("unused"),
+        resolveImage: () => Effect.succeed({
+          _tag: "Redirect",
+          location: new URL("https://image.tmdb.org/t/p/w780/poster.jpg")
+        })
+      }
+    }))(new Request(
+      "https://local/Items/movie-1/Images/Primary",
+      { headers: { authorization: "Bearer local-token" } }
+    )))
+
+    expect(response.status).toBe(302)
+    expect(response.headers.get("location")).toBe("https://image.tmdb.org/t/p/w780/poster.jpg")
+    expect(response.headers.get("cache-control")).toBe("private, no-store")
+  })
+
   it("streams allowlisted images, strips unsafe headers, and caches only the complete body", async () => {
     const responseCache = cache()
     const body = new TextEncoder().encode("png-body")

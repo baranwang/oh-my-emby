@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest"
 
 import { makeEmbyHandler, type EmbyServices } from "../src/api/emby.js"
 import { Federation, type CanonicalItemView } from "../src/core/federation.js"
+import { MetadataProviders } from "../src/core/metadata-providers.js"
 import type { EligibleSource, SourceItemRecord, SourceMediaVersion } from "../src/core/model.js"
 import { Playback, makePlaybackLayer, serveRegisteredResource } from "../src/core/playback.js"
 import { Repositories, type CatalogItemRecord } from "../src/core/repositories.js"
@@ -86,6 +87,7 @@ const makeFixture = (options: {
   fail?: ReadonlySet<string>
   binding?: (serverId: string) => boolean
   clientUsable?: boolean
+  externalImage?: URL | null
   resourceRequest?: () => Effect.Effect<Response, any>
 } = {}) => {
   const sourceA = source("a", "source-a", "item-a")
@@ -135,6 +137,11 @@ const makeFixture = (options: {
     enrichVersions: () => Effect.succeed(item),
     lookupMembership: () => Effect.succeed({ item, version: null })
   } as any))
+  const metadataProviders = Layer.succeed(MetadataProviders, MetadataProviders.of({
+    refresh: (record) => Effect.succeed(record),
+    overlayCached: (record) => Effect.succeed(record),
+    resolveCachedImage: () => Effect.succeed(options.externalImage ?? null)
+  }))
   const upstream = Layer.succeed(UpstreamClient, UpstreamClient.of({
     resolvePlayback: (candidate: SourceMediaVersion) => {
       resolutions.push(candidate.id)
@@ -162,7 +169,7 @@ const makeFixture = (options: {
     sessionId: () => "play-session",
     isClientUsableResource: () => options.clientUsable ?? false
   }).pipe(
-    Layer.provide(Layer.mergeAll(repositories, federation, upstream))
+    Layer.provide(Layer.mergeAll(repositories, federation, upstream, metadataProviders))
   )
   const run = <A>(effect: Effect.Effect<A, any, Playback>) => Effect.runPromise(effect.pipe(Effect.provide(layer)))
   return {
@@ -497,6 +504,22 @@ describe("playback decisions", () => {
     expect(decision._tag === "Proxy" && decision.request.url.href).toBe(
       "https://a.example.com/Items/item-a/Images/Primary/0?api_key=token-a"
     )
+  })
+
+  it("redirects validated cached external artwork before trying upstream images", async () => {
+    const fixture = makeFixture({
+      externalImage: new URL("https://image.tmdb.org/t/p/w780/poster.jpg")
+    })
+    const playback = await fixture.run(Playback)
+
+    await expect(Effect.runPromise(playback.resolveImage({
+      canonicalId: "movie-1",
+      imageType: "Primary"
+    }))).resolves.toEqual({
+      _tag: "Redirect",
+      location: new URL("https://image.tmdb.org/t/p/w780/poster.jpg")
+    })
+    expect(fixture.resolutions).toEqual([])
   })
 
   it("builds image requests from a source item when media versions are absent", async () => {
