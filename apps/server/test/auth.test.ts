@@ -13,11 +13,32 @@ import {
 } from "../src/core/auth.js"
 import { claimAndAttemptFirstServerSetup } from "../src/core/first-server-setup.js"
 import { DASHBOARD_SESSION_IDLE_MS, PBKDF2_ITERATIONS } from "../src/core/limits.js"
+import type { UpstreamEndpoint } from "../src/core/model.js"
 import { Repositories } from "../src/core/repositories.js"
 import { makeSqliteRepositoriesLayer } from "../src/platform/bun/sqlite-repositories.js"
 
-const migration = await Bun.file(new URL("../migrations/0001_initial.sql", import.meta.url)).text()
+const migration = [
+  await Bun.file(new URL("../migrations/0001_initial.sql", import.meta.url)).text(),
+  await Bun.file(new URL("../migrations/0002_dashboard_alignment.sql", import.meta.url)).text()
+].join("\n")
 const credentials = { username: "owner", password: "valid password" }
+const endpoint = (id: string, baseUrl: string): UpstreamEndpoint => {
+  const url = new URL(baseUrl)
+  return {
+    id,
+    protocol: url.protocol === "https:" ? "https" : "http",
+    host: url.hostname,
+    port: url.port === "" ? null : Number(url.port),
+    path: url.pathname === "/" ? "" : url.pathname,
+    displayUrl: url.href as UpstreamEndpoint["displayUrl"],
+    verifiedCatalogId: null,
+    health: "unknown",
+    lastSuccessAtMs: null,
+    order: 0,
+    createdAtMs: 1_000_000,
+    updatedAtMs: 1_000_000
+  }
+}
 
 describe("local authentication", () => {
   let directory: string
@@ -70,7 +91,7 @@ describe("local authentication", () => {
     }))).toBe(true)
   })
 
-  it("keeps the instance initialized when first-server setup fails", async () => {
+  it("keeps the instance initialized when the first server is unreachable", async () => {
     const listener = Bun.serve({
       port: 0,
       fetch: () => new Response(null, { status: 204 })
@@ -84,12 +105,14 @@ describe("local authentication", () => {
       verifiedBaseUrl: null,
       generation: 1,
       name: "Offline Emby",
+      endpoints: [endpoint("first-server:endpoint", baseUrl)],
       baseUrl,
       username: "upstream-owner",
       password: "upstream-password",
       accessToken: null,
       accessTokenExpiresAtMs: null,
       upstreamUserId: null,
+      userAgentPolicy: "fixed" as const,
       userAgent: "oh-my-emby-test",
       enabled: true,
       health: "unknown" as const,
@@ -103,13 +126,14 @@ describe("local authentication", () => {
       observedRequest = new Request(input, init)
       return globalThis.fetch(input, init)
     }
-    await expect(run(claimAndAttemptFirstServerSetup(
+    const session = await run(claimAndAttemptFirstServerSetup(
         credentials,
         { scopeKey: "claim:first-server" },
         unreachableServer,
         platformFetch,
         { platform: "docker", administratorPrivateHosts: [new URL(baseUrl).hostname] }
-    ))).rejects.toMatchObject({ _tag: "UpstreamUnavailable", serverId: "first-server" })
+    ))
+    expect(session.view).toEqual({ authenticated: true, username: "owner" })
     expect(new URL(observedRequest?.url ?? "https://invalid").pathname).toBe("/Users/AuthenticateByName")
     expect(observedRequest?.method).toBe("POST")
     expect(observedRequest?.redirect).toBe("manual")
@@ -124,7 +148,7 @@ describe("local authentication", () => {
     }))).toEqual({ initialized: true })
   })
 
-  it("maps a rejected first-server reachability probe without rolling back the saved draft", async () => {
+  it("keeps a first-server draft when its reachability probe returns 503", async () => {
     const listener = Bun.serve({
       port: 0,
       fetch: () => new Response("unavailable", { status: 503 })
@@ -136,12 +160,14 @@ describe("local authentication", () => {
       verifiedBaseUrl: null,
       generation: 1,
       name: "Rejected Emby",
+      endpoints: [endpoint("rejected-server:endpoint", listener.url.origin)],
       baseUrl: listener.url.origin,
       username: "upstream-owner",
       password: "upstream-password",
       accessToken: null,
       accessTokenExpiresAtMs: null,
       upstreamUserId: null,
+      userAgentPolicy: "fixed" as const,
       userAgent: "oh-my-emby-test",
       enabled: true,
       health: "unknown" as const,
@@ -151,17 +177,14 @@ describe("local authentication", () => {
       updatedAtMs: nowMs
     }
     try {
-      await expect(run(claimAndAttemptFirstServerSetup(
+      const session = await run(claimAndAttemptFirstServerSetup(
         credentials,
         { scopeKey: "claim:rejected-server" },
         server,
         globalThis.fetch,
         { platform: "docker", administratorPrivateHosts: [new URL(server.baseUrl).hostname] }
-      ))).rejects.toMatchObject({
-        _tag: "UpstreamRejected",
-        serverId: "rejected-server",
-        status: 503
-      })
+      ))
+      expect(session.view).toEqual({ authenticated: true, username: "owner" })
     } finally {
       await listener.stop(true)
     }

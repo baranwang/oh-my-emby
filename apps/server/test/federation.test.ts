@@ -24,7 +24,10 @@ import { Repositories } from "../src/core/repositories.js";
 import { UpstreamClient } from "../src/core/upstream-client.js";
 import { makeSqliteRepositoriesLayer } from "../src/platform/bun/sqlite-repositories.js";
 
-const migration = await Bun.file(new URL("../migrations/0001_initial.sql", import.meta.url)).text();
+const migration = [
+  await Bun.file(new URL("../migrations/0001_initial.sql", import.meta.url)).text(),
+  await Bun.file(new URL("../migrations/0002_dashboard_alignment.sql", import.meta.url)).text()
+].join("\n")
 
 const server = (index: number): UpstreamServer => ({
   id: `server-${index}` as any,
@@ -33,12 +36,29 @@ const server = (index: number): UpstreamServer => ({
   verifiedBaseUrl: `https://server-${index}.example.com`,
   generation: 1,
   name: `Server ${index}`,
+  endpoints: [
+    {
+      id: `endpoint-${index}`,
+      protocol: "https",
+      host: `server-${index}.example.com`,
+      port: null,
+      path: "",
+      displayUrl: `https://server-${index}.example.com` as any,
+      verifiedCatalogId: `catalog-id:${index}`,
+      health: "healthy",
+      lastSuccessAtMs: 1_000,
+      order: 0,
+      createdAtMs: 1_000,
+      updatedAtMs: 1_000
+    }
+  ],
   baseUrl: `https://server-${index}.example.com` as any,
   username: "upstream-user",
   password: "upstream-password",
   accessToken: "token",
   accessTokenExpiresAtMs: null,
   upstreamUserId: `user-${index}`,
+  userAgentPolicy: "fixed",
   userAgent: "oh-my-emby-test",
   enabled: true,
   health: "healthy",

@@ -132,7 +132,7 @@ const loginEmby = async (app: AcceptanceApp): Promise<string> => {
     body: JSON.stringify({ Username: ownerFixture.username, Pw: ownerFixture.password })
   })
   expect(login.status).toBe(200)
-  return String((await login.json() as { AccessToken?: string }).AccessToken)
+  return String(((await login.json()) as { AccessToken?: string }).AccessToken)
 }
 
 const prepareFederation = async (app: AcceptanceApp) => {
@@ -239,7 +239,7 @@ export const crossPlatformAcceptance = (
     })
     publicBodies.push(await created.clone().text())
     expect(created.status).toBe(200)
-    const createdServer = await created.clone().json() as { id: string }
+    const createdServer = (await created.clone().json()) as { id: string }
     await expect(created.clone().json()).resolves.toMatchObject({
       id: createdServer.id,
       hasPassword: true,
@@ -254,8 +254,16 @@ export const crossPlatformAcceptance = (
     expect(verified.status).toBe(200)
     await expect(verified.clone().json()).resolves.toEqual({
       reachable: true,
-      catalogId: "setup-catalog-id"
-    })
+      catalogId: "setup-catalog-id",
+        endpoints: [
+          {
+            endpointId: expect.any(String),
+            reachable: true,
+            catalogId: "setup-catalog-id",
+            health: "healthy"
+          }
+        ]
+      })
 
     const servers = await app.request("/api/dashboard/servers", { headers: { cookie } })
     publicBodies.push(await servers.clone().text())
@@ -360,7 +368,7 @@ export const crossPlatformAcceptance = (
       headers: { authorization: `Bearer ${accessToken}` }
     })
     expect(infoResponse.status).toBe(200)
-    const info = await infoResponse.json() as {
+    const info = (await infoResponse.json()) as {
       MediaSources: ReadonlyArray<{
         DirectStreamUrl?: string
         MediaStreams?: ReadonlyArray<{ DeliveryUrl?: string }>

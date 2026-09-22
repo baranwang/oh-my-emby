@@ -25,7 +25,10 @@ interface BudgetEvidence {
   readonly mediaVersionCount: number
 }
 
-const migration = await Bun.file(new URL("../migrations/0001_initial.sql", import.meta.url)).text()
+const migration = [
+  await Bun.file(new URL("../migrations/0001_initial.sql", import.meta.url)).text(),
+  await Bun.file(new URL("../migrations/0002_dashboard_alignment.sql", import.meta.url)).text()
+].join("\n")
 
 const server = (index: number): UpstreamServer => ({
   id: `server-${index}`,
@@ -34,12 +37,29 @@ const server = (index: number): UpstreamServer => ({
   verifiedBaseUrl: `https://server-${index}.example.com`,
   generation: 1,
   name: `Server ${index}`,
+  endpoints: [
+    {
+      id: `endpoint-${index}`,
+      protocol: "https",
+      host: `server-${index}.example.com`,
+      port: null,
+      path: "",
+      displayUrl: `https://server-${index}.example.com`,
+      verifiedCatalogId: `catalog-id:${index}`,
+      health: "healthy",
+      lastSuccessAtMs: 1_000,
+      order: 0,
+      createdAtMs: 1_000 + index,
+      updatedAtMs: 2_000 + index
+    }
+  ],
   baseUrl: `https://server-${index}.example.com`,
   username: "upstream-user",
   password: "upstream-password",
   accessToken: `token-${index}`,
   accessTokenExpiresAtMs: null,
   upstreamUserId: `upstream-user-${index}`,
+  userAgentPolicy: "fixed",
   userAgent: "oh-my-emby-budget",
   enabled: true,
   health: "healthy",

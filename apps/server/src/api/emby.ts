@@ -44,7 +44,7 @@ export interface PlaybackInfoBoundary {
 
 /** Task 10 supplies this service. This protocol layer only delegates and maps casing. */
 export interface PlaybackBoundary {
-  readonly getInfo: (canonicalId: string) => Effect.Effect<PlaybackInfoBoundary, unknown>
+  readonly getInfo: (canonicalId: string, clientUserAgent?: string) => Effect.Effect<PlaybackInfoBoundary, unknown>
   readonly resolveVideoRedirect?: (input: VideoSelection) => Effect.Effect<URL, unknown>
   readonly resolveImage?: (input: ImageSelection) => Effect.Effect<ResourceDecision, unknown>
   readonly resolveSubtitle?: (input: SubtitleSelection) => Effect.Effect<ResourceDecision, unknown>
@@ -237,9 +237,11 @@ const token = (request: Request, url: URL): string | null => {
   const authorization = request.headers.get("authorization")
   const bearer = authorization?.match(/^\s*Bearer\s+(.+?)\s*$/i)?.[1]
   if (bearer) return bearer
-  return parseAuthorization(authorization).token ??
+  return (
+    parseAuthorization(authorization).token ??
     parseAuthorization(request.headers.get("x-emby-authorization")).token ??
     null
+  )
 }
 
 const client = (request: Request) => {
@@ -262,7 +264,7 @@ const normalizedPath = (pathname: string): string => {
 
 const object = (value: JsonValue): Readonly<Record<string, JsonValue>> =>
   typeof value === "object" && value !== null && !Array.isArray(value)
-    ? value as Readonly<Record<string, JsonValue>>
+    ? (value as Readonly<Record<string, JsonValue>>)
     : {}
 
 const userData = (state: UserStateRecord | null, itemId: string) => ({
@@ -306,7 +308,7 @@ const mediaStreamScalarFields = [
 
 const mediaStreamDto = (value: JsonValue): EmbyMediaStreamDtoValue | null => {
   const stream = pickScalars(object(value), mediaStreamScalarFields)
-  return Object.keys(stream).length === 0 ? null : stream as EmbyMediaStreamDtoValue
+  return Object.keys(stream).length === 0 ? null : (stream as EmbyMediaStreamDtoValue)
 }
 
 const mediaSourceDto = (
@@ -343,8 +345,8 @@ const imageTagTypes = (metadata: Readonly<Record<string, JsonValue>>) => Object.
 )
 
 const backdropImageTags = (metadata: Readonly<Record<string, JsonValue>>) => Array.isArray(metadata.BackdropImageTags)
-  ? metadata.BackdropImageTags.flatMap((tag) => typeof tag === "string" && tag.length > 0 ? ["local"] : [])
-  : []
+  ? metadata.BackdropImageTags.flatMap((tag) => (typeof tag === "string" && tag.length > 0 ? ["local"] : []))
+    : []
 
 const itemDto = (item: CanonicalItemView, serverId: string): EmbyItemDtoValue => {
   const metadata = object(item.displayMetadata)
@@ -486,7 +488,7 @@ const playbackEvent = (
   positionTicks: body.PositionTicks ?? 0,
   occurredAtMs: now,
   ...(kind === "stop" ? { played } : {})
-} as PlaybackEvent)
+}) as PlaybackEvent
 
 const serverInfo = (services: EmbyServices) => ({
   Id: services.config.serverId,
@@ -521,8 +523,9 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
   const url = new URL(request.url)
   const path = normalizedPath(url.pathname)
   const method = request.method.toUpperCase()
+    const clientUserAgent = request.headers.get("user-agent") ?? undefined
 
-  if (method === "GET" && path === "/System/Info/Public") return json(serverInfo(services))
+    if (method === "GET" && path === "/System/Info/Public") return json(serverInfo(services))
 
   if (method === "POST" && path === "/Users/AuthenticateByName") {
     const metadata = yield* client(request)
@@ -634,17 +637,21 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
     const decoded = yield* decodeItemsQuery(url)
     const input: FederatedQuery = {
       ...query(principal, decoded),
-      sort: [{ field: "DateCreated", direction: "Descending" }]
-    }
-    const page = yield* services.federation.list(input)
+      sort: [{ field: "DateCreated", direction: "Descending" }],
+        ...(clientUserAgent === undefined ? {} : { clientUserAgent })
+      }
+      const page = yield* services.federation.list(input)
     return json(page.items.map((item) => itemDto(item, services.config.serverId)))
   }
 
   if (userItems || allItems) {
     if (userItems) yield* requireUser(principal, userItems[1]!)
     const decoded = yield* decodeItemsQuery(url)
-    const input = query(principal, decoded)
-    const page = decoded.SearchTerm
+    const input: FederatedQuery = {
+        ...query(principal, decoded),
+        ...(clientUserAgent === undefined ? {} : { clientUserAgent })
+      }
+      const page = decoded.SearchTerm
       ? yield* services.federation.search({ ...input, searchTerm: decoded.SearchTerm })
       : yield* services.federation.list(input)
     return json({
@@ -667,7 +674,7 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
       IsFolder: true,
       UserData: userData(null, library.id)
     })
-    const item = yield* services.federation.detail(canonicalId)
+    const item = yield* services.federation.detail(canonicalId, clientUserAgent)
     if (item === null) return yield* Effect.fail(new EmbyNotFound())
     return json(itemDto(item, services.config.serverId))
   }
@@ -726,7 +733,7 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
     const canonicalId = yield* pathSegment(playbackInfo[1]!)
     const membership = yield* services.federation.lookupMembership(canonicalId)
     if (membership === null) return yield* Effect.fail(new EmbyNotFound())
-    const info = yield* services.playback.getInfo(membership.item.id)
+    const info = yield* services.playback.getInfo(membership.item.id, clientUserAgent)
     return json(playbackInfoDto(info))
   }
 
@@ -736,9 +743,10 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
     const mediaSourceId = url.searchParams.get("MediaSourceId")?.trim() || undefined
     const location = yield* services.playback.resolveVideoRedirect({
       canonicalId,
-      ...(mediaSourceId === undefined ? {} : { mediaSourceId })
-    })
-    return redirect(location)
+      ...(mediaSourceId === undefined ? {} : { mediaSourceId }),
+        ...(clientUserAgent === undefined ? {} : { clientUserAgent })
+      })
+      return redirect(location)
   }
 
   if (image) {
@@ -748,9 +756,10 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
     const decision = yield* services.playback.resolveImage({
       canonicalId,
       imageType,
-      ...(image[3] === undefined ? {} : { imageIndex: Number(image[3]) })
-    })
-    if (decision._tag === "Redirect") return redirect(decision.location)
+      ...(image[3] === undefined ? {} : { imageIndex: Number(image[3]) }),
+        ...(clientUserAgent === undefined ? {} : { clientUserAgent })
+      })
+      if (decision._tag === "Redirect") return redirect(decision.location)
     return yield* serveRegisteredResource(decision.request, {
       ...(services.resourceCache === undefined ? {} : { cache: services.resourceCache }),
       now: services.now,
@@ -764,9 +773,10 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
       canonicalId: yield* pathSegment(subtitle[1]!),
       mediaSourceId: yield* pathSegment(subtitle[2]!),
       streamIndex: Number(subtitle[3]),
-      format: (yield* pathSegment(subtitle[4]!)).toLowerCase()
-    })
-    if (decision._tag === "Redirect") return redirect(decision.location)
+      format: (yield* pathSegment(subtitle[4]!)).toLowerCase(),
+        ...(clientUserAgent === undefined ? {} : { clientUserAgent })
+      })
+      if (decision._tag === "Redirect") return redirect(decision.location)
     return yield* serveRegisteredResource(decision.request, {
       now: services.now,
       signal: request.signal

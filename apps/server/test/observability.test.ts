@@ -11,7 +11,10 @@ import { Repositories } from "../src/core/repositories.js"
 import { UpstreamClient, makeUpstreamClientLayer } from "../src/core/upstream-client.js"
 import { makeSqliteRepositoriesLayer } from "../src/platform/bun/sqlite-repositories.js"
 
-const migration = await Bun.file(new URL("../migrations/0001_initial.sql", import.meta.url)).text()
+const migration = [
+  await Bun.file(new URL("../migrations/0001_initial.sql", import.meta.url)).text(),
+  await Bun.file(new URL("../migrations/0002_dashboard_alignment.sql", import.meta.url)).text()
+].join("\n")
 const JsonOk = Schema.Struct({ ok: Schema.Boolean })
 
 describe("upstream observability", () => {
@@ -69,13 +72,28 @@ describe("upstream observability", () => {
           verifiedBaseUrl: "https://example.com",
           generation: 1,
           name: "Home",
-          baseUrl: "https://example.com" as any,
+            endpoints: ["example.com", "backup.example.com"].map((host, order) => ({
+              id: `endpoint-${order + 1}`,
+              protocol: "https" as const,
+              host,
+              port: null,
+              path: "",
+              displayUrl: `https://${host}` as any,
+              verifiedCatalogId: "catalog-id",
+              health: "healthy" as const,
+              lastSuccessAtMs: 1_000,
+              order,
+              createdAtMs: 1_000,
+              updatedAtMs: 1_000
+            })),
+            baseUrl: "https://example.com" as any,
           username: "alice",
           password: "secret",
           accessToken: "secret-token",
           accessTokenExpiresAtMs: null,
           upstreamUserId: "upstream-user-id",
-          userAgent: "Agent/1",
+            userAgentPolicy: "fixed",
+            userAgent: "Agent/1",
           enabled: true,
           health: "healthy",
           lastSuccessAtMs: 1_000,
@@ -87,12 +105,11 @@ describe("upstream observability", () => {
 
       const records: Array<Record<string, unknown>> = []
       const observability = makeObservability((record) => records.push(record as any))
-      let successAttempts = 0
       const fetch: typeof globalThis.fetch = async (input) => {
-        const path = new URL(new Request(input).url).pathname
+        const url = new URL(new Request(input).url)
+        const path = url.pathname
         if (path.endsWith("/success")) {
-          successAttempts++
-          if (successAttempts === 1) throw new TypeError("transient")
+          if (url.hostname === "example.com") throw new TypeError("transient")
           return Response.json({ ok: true })
         }
         return new Response(null, { status: 500 })
@@ -130,7 +147,7 @@ describe("upstream observability", () => {
         route: "/failed",
         serverId: "server-1",
         cacheOutcome: "bypass",
-        retryOutcome: "none",
+        retryOutcome: "failed",
         failureCategory: "UpstreamRejected"
       })
       for (const record of records) {

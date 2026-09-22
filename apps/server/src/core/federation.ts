@@ -58,6 +58,7 @@ export interface FederatedQuery {
   readonly filters: ReadonlyArray<CatalogFilter>;
   readonly itemTypes: ReadonlyArray<string>;
   readonly fields?: ReadonlyArray<string>;
+  readonly clientUserAgent?: string;
 }
 
 export interface SearchQuery extends FederatedQuery {
@@ -106,6 +107,7 @@ export interface FederationService {
   readonly search: (query: SearchQuery) => Effect.Effect<FederatedPage, FederationFailure>;
   readonly detail: (
     canonicalId: string,
+    clientUserAgent?: string,
   ) => Effect.Effect<CanonicalItemView | null, FederationFailure>;
   readonly lookupMembership: (
     canonicalId: string,
@@ -113,6 +115,7 @@ export interface FederationService {
   ) => Effect.Effect<CatalogMembership | null, FederationFailure>;
   readonly enrichVersions: (
     canonicalId: string,
+    clientUserAgent?: string,
   ) => Effect.Effect<CanonicalItemView | null, FederationFailure>;
   readonly invalidateStateDependentGenerations: () => Effect.Effect<void, RepositoryError>;
 }
@@ -730,6 +733,9 @@ export const makeFederationLayer = (
                               generation: source.serverGeneration,
                               path,
                               method: "GET",
+                              ...(query.clientUserAgent === undefined
+                                ? {}
+                                : { clientUserAgent: query.clientUserAgent }),
                             },
                             Schema.Unknown,
                           ),
@@ -887,6 +893,7 @@ export const makeFederationLayer = (
 
       const enrichVersions = (
         canonicalId: string,
+        clientUserAgent?: string,
       ): Effect.Effect<CanonicalItemView | null, FederationFailure> =>
         Effect.gen(function* () {
           const activeId = yield* identity.lookupCanonicalId(canonicalId);
@@ -1061,6 +1068,7 @@ export const makeFederationLayer = (
                       generation: source.serverGeneration,
                       path: `/Items?${parameters}`,
                       method: "GET",
+                      ...(clientUserAgent === undefined ? {} : { clientUserAgent }),
                     },
                     Schema.Unknown,
                   ),

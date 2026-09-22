@@ -54,11 +54,28 @@ const eligible = (serverId: string, sourceOrder: number): EligibleSource => ({
   catalogNamespace: `catalog:${serverId}`,
   verifiedCatalogId: `verified:${serverId}`,
   serverGeneration: 1,
+  endpoints: [
+    {
+      id: `endpoint-${serverId}`,
+      protocol: "https",
+      host: `${serverId}.example.com`,
+      port: null,
+      path: "",
+      displayUrl: `https://${serverId}.example.com`,
+      verifiedCatalogId: `verified:${serverId}`,
+      health: "healthy",
+      lastSuccessAtMs: 1,
+      order: 0,
+      createdAtMs: 1,
+      updatedAtMs: 1
+    }
+  ],
   baseUrl: `https://${serverId}.example.com`,
   username: "upstream",
   password: null,
   accessToken: `token-${serverId}`,
   accessTokenExpiresAtMs: null,
+  userAgentPolicy: "fixed",
   userAgent: "test"
 })
 
@@ -107,6 +124,7 @@ const makeFixture = (options: {
   }
   const resolutions: Array<string> = []
   const redirects: Array<string> = []
+  const clientUserAgents: Array<string | undefined> = []
   let videoBodyReads = 0
   const repositories = Layer.succeed(Repositories, Repositories.of({
     readCatalogItems: () => Effect.succeed([record]),
@@ -126,14 +144,20 @@ const makeFixture = (options: {
       const details = candidate.capabilities as { url: string; serverId: string }
       return Effect.succeed({ serverId: details.serverId, generation: 1, url: details.url })
     },
-    resolvePlaybackRedirect: (resolved: { readonly url: string }) => {
+    resolvePlaybackRedirect: (resolved: { readonly url: string; readonly clientUserAgent?: string }) => {
       redirects.push(resolved.url)
-      return Effect.succeed(new URL(`https://cdn.example.com/${new URL(resolved.url).searchParams.get("MediaSourceId")}`))
+        clientUserAgents.push(resolved.clientUserAgent)
+        return Effect.succeed(new URL(`https://cdn.example.com/${new URL(resolved.url).searchParams.get("MediaSourceId")}`))
     },
-    requestResource: () => options.resourceRequest?.() ?? Effect.succeed(new Response("image", {
+    requestResource: (request: { readonly clientUserAgent?: string }) => {
+        clientUserAgents.push(request.clientUserAgent)
+        return (
+          options.resourceRequest?.() ?? Effect.succeed(new Response("image", {
       headers: { "content-type": "image/png" }
     }))
-  } as any))
+        )
+      }
+    } as any))
   const layer = makePlaybackLayer({
     sessionId: () => "play-session",
     isClientUsableResource: () => options.clientUsable ?? false
@@ -147,6 +171,7 @@ const makeFixture = (options: {
     run,
     resolutions,
     redirects,
+    clientUserAgents,
     get videoBodyReads() { return videoBodyReads },
     readVideo: () => videoBodyReads++
   }
@@ -187,12 +212,29 @@ describe("playback decisions", () => {
       verifiedBaseUrl: "https://example.com",
       generation: 1,
       name: "Server",
+      endpoints: [
+        {
+          id: "endpoint-1",
+          protocol: "https",
+          host: "example.com",
+          port: null,
+          path: "",
+          displayUrl: "https://example.com",
+          verifiedCatalogId: "verified:server-1",
+          health: "healthy",
+          lastSuccessAtMs: 1,
+          order: 0,
+          createdAtMs: 1,
+          updatedAtMs: 1
+        }
+      ],
       baseUrl: "https://example.com",
       username: "owner",
       password: null,
       accessToken: "token",
       accessTokenExpiresAtMs: null,
       upstreamUserId: "upstream-owner",
+      userAgentPolicy: "fixed",
       userAgent: "test",
       enabled: true,
       health: "healthy",
@@ -274,7 +316,7 @@ describe("playback decisions", () => {
     const playback = await fixture.run(Playback)
     const response = await Effect.runPromise(makeEmbyHandler(services(playback, fixture.item))(new Request(
       "https://local/Videos/movie-1/stream?MediaSourceId=version-b",
-      { headers: { authorization: "Bearer local-token" } }
+      { headers: { authorization: "Bearer local-token", "user-agent": "Client/1" } }
     )))
 
     expect(response.status).toBe(302)
@@ -283,7 +325,50 @@ describe("playback decisions", () => {
     expect(fixture.redirects).toEqual([
       "https://b.example.com/Videos/item-b/stream?MediaSourceId=media-b&Static=true&api_key=token-b"
     ])
+    expect(fixture.clientUserAgents).toEqual(["Client/1"])
     expect(fixture.videoBodyReads).toBe(0)
+  })
+
+  it("builds playback URLs from the first healthy same-catalog endpoint", async () => {
+    const sourceA = source("a", "source-a", "item-a")
+    const upstream = eligible("a", 0)
+    const fixture = makeFixture({
+      sources: [sourceA],
+      eligible: [
+        {
+          ...upstream,
+          endpoints: [
+            {
+              ...upstream.endpoints[0]!,
+              id: "endpoint-degraded",
+              host: "degraded.example.com",
+              displayUrl: "https://degraded.example.com" as any,
+              health: "degraded",
+              order: 0
+            },
+            {
+              ...upstream.endpoints[0]!,
+              id: "endpoint-healthy",
+              host: "healthy.example.com",
+              displayUrl: "https://healthy.example.com" as any,
+              order: 1
+            }
+          ]
+        }
+      ],
+      versions: [version("version-a", sourceA.id, "media-a")]
+    })
+    const playback = await fixture.run(Playback)
+
+    await Effect.runPromise(
+      playback.resolveVideoRedirect({
+        canonicalId: "movie-1",
+        mediaSourceId: "version-a"
+      })
+    )
+    expect(fixture.redirects).toEqual([
+      "https://healthy.example.com/Videos/item-a/stream?MediaSourceId=media-a&Static=true&api_key=token-a"
+    ])
   })
 
   it("uses stable source, server, item, and media-source fallback order and isolates failures", async () => {

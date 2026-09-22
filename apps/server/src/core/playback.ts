@@ -16,7 +16,7 @@ import {
   type ResourceCacheService
 } from "./resource-cache.js"
 import { Repositories, type CatalogItemRecord } from "./repositories.js"
-import { UpstreamClient, type UpstreamClientService } from "./upstream-client.js"
+import { UpstreamClient, endpointUrl, type UpstreamClientService } from "./upstream-client.js"
 
 export class PlaybackNotFound extends Schema.TaggedError<PlaybackNotFound>()("PlaybackNotFound", {}) {}
 export class PlaybackUnavailable extends Schema.TaggedError<PlaybackUnavailable>()("PlaybackUnavailable", {}) {}
@@ -47,12 +47,14 @@ export interface PlaybackInfo {
 export interface VideoSelection {
   readonly canonicalId: string
   readonly mediaSourceId?: string
+  readonly clientUserAgent?: string
 }
 
 export interface ImageSelection {
   readonly canonicalId: string
   readonly imageType: string
   readonly imageIndex?: number
+  readonly clientUserAgent?: string
 }
 
 export interface SubtitleSelection {
@@ -60,6 +62,7 @@ export interface SubtitleSelection {
   readonly mediaSourceId: string
   readonly streamIndex: number
   readonly format: string
+  readonly clientUserAgent?: string
 }
 
 export interface RegisteredResourceRequest {
@@ -78,7 +81,7 @@ export type ResourceDecision =
   | { readonly _tag: "Proxy"; readonly request: RegisteredResourceRequest }
 
 export interface PlaybackService {
-  readonly getInfo: (canonicalId: string) => Effect.Effect<PlaybackInfo, PlaybackFailure>
+  readonly getInfo: (canonicalId: string, clientUserAgent?: string) => Effect.Effect<PlaybackInfo, PlaybackFailure>
   readonly resolveVideoRedirect: (input: VideoSelection) => Effect.Effect<URL, PlaybackFailure>
   readonly resolveImage: (input: ImageSelection) => Effect.Effect<ResourceDecision, ResourceFailure>
   readonly resolveSubtitle: (input: SubtitleSelection) => Effect.Effect<ResourceDecision, ResourceFailure>
@@ -114,14 +117,16 @@ const orderedVersions = (
     const rightItem = items.get(right.sourceItemId)
     const leftOrder = leftItem === undefined
       ? Number.MAX_SAFE_INTEGER
-      : order.get(sourceKey(leftItem.serverId, leftItem.sourceLibraryId)) ?? Number.MAX_SAFE_INTEGER
+      : (order.get(sourceKey(leftItem.serverId, leftItem.sourceLibraryId)) ?? Number.MAX_SAFE_INTEGER)
     const rightOrder = rightItem === undefined
       ? Number.MAX_SAFE_INTEGER
-      : order.get(sourceKey(rightItem.serverId, rightItem.sourceLibraryId)) ?? Number.MAX_SAFE_INTEGER
-    return leftOrder - rightOrder ||
+      : (order.get(sourceKey(rightItem.serverId, rightItem.sourceLibraryId)) ?? Number.MAX_SAFE_INTEGER)
+    return (
+      leftOrder - rightOrder ||
       (leftItem?.serverId ?? "").localeCompare(rightItem?.serverId ?? "") ||
       (leftItem?.upstreamItemId ?? "").localeCompare(rightItem?.upstreamItemId ?? "") ||
       left.upstreamMediaSourceId.localeCompare(right.upstreamMediaSourceId)
+    )
   })
 }
 
@@ -142,18 +147,15 @@ const orderedSourceItems = (
   )
 }
 
-const appendPath = (baseUrl: string, path: string): URL => {
-  const url = new URL(baseUrl)
-  url.pathname = `${url.pathname.replace(/\/+$/, "")}${path}`
-  url.search = ""
-  url.hash = ""
-  return url
-}
-
 const tokenized = (url: URL, source: EligibleSource): URL => {
   if (source.accessToken !== null) url.searchParams.set("api_key", source.accessToken)
   return url
 }
+
+const eligibleEndpoint = (source: EligibleSource) =>
+  source.endpoints.find(
+    (endpoint) => endpoint.health === "healthy" && endpoint.verifiedCatalogId === source.verifiedCatalogId
+  )!
 
 const mediaPath = (canonicalId: string, versionId: string) =>
   `/Videos/${encodeURIComponent(canonicalId)}/stream?MediaSourceId=${encodeURIComponent(versionId)}`
@@ -184,8 +186,9 @@ const publicStreams = (
 ): ReadonlyArray<JsonValue> => Array.isArray(version.streams)
   ? version.streams.flatMap((entry): ReadonlyArray<JsonValue> => {
       if (!jsonObject(entry)) return []
-      const output = Object.fromEntries(streamFields.flatMap((key) => scalar(entry[key]) ? [[key, entry[key]]] : []))
-      const index = entry.Index
+      const output = Object.fromEntries(streamFields.flatMap((key) => (scalar(entry[key]) ? [[key, entry[key]]] : []))
+        )
+        const index = entry.Index
       const format = typeof entry.Codec === "string" ? entry.Codec.toLowerCase() : ""
       if (
         typeof index === "number" && Number.isSafeInteger(index) && index >= 0 &&
@@ -200,7 +203,7 @@ const mediaSource = (canonicalId: string, version: SourceMediaVersion): JsonValu
   const keep = ["Protocol", "Container", "Size", "RunTimeTicks", "Bitrate", "VideoType", "IsRemote"] as const
   const local = mediaPath(canonicalId, version.id)
   return {
-    ...Object.fromEntries(keep.flatMap((key) => scalar(details[key]) ? [[key, details[key]]] : [])),
+    ...Object.fromEntries(keep.flatMap((key) => (scalar(details[key]) ? [[key, details[key]]] : []))),
     Id: version.id,
     Name: version.label,
     Path: local,
@@ -238,11 +241,11 @@ export const makePlaybackLayer = (
     const sessionId = config.sessionId ?? (() => crypto.randomUUID())
     const isClientUsableResource = config.isClientUsableResource ?? (() => false)
 
-    const record = (canonicalId: string, enrich: boolean) => Effect.gen(function*() {
+    const record = (canonicalId: string, enrich: boolean, clientUserAgent?: string) => Effect.gen(function*() {
       const membership = enrich
-        ? yield* federation.enrichVersions(canonicalId)
-        : (yield* federation.lookupMembership(canonicalId))?.item ?? null
-      if (membership === null) return yield* Effect.fail(new PlaybackNotFound())
+        ? yield* federation.enrichVersions(canonicalId, clientUserAgent)
+        : ((yield* federation.lookupMembership(canonicalId))?.item ?? null)
+          if (membership === null) return yield* Effect.fail(new PlaybackNotFound())
       const current = (yield* repositories.readCatalogItems([membership.id]))[0]
       if (!current) return yield* Effect.fail(new PlaybackNotFound())
       const eligibleSources = yield* repositories.resolveEligibleSourcesForCanonical(membership.id)
@@ -260,9 +263,13 @@ export const makePlaybackLayer = (
         const source = eligibleSources.find((candidate) =>
           candidate.serverId === item.serverId &&
           candidate.sourceLibraryId === item.sourceLibraryId &&
-          candidate.serverGeneration === item.serverGeneration
-        )
-        if (!eligible || source === undefined) return yield* Effect.fail(new PlaybackUnavailable())
+          candidate.serverGeneration === item.serverGeneration &&
+              candidate.endpoints.some(
+                (endpoint) =>
+                  endpoint.health === "healthy" && endpoint.verifiedCatalogId === candidate.verifiedCatalogId
+              )
+          )
+          if (!eligible || source === undefined) return yield* Effect.fail(new PlaybackUnavailable())
         return { source, url: build(source) }
       })
 
@@ -302,7 +309,7 @@ export const makePlaybackLayer = (
       eligibleSources: ReadonlyArray<EligibleSource>,
       version: SourceMediaVersion
     ) => versionRegistration(record, eligibleSources, version, (source, item) => {
-      const url = appendPath(source.baseUrl, `/Videos/${encodeURIComponent(item.upstreamItemId)}/stream`)
+      const url = endpointUrl(eligibleEndpoint(source), `/Videos/${encodeURIComponent(item.upstreamItemId)}/stream`)
       url.searchParams.set("MediaSourceId", version.upstreamMediaSourceId)
       url.searchParams.set("Static", "true")
       return tokenized(url, source)
@@ -317,17 +324,20 @@ export const makePlaybackLayer = (
     const videoRedirect = (
       record: CatalogItemRecord,
       eligibleSources: ReadonlyArray<EligibleSource>,
-      version: SourceMediaVersion
-    ) => registeredVideo(record, eligibleSources, version).pipe(Effect.flatMap(({ source, resolved }) =>
+      version: SourceMediaVersion,
+        clientUserAgent?: string
+      ) => registeredVideo(record, eligibleSources, version).pipe(Effect.flatMap(({ source, resolved }) =>
       upstream.resolvePlaybackRedirect({
         serverId: source.serverId,
         generation: source.serverGeneration,
-        url: resolved.href
-      }).pipe(Effect.mapError(() => new PlaybackUnavailable()))
+        url: resolved.href,
+                ...(clientUserAgent === undefined ? {} : { clientUserAgent })
+              })
+              .pipe(Effect.mapError(() => new PlaybackUnavailable()))
     ))
 
-    const getInfo: PlaybackService["getInfo"] = (canonicalId) => Effect.gen(function*() {
-      const { current, eligibleSources } = yield* record(canonicalId, true)
+    const getInfo: PlaybackService["getInfo"] = (canonicalId, clientUserAgent) => Effect.gen(function*() {
+      const { current, eligibleSources } = yield* record(canonicalId, true, clientUserAgent)
       const available: Array<SourceMediaVersion> = []
       for (const version of orderedVersions(current, eligibleSources)) {
         if (yield* Effect.isSuccess(video(current, eligibleSources, version))) available.push(version)
@@ -345,10 +355,10 @@ export const makePlaybackLayer = (
       if (input.mediaSourceId !== undefined) {
         const selected = versions.find(({ id }) => id === input.mediaSourceId)
         if (selected === undefined) return yield* Effect.fail(new PlaybackNotFound())
-        return yield* videoRedirect(current, eligibleSources, selected)
+        return yield* videoRedirect(current, eligibleSources, selected, input.clientUserAgent)
       }
       for (const candidate of versions) {
-        const attempted = yield* Effect.result(videoRedirect(current, eligibleSources, candidate))
+        const attempted = yield* Effect.result(videoRedirect(current, eligibleSources, candidate, input.clientUserAgent))
         if (attempted._tag === "Success") return attempted.success
       }
       return yield* Effect.fail(new PlaybackUnavailable())
@@ -365,8 +375,9 @@ export const makePlaybackLayer = (
           current,
           eligibleSources,
           version,
-          (source, item) => tokenized(appendPath(
-            source.baseUrl,
+          (source, item) => tokenized(
+                  endpointUrl(
+                    eligibleEndpoint(source),
             `/Items/${encodeURIComponent(item.upstreamItemId)}/Images/${encodeURIComponent(input.imageType)}` +
               (input.imageIndex === undefined ? "" : `/${input.imageIndex}`)
           ), source)
@@ -395,8 +406,10 @@ export const makePlaybackLayer = (
               serverId: attempted.success.source.serverId,
               generation: attempted.success.source.serverGeneration,
               url: attempted.success.resolved,
-              accept: imageMimeTypes
-            }).pipe(Effect.mapError(() => new ResourceUnavailable()))
+              accept: imageMimeTypes,
+                      ...(input.clientUserAgent === undefined ? {} : { clientUserAgent: input.clientUserAgent })
+                    })
+                    .pipe(Effect.mapError(() => new ResourceUnavailable()))
           }
         }
       }
@@ -404,8 +417,9 @@ export const makePlaybackLayer = (
         const attempted = yield* Effect.result(sourceRegistration(
           item,
           eligibleSources,
-          (source) => tokenized(appendPath(
-            source.baseUrl,
+          (source) => tokenized(
+                  endpointUrl(
+                    eligibleEndpoint(source),
             `/Items/${encodeURIComponent(item.upstreamItemId)}/Images/${encodeURIComponent(input.imageType)}` +
               (input.imageIndex === undefined ? "" : `/${input.imageIndex}`)
           ), source)
@@ -434,8 +448,10 @@ export const makePlaybackLayer = (
               serverId: attempted.success.source.serverId,
               generation: attempted.success.source.serverGeneration,
               url: attempted.success.url,
-              accept: imageMimeTypes
-            }).pipe(Effect.mapError(() => new ResourceUnavailable()))
+              accept: imageMimeTypes,
+                      ...(input.clientUserAgent === undefined ? {} : { clientUserAgent: input.clientUserAgent })
+                    })
+                    .pipe(Effect.mapError(() => new ResourceUnavailable()))
           }
         } as const
       }
@@ -460,8 +476,8 @@ export const makePlaybackLayer = (
       const codec = typeof stream.Codec === "string" ? stream.Codec.toLowerCase() : format
       if (!textSubtitle(codec, stream) || codec !== format) return yield* Effect.fail(new ResourceRejected())
       const registered = yield* versionRegistration(current, eligibleSources, version, (source, item) => {
-        const url = appendPath(
-          source.baseUrl,
+        const url = endpointUrl(
+              eligibleEndpoint(source),
           `/Videos/${encodeURIComponent(item.upstreamItemId)}/${encodeURIComponent(version.upstreamMediaSourceId)}` +
             `/Subtitles/${input.streamIndex}/Stream.${format}`
         )
@@ -487,8 +503,10 @@ export const makePlaybackLayer = (
             serverId: registered.source.serverId,
             generation: registered.source.serverGeneration,
             url: registered.resolved,
-            accept: acceptedMimeTypes
-          }).pipe(Effect.mapError(() => new ResourceUnavailable()))
+            accept: acceptedMimeTypes,
+                    ...(input.clientUserAgent === undefined ? {} : { clientUserAgent: input.clientUserAgent })
+                  })
+                  .pipe(Effect.mapError(() => new ResourceUnavailable()))
         }
       }
     })

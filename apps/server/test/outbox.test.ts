@@ -59,6 +59,7 @@ describe("revisioned outbox", () => {
       method: "POST",
       path: "/Users/upstream-user-id/Items/upstream-1/UserData"
     })
+    expect(requests[0]).not.toHaveProperty("clientUserAgent")
     expect(JSON.parse(new TextDecoder().decode(requests[0]!.body!))).toEqual({
       Played: false,
       IsFavorite: true,

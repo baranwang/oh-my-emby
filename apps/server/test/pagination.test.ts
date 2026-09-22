@@ -13,7 +13,10 @@ import { Repositories } from "../src/core/repositories.js"
 import { UpstreamClient } from "../src/core/upstream-client.js"
 import { makeSqliteRepositoriesLayer } from "../src/platform/bun/sqlite-repositories.js"
 
-const migration = await Bun.file(new URL("../migrations/0001_initial.sql", import.meta.url)).text()
+const migration = [
+  await Bun.file(new URL("../migrations/0001_initial.sql", import.meta.url)).text(),
+  await Bun.file(new URL("../migrations/0002_dashboard_alignment.sql", import.meta.url)).text()
+].join("\n")
 const movie = (id: string, name: string) => ({
   Id: id,
   Type: "Movie",
@@ -57,12 +60,29 @@ describe("federated pagination generations", () => {
       verifiedBaseUrl: "https://server.example.com",
       generation: 1,
       name: "Server",
+      endpoints: [
+        {
+          id: "endpoint-server",
+          protocol: "https",
+          host: "server.example.com",
+          port: null,
+          path: "",
+          displayUrl: "https://server.example.com" as any,
+          verifiedCatalogId: "catalog-id:server",
+          health: "healthy",
+          lastSuccessAtMs: 1_000,
+          order: 0,
+          createdAtMs: 1_000,
+          updatedAtMs: 1_000
+        }
+      ],
       baseUrl: "https://server.example.com" as any,
       username: "upstream-user",
       password: "password",
       accessToken: "token",
       accessTokenExpiresAtMs: null,
       upstreamUserId: "upstream-user-id",
+      userAgentPolicy: "fixed",
       userAgent: "test",
       enabled: true,
       health: "healthy",

@@ -12,7 +12,10 @@ import { Repositories } from "../src/core/repositories.js"
 import { UpstreamClient } from "../src/core/upstream-client.js"
 import { makeSqliteRepositoriesLayer } from "../src/platform/bun/sqlite-repositories.js"
 
-const migration = await Bun.file(new URL("../migrations/0001_initial.sql", import.meta.url)).text()
+const migration = [
+  await Bun.file(new URL("../migrations/0001_initial.sql", import.meta.url)).text(),
+  await Bun.file(new URL("../migrations/0002_dashboard_alignment.sql", import.meta.url)).text()
+].join("\n")
 const server = (id: string, overrides: Partial<UpstreamServer> = {}): UpstreamServer => ({
   id: id as any,
   catalogNamespace: `catalog:${id}`,
@@ -20,12 +23,29 @@ const server = (id: string, overrides: Partial<UpstreamServer> = {}): UpstreamSe
   verifiedBaseUrl: `https://${id}.example.com`,
   generation: 1,
   name: id,
+  endpoints: [
+    {
+      id: `endpoint-${id}`,
+      protocol: "https",
+      host: `${id}.example.com`,
+      port: null,
+      path: "",
+      displayUrl: `https://${id}.example.com` as any,
+      verifiedCatalogId: `identity:${id}`,
+      health: "healthy",
+      lastSuccessAtMs: 1_000,
+      order: 0,
+      createdAtMs: 1_000,
+      updatedAtMs: 1_000
+    }
+  ],
   baseUrl: `https://${id}.example.com` as any,
   username: "alice",
   password: "secret",
   accessToken: "token",
   accessTokenExpiresAtMs: null,
   upstreamUserId: `${id}-user`,
+  userAgentPolicy: "fixed",
   userAgent: "Agent/1",
   enabled: true,
   health: "healthy",

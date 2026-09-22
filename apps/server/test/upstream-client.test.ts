@@ -7,17 +7,38 @@ import { Effect, Layer, Schema } from "effect"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import { MAX_CONNECTION_DIAGNOSTIC_BYTES, MAX_CONTROL_RESPONSE_BYTES } from "../src/core/limits.js"
-import type { UpstreamServer } from "../src/core/model.js"
+import type { UpstreamEndpoint, UpstreamServer } from "../src/core/model.js"
 import { Repositories } from "../src/core/repositories.js"
 import {
   UpstreamClient,
+  effectiveUserAgent,
+  endpointUrl,
   makeUpstreamClientLayer,
   type DestinationPolicy
 } from "../src/core/upstream-client.js"
 import { makeSqliteRepositoriesLayer } from "../src/platform/bun/sqlite-repositories.js"
 
-const migration = await Bun.file(new URL("../migrations/0001_initial.sql", import.meta.url)).text()
+const migration = [
+  await Bun.file(new URL("../migrations/0001_initial.sql", import.meta.url)).text(),
+  await Bun.file(new URL("../migrations/0002_dashboard_alignment.sql", import.meta.url)).text()
+].join("\n")
 const JsonOk = Schema.Struct({ ok: Schema.Boolean })
+
+const endpoint = (host = "example.com", order = 0, overrides: Partial<UpstreamEndpoint> = {}): UpstreamEndpoint => ({
+  id: `endpoint-${order}`,
+  protocol: "https",
+  host,
+  port: null,
+  path: "",
+  displayUrl: `https://${host}` as any,
+  verifiedCatalogId: "catalog-id",
+  health: "healthy",
+  lastSuccessAtMs: 1_000,
+  order,
+  createdAtMs: 1_000,
+  updatedAtMs: 1_000,
+  ...overrides
+})
 
 const server = (overrides: Partial<UpstreamServer> = {}): UpstreamServer => ({
   id: "server-1" as any,
@@ -26,12 +47,14 @@ const server = (overrides: Partial<UpstreamServer> = {}): UpstreamServer => ({
   verifiedBaseUrl: "https://example.com",
   generation: 1,
   name: "Home",
+  endpoints: [endpoint()],
   baseUrl: "https://example.com" as any,
   username: "alice",
   password: "password",
   accessToken: "token-1",
   accessTokenExpiresAtMs: null,
   upstreamUserId: "upstream-user-id",
+  userAgentPolicy: "fixed",
   userAgent: "Configured-Agent/1",
   enabled: true,
   health: "healthy",
@@ -89,6 +112,25 @@ describe("UpstreamClient", () => {
     )))
   }
 
+  it("resolves endpoint URLs and the exact User-Agent policy matrix", () => {
+    expect(endpointUrl(endpoint("example.com", 0, { port: 8443, path: "/emby" }), "/System/Info").href).toBe(
+      "https://example.com:8443/emby/System/Info"
+    )
+    expect(effectiveUserAgent(server({ userAgentPolicy: "fixed", userAgent: "Configured/1" }), "Client/1")).toBe(
+      "Configured/1"
+    )
+    expect(
+      effectiveUserAgent(server({ userAgentPolicy: "client-preferred", userAgent: "Fallback/1" }), "Client/1")
+    ).toBe("Client/1")
+    expect(
+      effectiveUserAgent(server({ userAgentPolicy: "client-preferred", userAgent: "Fallback/1" }), undefined)
+    ).toBe("Fallback/1")
+    expect(effectiveUserAgent(server({ userAgentPolicy: "passthrough", userAgent: null }), "Client/1")).toBe("Client/1")
+    expect(effectiveUserAgent(server({ userAgentPolicy: "passthrough", userAgent: null }), undefined)).toBe(
+      "oh-my-emby/0.0.0"
+    )
+  })
+
   it("drops credentials and identity headers on a cross-origin redirect", async () => {
     const calls: Array<Request> = []
     const fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -130,7 +172,8 @@ describe("UpstreamClient", () => {
       }, JsonOk)
     }), {
       server: server({
-        baseUrl: "https://example.com/emby" as any,
+          endpoints: [endpoint("example.com", 0, { path: "/emby" })],
+          baseUrl: "https://stale.example.com" as any,
         verifiedBaseUrl: "https://example.com/emby"
       })
     })
@@ -155,12 +198,10 @@ describe("UpstreamClient", () => {
   })
 
   it.each([
-    ["URL credentials", "https://user:pass@example.com", "InvalidUpstreamUrl"],
-    ["unsupported schemes", "ftp://example.com", "InvalidUpstreamUrl"],
-    ["Workers IPv4 literals", "https://127.0.0.1", "DestinationRejected"],
-    ["Workers IPv6 literals", "https://[::1]", "DestinationRejected"],
-    ["Workers private hostnames", "http://media.local", "DestinationRejected"]
-  ])("rejects %s", async (_name, baseUrl, tag) => {
+    ["Workers IPv4 literals", endpoint("127.0.0.1"), "DestinationRejected"],
+    ["Workers IPv6 literals", endpoint("[::1]"), "DestinationRejected"],
+    ["Workers private hostnames", endpoint("media.local", 0, { protocol: "http" }), "DestinationRejected"]
+  ])("rejects %s", async (_name, configuredEndpoint, tag) => {
     let called = false
     await expect(run(async () => {
       called = true
@@ -173,8 +214,26 @@ describe("UpstreamClient", () => {
         path: "/System/Info",
         method: "GET"
       }, JsonOk)
-    }), { rawBaseUrl: baseUrl })).rejects.toMatchObject({ _tag: tag })
+    }), { server: server({ endpoints: [configuredEndpoint] }) }
+      )
+    ).rejects.toMatchObject({ _tag: tag })
     expect(called).toBe(false)
+  })
+
+  it("never reads the legacy base_url for runtime selection", async () => {
+    const urls: Array<string> = []
+    await run(
+      async (input, init) => {
+        urls.push(new Request(input, init).url)
+        return Response.json({ ok: true })
+      },
+      Effect.gen(function* () {
+        const client = yield* UpstreamClient
+        return yield* client.request({ serverId: "server-1", generation: 1, path: "/info", method: "GET" }, JsonOk)
+      }),
+      { rawBaseUrl: "ftp://user:pass@legacy.invalid" }
+    )
+    expect(urls).toEqual(["https://example.com/info"])
   })
 
   it("allows a public Docker IP upstream without a private-host allowlist", async () => {
@@ -191,7 +250,9 @@ describe("UpstreamClient", () => {
         method: "GET"
       }, JsonOk)
     }), {
-      server: server({ baseUrl: "http://203.0.113.9:8096" as any }),
+      server: server({
+          endpoints: [endpoint("203.0.113.9", 0, { protocol: "http", port: 8096 })]
+        }),
       policy: { platform: "docker" }
     })
 
@@ -213,7 +274,9 @@ describe("UpstreamClient", () => {
         method: "GET"
       }, JsonOk)
     }), {
-      server: server({ baseUrl: "http://192.168.1.20:8096" as any, verifiedBaseUrl: "http://192.168.1.20:8096" }),
+      server: server({
+          endpoints: [endpoint("192.168.1.20", 0, { protocol: "http", port: 8096 })],
+          verifiedBaseUrl: "http://192.168.1.20:8096" }),
       policy: { platform: "docker", administratorPrivateHosts: ["192.168.1.20"] }
     })
     expect(urls).toEqual(["http://192.168.1.20:8096/System/Info"])
@@ -232,7 +295,9 @@ describe("UpstreamClient", () => {
         method: "GET"
       }, JsonOk)
     }), {
-      server: server({ baseUrl: "http://192.168.1.20:8096" as any }),
+      server: server({
+            endpoints: [endpoint("192.168.1.20", 0, { protocol: "http", port: 8096 })]
+          }),
       policy: { platform: "docker", administratorPrivateHosts: ["192.168.1.20"] }
     })).rejects.toMatchObject({ _tag: "DestinationRejected" })
 
@@ -245,7 +310,9 @@ describe("UpstreamClient", () => {
         method: "GET"
       }, JsonOk)
     }), {
-      server: server({ baseUrl: "http://192.168.1.20:8096" as any }),
+      server: server({
+            endpoints: [endpoint("192.168.1.20", 0, { protocol: "http", port: 8096 })]
+          }),
       policy: { platform: "docker" }
     })).rejects.toMatchObject({ _tag: "DestinationRejected" })
 
@@ -258,7 +325,7 @@ describe("UpstreamClient", () => {
         path: "/System/Info",
         method: "GET"
       }, JsonOk)
-    }), { server: server({ baseUrl: "https://EXAMPLE.COM" as any }) })
+    }), { server: server({ endpoints: [endpoint("EXAMPLE.COM")] }) })
     expect(urls).toEqual(["https://example.com/System/Info"])
   })
 
@@ -280,8 +347,8 @@ describe("UpstreamClient", () => {
       }, JsonOk)
     }), {
       server: server({
-        baseUrl: "http://192.168.1.20:8096" as any,
-        verifiedBaseUrl: "http://192.168.1.20:8096"
+            endpoints: [endpoint("192.168.1.20", 0, { protocol: "http", port: 8096 })],
+            verifiedBaseUrl: "http://192.168.1.20:8096"
       }),
       policy: { platform: "docker", administratorPrivateHosts: ["192.168.1.20"] }
     })).rejects.toMatchObject({ _tag: "DestinationRejected" })
@@ -382,9 +449,17 @@ describe("UpstreamClient", () => {
         id: "server-2" as any,
         catalogNamespace: "catalog:server-2",
         verifiedCatalogId: "catalog-2",
-        accessToken: "token-2"
-      }))
-    }).pipe(Effect.provide(repositories)))
+        accessToken: "token-2",
+            endpoints: [
+              endpoint("server-2.example.com", 0, {
+                id: "server-2-endpoint",
+                verifiedCatalogId: "catalog-2"
+              })
+            ],
+            baseUrl: "https://server-2.example.com" as any
+          })
+        )
+      }).pipe(Effect.provide(repositories)))
 
     const calls: Array<Request> = []
     const fetch: typeof globalThis.fetch = async (input, init) => {
@@ -586,43 +661,190 @@ describe("UpstreamClient", () => {
     ])
   })
 
-  it("retries one transient GET but never retries POST or explicit not-found", async () => {
-    let attempts = 0
-    await expect(run(async () => {
-      attempts++
-      if (attempts === 1) throw new TypeError("temporary network failure")
-      return Response.json({ ok: true })
+  it("fails GET over ordered eligible endpoints after transport failure and 503", async () => {
+    const calls: Array<string> = []
+    await expect(run(async (input, init) => {
+          const url = new Request(input, init).url
+          calls.push(url)
+          if (url.startsWith("https://one.example.com/")) throw new TypeError("temporary network failure")
+          if (url.startsWith("https://two.example.com/")) return new Response(null, { status: 503 })
+          return Response.json({ ok: true })
     }, Effect.gen(function*() {
       const client = yield* UpstreamClient
       return yield* client.request({ serverId: "server-1", generation: 1, path: "/info", method: "GET" }, JsonOk)
-    }))).resolves.toEqual({ ok: true })
-    expect(attempts).toBe(2)
+    }),
+        {
+          server: server({
+            endpoints: [
+              endpoint("one.example.com", 0),
+              endpoint("two.example.com", 1),
+              endpoint("three.example.com", 2)
+            ]
+          })
+        }
+      )
+    ).resolves.toEqual({ ok: true })
+    expect(calls).toEqual([
+      "https://one.example.com/info",
+      "https://two.example.com/info",
+      "https://three.example.com/info"
+    ])
+  })
 
-    attempts = 0
-    await expect(run(async () => {
-      attempts++
-      throw new TypeError("write outcome unknown")
-    }, Effect.gen(function*() {
+  it.each(["transport", "timeout", "status"] as const)(
+    "fails GET over when same-endpoint reauthentication fails by %s",
+    async (failure) => {
+      const calls: Array<string> = []
+      await expect(run(async (input, init) => {
+            const request = new Request(input, init)
+            calls.push(request.url)
+            const url = new URL(request.url)
+            if (url.hostname === "two.example.com") return Response.json({ ok: true })
+            if (url.pathname === "/info") return new Response(null, { status: 401 })
+            if (failure === "transport") throw new TypeError("temporary network failure")
+            if (failure === "timeout") return await new Promise<Response>(() => undefined)
+            return new Response(null, { status: 503 })
+          }, Effect.gen(function*() {
       const client = yield* UpstreamClient
       return yield* client.request({
         serverId: "server-1",
         generation: 1,
-        path: "/state",
-        method: "POST",
-        body: new TextEncoder().encode("{}")
-      }, JsonOk)
-    }))).rejects.toMatchObject({ _tag: "UpstreamUnavailable" })
-    expect(attempts).toBe(1)
+        path: "/info", method: "GET" }, JsonOk)
+          }),
+          {
+            timeoutMs: 20,
+            server: server({
+              endpoints: [endpoint("one.example.com", 0), endpoint("two.example.com", 1)]
+            })
+          }
+        )
+      ).resolves.toEqual({ ok: true })
+      expect(calls).toEqual([
+        "https://one.example.com/info",
+        "https://one.example.com/Users/AuthenticateByName",
+        "https://two.example.com/info"
+      ])
+    }
+  )
 
-    attempts = 0
-    await expect(run(async () => {
-      attempts++
-      return new Response(null, { status: 404 })
+  it("uses a refreshed shared token when a replay fails over to the next endpoint", async () => {
+    const calls: Array<string> = []
+    await expect(
+      run(
+        async (input, init) => {
+          const request = new Request(input, init)
+          const url = new URL(request.url)
+          calls.push(`${url.hostname}${url.pathname}:${request.headers.get("x-emby-token") ?? "none"}`)
+          if (url.pathname === "/Users/AuthenticateByName") {
+            return url.hostname === "one.example.com"
+              ? Response.json({ AccessToken: "token-new", User: { Id: "upstream-user-id" } })
+              : new Response(null, { status: 401 })
+          }
+          if (url.hostname === "one.example.com") {
+            return request.headers.get("x-emby-token") === "token-new"
+              ? new Response(null, { status: 503 })
+              : new Response(null, { status: 401 })
+          }
+          return request.headers.get("x-emby-token") === "token-new"
+            ? Response.json({ ok: true })
+            : new Response(null, { status: 401 })
+        },
+        Effect.gen(function* () {
+          const client = yield* UpstreamClient
+          return yield* client.request({ serverId: "server-1", generation: 1, path: "/info", method: "GET" }, JsonOk)
+        }),
+        {
+          server: server({
+            endpoints: [endpoint("one.example.com", 0), endpoint("two.example.com", 1)]
+          })
+        }
+      )
+    ).resolves.toEqual({ ok: true })
+    expect(calls).toEqual([
+      "one.example.com/info:token-1",
+      "one.example.com/Users/AuthenticateByName:none",
+      "one.example.com/info:token-new",
+      "two.example.com/info:token-new"
+    ])
+  })
+
+  it("never advances POST after timeout, including replay-safe writes", async () => {
+    const calls: Array<string> = []
+    await expect(
+      run(
+        async (input, init) => {
+          calls.push(new Request(input, init).url)
+          return await new Promise<Response>(() => undefined)
+        },
+        Effect.gen(function* () {
+          const client = yield* UpstreamClient
+          return yield* client.request(
+            {
+              serverId: "server-1",
+              generation: 1,
+              path: "/state",
+        method: "POST",
+        body: new TextEncoder().encode("{}"),
+              replaySafe: true
+            }, JsonOk)
+    }),
+        {
+          timeoutMs: 5,
+          server: server({
+            endpoints: [endpoint("one.example.com", 0), endpoint("two.example.com", 1)]
+          })
+        }
+      )
+    ).rejects.toMatchObject({ _tag: "UpstreamTimeout" })
+    expect(calls).toEqual(["https://one.example.com/state"])
+  })
+
+  it.each([
+    [401, "UpstreamRejected"],
+    [404, "UpstreamNotFound"]
+  ] as const)("does not fail GET over on HTTP %i", async (status, tag) => {
+    const calls: Array<string> = []
+    await expect(run(async (input, init) => {
+          calls.push(new Request(input, init).url)
+          return new Response(null, { status })
     }, Effect.gen(function*() {
       const client = yield* UpstreamClient
       return yield* client.request({ serverId: "server-1", generation: 1, path: "/missing", method: "GET" }, JsonOk)
-    }))).rejects.toMatchObject({ _tag: "UpstreamNotFound" })
-    expect(attempts).toBe(1)
+    }),
+        {
+          server: server({
+            password: null,
+            endpoints: [endpoint("one.example.com", 0), endpoint("two.example.com", 1)]
+          })
+        }
+      )
+    ).rejects.toMatchObject({ _tag: tag })
+    expect(calls).toEqual(["https://one.example.com/missing"])
+  })
+
+  it("skips a mismatched endpoint instead of sending traffic to it", async () => {
+    const calls: Array<string> = []
+    await expect(
+      run(
+        async (input, init) => {
+          calls.push(new Request(input, init).url)
+          return Response.json({ ok: true })
+        },
+        Effect.gen(function* () {
+          const client = yield* UpstreamClient
+          return yield* client.request({ serverId: "server-1", generation: 1, path: "/info", method: "GET" }, JsonOk)
+  }),
+        {
+          server: server({
+            endpoints: [
+              endpoint("mismatch.example.com", 0, { verifiedCatalogId: "other-catalog" }),
+              endpoint("same.example.com", 1)
+            ]
+          })
+        }
+      )
+    ).resolves.toEqual({ ok: true })
+    expect(calls).toEqual(["https://same.example.com/info"])
   })
 
   it("resolves only a registered media version from the current server generation", async () => {
@@ -677,7 +899,7 @@ describe("UpstreamClient", () => {
     expect(observed?.headers.get("user-agent")).toBe("Configured-Agent/1")
     expect(observed?.headers.get("x-emby-token")).toBe("token-1")
     expect(observed?.headers.get("x-emby-authorization")).toBe(
-      "MediaBrowser Client=\"oh-my-emby\", Device=\"oh-my-emby\", DeviceId=\"server-1\", Version=\"0.0.0\""
+      'MediaBrowser Client="oh-my-emby", Device="oh-my-emby", DeviceId="server-1", Version="0.0.0"'
     )
   })
 

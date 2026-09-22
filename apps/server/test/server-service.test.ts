@@ -17,12 +17,23 @@ import {
   makeDashboardRequestPolicy
 } from "../src/api/dashboard.js"
 
-const migration = await Bun.file(new URL("../migrations/0001_initial.sql", import.meta.url)).text()
+const migration = [
+  await Bun.file(new URL("../migrations/0001_initial.sql", import.meta.url)).text(),
+  await Bun.file(new URL("../migrations/0002_dashboard_alignment.sql", import.meta.url)).text()
+].join("\n")
+const endpointInput = (host: string, id?: string) => ({
+  ...(id === undefined ? {} : { id }),
+  protocol: "https" as const,
+  host,
+  port: null,
+  path: ""
+})
 const input = {
   name: "Home",
-  baseUrl: "https://one.example.com" as any,
+  endpoints: [endpointInput("one.example.com")],
   username: "alice",
   password: { _tag: "Set" as const, value: "secret" },
+  userAgentPolicy: "fixed" as const,
   userAgent: "Agent/1",
   enabled: true
 }
@@ -95,6 +106,83 @@ describe("ServerService", () => {
       expect((yield* Effect.flip(service.persistResult(request, { health: "healthy" })))._tag)
         .toBe("ObsoleteGeneration")
     }).pipe(Effect.provide(layer(async () => Response.json({ Id: "catalog-id" })))))
+  })
+
+  it("normalizes endpoints, preserves stable IDs, and fences order and User-Agent changes", async () => {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const service = yield* ServerService
+        const deduplicated = yield* service.create({
+          ...input,
+          endpoints: [
+            endpointInput("ONE.example.com"),
+            { protocol: "https", host: "one.example.com", port: 443, path: "/" }
+          ]
+        } as any)
+        expect(deduplicated.endpoints).toHaveLength(1)
+        expect(deduplicated.endpoints[0]).toMatchObject({
+          host: "one.example.com",
+          port: null,
+          path: "",
+          displayUrl: "https://one.example.com/"
+        })
+
+        const withTwo = yield* service.update(deduplicated.id, {
+          ...input,
+          endpoints: [endpointInput("one.example.com", deduplicated.endpoints[0]!.id), endpointInput("two.example.com")]
+        })
+        const endpointIds = withTwo.endpoints.map(({ id }) => id)
+        expect(withTwo.generation).toBe(2)
+
+        const renamed = yield* service.update(deduplicated.id, {
+          ...input,
+          name: "Renamed",
+          endpoints: withTwo.endpoints.map(({ id, protocol, host, port, path }) => ({
+            id,
+            protocol,
+            host,
+            port,
+            path
+          }))
+        })
+        expect(renamed.generation).toBe(2)
+        expect(renamed.endpoints.map(({ id }) => id)).toEqual(endpointIds)
+
+        const reordered = yield* service.update(deduplicated.id, {
+          ...input,
+          endpoints: [...renamed.endpoints].reverse().map(({ id, protocol, host, port, path }) => ({
+            id,
+            protocol,
+            host,
+            port,
+            path
+          }))
+        })
+        expect(reordered.generation).toBe(3)
+        expect(reordered.endpoints.map(({ id }) => id)).toEqual([...endpointIds].reverse())
+
+        yield* service.persistResult(yield* service.beginRequest(deduplicated.id), {
+          accessToken: "cached-token",
+          upstreamUserId: "upstream-user-id"
+        })
+        const userAgentChanged = yield* service.update(deduplicated.id, {
+          ...input,
+          endpoints: reordered.endpoints.map(({ id, protocol, host, port, path }) => ({
+            id,
+            protocol,
+            host,
+            port,
+            path
+          })),
+          userAgentPolicy: "client-preferred",
+          userAgent: "Fallback/2"
+        })
+        expect(userAgentChanged.generation).toBe(4)
+        const stored = yield* service.getRecord(deduplicated.id)
+        expect(stored.accessToken).toBeNull()
+        expect(stored.upstreamUserId).toBeNull()
+      }).pipe(Effect.provide(layer(async () => Response.json({ Id: "catalog-id" }))))
+    )
   })
 
   it("enforces the ten-server ceiling atomically across concurrent creates", async () => {
@@ -198,34 +286,126 @@ describe("ServerService", () => {
     ))).resolves.toMatchObject({ principal: { username: "owner" } })
   })
 
-  it("keeps an edited endpoint ineligible until the stable catalog identity matches", async () => {
+  it("tests every endpoint in order and makes only same-catalog endpoints eligible", async () => {
     const seen: Array<string> = []
     const fetch: typeof globalThis.fetch = async (input, init) => {
       const request = new Request(input, init)
       seen.push(request.url)
+      if (request.url.includes("offline.example.com")) throw new TypeError("offline")
       if (request.url.endsWith("/Users/AuthenticateByName")) {
-        return Response.json({ AccessToken: "token", User: { Id: "upstream-user-id" } })
+        return Response.json({ AccessToken: "token", User: { Id: "upstream-user-id" },
+          ServerId: "stable-id"
+        })
       }
-      return Response.json({ Id: request.url.includes("two.example.com") ? "different-id" : "stable-id" })
+      return Response.json({ Id: "stable-id" })
     }
     await Effect.runPromise(Effect.gen(function*() {
       const service = yield* ServerService
       const created = yield* service.create(input)
-      expect(yield* service.testConnection(created.id)).toEqual({ reachable: true, catalogId: "stable-id" })
-      yield* service.update(created.id, { ...input, baseUrl: "https://two.example.com" as any })
-      expect((yield* service.get(created.id)).health).toBe("unknown")
-      expect((yield* Effect.flip(service.testConnection(created.id)))._tag).toBe("CatalogIdentityMismatch")
-      expect((yield* service.get(created.id)).health).toBe("unknown")
-    }).pipe(Effect.provide(layer(fetch))))
-    expect(seen.some((url) => url.startsWith("https://two.example.com/"))).toBe(true)
+        const configured = yield* service.update(created.id, {
+          ...input,
+          endpoints: [
+            endpointInput("one.example.com", created.endpoints[0]!.id),
+            endpointInput("offline.example.com"),
+            endpointInput("two.example.com")
+          ]
+        })
+        const result = yield* service.testConnection(created.id)
+        expect(result).toEqual({ reachable: true, catalogId: "stable-id",
+          endpoints: [
+            {
+              endpointId: configured.endpoints[0]!.id,
+              reachable: true,
+              catalogId: "stable-id",
+              health: "healthy"
+            },
+            {
+              endpointId: configured.endpoints[1]!.id,
+              reachable: false,
+              catalogId: null,
+              health: "unknown"
+            },
+            {
+              endpointId: configured.endpoints[2]!.id,
+              reachable: true,
+              catalogId: "stable-id",
+              health: "healthy"
+            }
+          ]
+        })
+        const stored = yield* service.getRecord(created.id)
+        expect(stored.endpoints.map(({ verifiedCatalogId, health }) => ({ verifiedCatalogId, health }))).toEqual([
+          { verifiedCatalogId: "stable-id", health: "healthy" },
+          { verifiedCatalogId: null, health: "unknown" },
+          { verifiedCatalogId: "stable-id", health: "healthy" }
+        ])
+      }).pipe(Effect.provide(layer(fetch)))
+    )
+    expect(seen.filter((url) => url.endsWith("/Users/AuthenticateByName"))).toEqual([
+      "https://one.example.com/Users/AuthenticateByName",
+      "https://offline.example.com/Users/AuthenticateByName",
+      "https://two.example.com/Users/AuthenticateByName"
+    ])
+  })
+
+  it("keeps an unavailable endpoint as an ineligible connection-test warning", async () => {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const service = yield* ServerService
+        const created = yield* service.create(input)
+        const result = yield* service.testConnection(created.id)
+        expect(result).toEqual({
+          reachable: false,
+          catalogId: null,
+          endpoints: [
+            {
+              endpointId: created.endpoints[0]!.id,
+              reachable: false,
+              catalogId: null,
+              health: "unknown"
+            }
+          ]
+        })
+        expect(yield* service.getRecord(created.id)).toMatchObject({
+          health: "unknown",
+          endpoints: [expect.objectContaining({ health: "unknown", verifiedCatalogId: null })]
+        })
+      }).pipe(Effect.provide(layer(async () => new Response(null, { status: 503 }))))
+    )
+  })
+
+  it("rejects a reported catalog mismatch and keeps that endpoint ineligible", async () => {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const service = yield* ServerService
+        const created = yield* service.create({
+          ...input,
+          endpoints: [endpointInput("one.example.com"), endpointInput("mismatch.example.com")]
+        })
+        expect((yield* Effect.flip(service.testConnection(created.id)))._tag).toBe("CatalogIdentityMismatch")
+        const stored = yield* service.getRecord(created.id)
+        expect(stored.endpoints.map(({ verifiedCatalogId }) => verifiedCatalogId)).toEqual(["stable-id", null])
+    }).pipe(Effect.provide(layer(async (input, init) => {
+            const request = new Request(input, init)
+            return Response.json({
+              AccessToken: "token",
+              User: { Id: "upstream-user-id" },
+              ServerId: request.url.includes("mismatch.example.com") ? "different-id" : "stable-id"
+            })
+          })
+        )
+      )
+    )
   })
 
   it("does not let an identity-less endpoint replacement reuse its namespace", async () => {
     await Effect.runPromise(Effect.gen(function*() {
       const service = yield* ServerService
       const created = yield* service.create(input)
-      expect(yield* service.testConnection(created.id)).toEqual({ reachable: true, catalogId: null })
-      yield* service.update(created.id, { ...input, baseUrl: "https://two.example.com" as any })
+      expect(yield* service.testConnection(created.id)).toMatchObject({ reachable: true, catalogId: null })
+      yield* service.update(created.id, { ...input,
+          endpoints: [endpointInput("two.example.com")]
+        })
       expect((yield* Effect.flip(service.testConnection(created.id)))._tag).toBe("CatalogIdentityUnverifiable")
     }).pipe(Effect.provide(layer(async (input) => {
       const url = new Request(input).url
