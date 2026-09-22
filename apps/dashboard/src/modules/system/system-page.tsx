@@ -1,22 +1,13 @@
-import { useMutation, useQueryClient } from "@tanstack/react-query"
-import { useNavigate, useRouter } from "@tanstack/react-router"
-
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
-import { PasswordForm } from "@/modules/auth/components/password-form"
-import { changePassword } from "@/modules/auth/services/auth-service"
 import { OutboxFailures } from "@/modules/system/components/outbox-failures"
 import { SystemStatus } from "@/modules/system/components/system-status"
 import { useOutboxFailures, useSystemStatus } from "@/modules/system/hooks/use-system"
 import { m } from "@/paraglide/messages.js"
 
 export const SystemPage = () => {
-  const queryClient = useQueryClient()
-  const navigate = useNavigate()
-  const router = useRouter()
   const status = useSystemStatus()
   const failures = useOutboxFailures()
-  const password = useMutation({ mutationFn: (input: Parameters<typeof changePassword>[0]) => changePassword(input, queryClient) })
 
   return (
     <div className="max-w-5xl space-y-10">
@@ -45,19 +36,6 @@ export const SystemPage = () => {
             <Button variant="outline" onClick={() => void failures.refetch()}>{m.retry()}</Button>
           </div>
         ) : <OutboxFailures failures={failures.data ?? []} />}
-      </section>
-      <section className="max-w-xl space-y-4 border-t pt-8" aria-labelledby="password-change-title">
-        <div className="space-y-2">
-          <h2 id="password-change-title" className="font-heading text-xl font-medium">{m.password_change_title()}</h2>
-          <p className="text-sm leading-6 text-muted-foreground">{m.password_change_description()}</p>
-        </div>
-        <PasswordForm
-          onChangePassword={(input) => password.mutateAsync(input)}
-          onChanged={async () => {
-            await router.invalidate()
-            await navigate({ to: "/login" })
-          }}
-        />
       </section>
     </div>
   )

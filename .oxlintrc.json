@@ -26,6 +26,14 @@
           }
         ]
       },
+    },
+    {
+      "files": [
+        "apps/dashboard/src/components/ui/**/*.{tsx,ts}"
+      ],
+      "rules": {
+        "shadcn/no-restyle": "off"
+      }
     }
   ],
   "env": {

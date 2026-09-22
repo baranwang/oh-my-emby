@@ -78,7 +78,9 @@ export const SourceBindings = ({ groups, mediaType, bindings, onToggle }: Source
                         checked={enabled}
                         onChange={(event) => onToggle(source.serverId, source.id, event.target.checked)}
                       />
-                      <Label htmlFor={id} className="truncate">{source.name}</Label>
+                      <span className="min-w-0 truncate">
+                        <Label htmlFor={id}>{source.name}</Label>
+                      </span>
                     </div>
                     <span className="shrink-0 text-xs text-muted-foreground">
                       {enabled ? m.source_binding_enabled() : m.source_binding_disabled()}

@@ -5,6 +5,7 @@ import type {
   OutboxFailureView,
   ServerView,
   SourceLibraryView,
+  SystemStatusView,
   VirtualLibraryView
 } from "@oh-my-emby/contracts"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
@@ -17,13 +18,18 @@ vi.mock("@tanstack/react-router", async (importOriginal) => {
   return {
     ...actual,
     Link: ({ children }: { readonly children?: ReactNode }) => <a>{children}</a>,
-    useNavigate: () => vi.fn()
+    useNavigate: () => vi.fn(),
+    useRouter: () => ({ invalidate: vi.fn() }),
+    useRouterState: () => "/dashboard/"
   }
 })
 
+import { AppShell } from "../src/components/app-shell/app-shell.js"
+import { ThemeProvider } from "../src/components/theme-provider.js"
 import { queryKeys } from "../src/lib/query-keys.js"
 import { LibraryForm, SourceBindings } from "../src/modules/libraries/components/library-form.js"
 import { LibrariesPage } from "../src/modules/libraries/libraries-page.js"
+import { OverviewPage } from "../src/modules/overview/overview-page.js"
 import { ServerDetailPage, ServerHealthStatus } from "../src/modules/servers/components/server-detail.js"
 import { ServerList } from "../src/modules/servers/components/server-list.js"
 import { OutboxFailures } from "../src/modules/system/components/outbox-failures.js"
@@ -33,14 +39,26 @@ const server = {
   id: "server-1",
   name: "Home",
   baseUrl: "https://emby.example.com",
+  endpoints: [{
+    id: "endpoint-1",
+    protocol: "https",
+    host: "emby.example.com",
+    port: null,
+    path: "",
+    displayUrl: "https://emby.example.com/",
+    verifiedCatalogId: "catalog-1",
+    health: "healthy",
+    lastSuccessAtMs: 1
+  }],
   username: "alice",
   hasPassword: true,
+  userAgentPolicy: "fixed",
   userAgent: "SenPlayer/1",
   enabled: true,
   verifiedCatalogId: "catalog-1",
   generation: 1,
   health: "healthy"
-} as ServerView
+} as unknown as ServerView
 
 const source = {
   id: "source-1",
@@ -61,6 +79,18 @@ const library = {
   }],
   enabled: true
 } as VirtualLibraryView
+
+const system = {
+  database: "healthy",
+  cacheEntries: 0,
+  maintenanceLastRunAtMs: null,
+  outboxPending: 0,
+  outboxFailed: 0,
+  outboxUncertain: 0,
+  upstreamHealthy: 1,
+  upstreamDegraded: 0,
+  upstreamUnknown: 0
+} as SystemStatusView
 
 const mounted: Array<{ container: HTMLDivElement; root: Root }> = []
 
@@ -105,6 +135,113 @@ afterEach(async () => {
   vi.useRealTimers()
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
+})
+
+const overviewClient = (data?: {
+  readonly servers?: ReadonlyArray<ServerView>
+  readonly libraries?: ReadonlyArray<VirtualLibraryView>
+  readonly system?: SystemStatusView
+  readonly failures?: ReadonlyArray<OutboxFailureView>
+}) => {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Infinity } }
+  })
+  if (data?.servers) queryClient.setQueryData(queryKeys.servers, data.servers)
+  if (data?.libraries) queryClient.setQueryData(queryKeys.libraries, data.libraries)
+  if (data?.system) queryClient.setQueryData(queryKeys.system, data.system)
+  if (data?.failures) queryClient.setQueryData(queryKeys.outboxFailures, data.failures)
+  return queryClient
+}
+
+const renderOverview = (queryClient: QueryClient) => render(
+  <QueryClientProvider client={queryClient}><OverviewPage /></QueryClientProvider>
+)
+
+describe("authenticated shell", () => {
+  it("keeps header preferences out and exposes account actions from the Sidebar footer username menu", async () => {
+    vi.stubGlobal("matchMedia", vi.fn(() => ({
+      matches: false,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn()
+    })))
+    const queryClient = overviewClient()
+    queryClient.setQueryData(queryKeys.session, { authenticated: true, username: "owner" })
+    const view = await render(
+      <QueryClientProvider client={queryClient}>
+        <ThemeProvider>
+          <AppShell>Dashboard</AppShell>
+        </ThemeProvider>
+      </QueryClientProvider>
+    )
+
+    expect(view.container.querySelector("header select")).toBeNull()
+    const account = buttonByName(view.container, "owner")
+    expect(account.closest('[data-slot="sidebar-footer"]')).not.toBeNull()
+    await act(async () => account.click())
+    expect(document.body.textContent).toContain(m.change_password())
+    expect(document.body.textContent).toContain(m.logout())
+  })
+})
+
+describe("Overview states", () => {
+  it("renders a distinct loading state", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>(() => {})))
+    const view = await renderOverview(overviewClient())
+
+    expect(view.container.querySelector('[aria-label="Loading overview"]')).not.toBeNull()
+  })
+
+  it("renders one actionable error state", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => json({ _tag: "Internal", requestId: "request-1" }, 500)))
+    const view = await renderOverview(overviewClient())
+    await act(async () => { await vi.waitFor(() => expect(view.container.textContent).toContain("Overview could not be loaded.")) })
+
+    expect(buttonByName(view.container, m.retry())).toBeInstanceOf(HTMLButtonElement)
+  })
+
+  it("renders the next setup action when no server exists", async () => {
+    const view = await renderOverview(overviewClient({ servers: [], libraries: [], system, failures: [] }))
+
+    expect(view.container.textContent).toContain("Add your first server")
+    expect(view.container.textContent).toContain(m.add_server())
+  })
+
+  it("links every degraded exception to the place that can resolve it", async () => {
+    const degradedServer = { ...server, health: "degraded" } as ServerView
+    const unusableLibrary = { ...library, name: "Offline films", sources: [] } as VirtualLibraryView
+    const failure = {
+      serverId: server.id,
+      code: "DeliveryFailed",
+      failedAtMs: 1,
+      attemptCount: 2,
+      nextAttemptAtMs: null,
+      uncertainSinceMs: null
+    } as OutboxFailureView
+    const view = await renderOverview(overviewClient({
+      servers: [degradedServer],
+      libraries: [unusableLibrary],
+      system: { ...system, upstreamHealthy: 0, upstreamDegraded: 1, outboxFailed: 1 },
+      failures: [failure]
+    }))
+
+    expect(view.container.textContent).toContain("Home")
+    expect(view.container.textContent).toContain("Offline films")
+    expect(view.container.textContent).toContain("State synchronization needs attention")
+    expect(view.container.textContent).toContain(m.servers())
+    expect(view.container.textContent).toContain(m.libraries())
+    expect(view.container.textContent).toContain(m.system())
+  })
+
+  it("renders one compact healthy state without metric cards", async () => {
+    const view = await renderOverview(overviewClient({
+      servers: [server], libraries: [library], system, failures: []
+    }))
+
+    expect(view.container.textContent).toContain("Everything is ready")
+    expect(view.container.querySelector('[data-slot="card"]')).toBeNull()
+    expect(view.container.textContent).toContain(m.servers())
+    expect(view.container.textContent).toContain(m.libraries())
+  })
 })
 
 describe("server page states", () => {

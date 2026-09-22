@@ -1,4 +1,3 @@
-import { useTheme } from "@/components/theme-provider"
 import {
   Breadcrumb,
   BreadcrumbItem,
@@ -7,6 +6,20 @@ import {
   BreadcrumbPage,
   BreadcrumbSeparator
 } from "@/components/ui/breadcrumb"
+import {
+  Drawer,
+  DrawerContent,
+  DrawerDescription,
+  DrawerHeader,
+  DrawerTitle
+} from "@/components/ui/drawer"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger
+} from "@/components/ui/dropdown-menu"
+import { ScrollArea } from "@/components/ui/scroll-area"
 import {
   Sidebar,
   SidebarContent,
@@ -22,17 +35,20 @@ import {
   SidebarRail,
   SidebarTrigger
 } from "@/components/ui/sidebar"
-import { logout, sessionQueryOptions } from "@/modules/auth/services/auth-service"
+import { PasswordForm } from "@/modules/auth/components/password-form"
+import { changePassword, logout, sessionQueryOptions } from "@/modules/auth/services/auth-service"
 import { m } from "@/paraglide/messages.js"
-import { getLocale, setLocale } from "@/paraglide/runtime.js"
-import { useQuery, useQueryClient } from "@tanstack/react-query"
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Link, useNavigate, useRouter, useRouterState } from "@tanstack/react-router"
 import {
   ActivityIcon,
+  ChevronsUpDownIcon,
   HouseIcon,
+  KeyRoundIcon,
   LibraryIcon,
   LogOutIcon,
-  ServerIcon
+  ServerIcon,
+  UserRoundIcon
 } from "lucide-react"
 import { useEffect, useState, type ReactNode } from "react"
 
@@ -49,9 +65,12 @@ export const AppShell = ({ children }: AppShellProps) => {
   const router = useRouter()
   const queryClient = useQueryClient()
   const session = useQuery(sessionQueryOptions)
-  const { theme, setTheme } = useTheme()
+  const password = useMutation({
+    mutationFn: (input: Parameters<typeof changePassword>[0]) => changePassword(input, queryClient)
+  })
   const [logoutError, setLogoutError] = useState(false)
   const [isLoggingOut, setIsLoggingOut] = useState(false)
+  const [passwordOpen, setPasswordOpen] = useState(false)
   const section = sectionFromPathname(pathname)
   const navigation = [
     { slug: "", label: m.overview(), icon: HouseIcon },
@@ -118,13 +137,32 @@ export const AppShell = ({ children }: AppShellProps) => {
           </SidebarGroup>
         </SidebarContent>
         <SidebarFooter>
-          <SidebarMenuButton
-            disabled={isLoggingOut}
-            onClick={() => void logOut()}
-          >
-            <LogOutIcon aria-hidden="true" />
-            <span className="group-data-[collapsible=icon]:hidden">{m.logout()}</span>
-          </SidebarMenuButton>
+          <SidebarMenu>
+            <SidebarMenuItem>
+              <DropdownMenu>
+                <DropdownMenuTrigger
+                  render={<SidebarMenuButton tooltip={session.data?.username ?? m.account_menu()} />}
+                >
+                  <UserRoundIcon aria-hidden="true" />
+                  <span className="min-w-0 flex-1 truncate group-data-[collapsible=icon]:hidden">
+                    {session.data?.username ?? m.account_menu()}
+                  </span>
+                  <ChevronsUpDownIcon aria-hidden="true" className="group-data-[collapsible=icon]:hidden" />
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="start" side="top" className="w-(--anchor-width)">
+                  <DropdownMenuItem onClick={() => setPasswordOpen(true)}>
+                    <KeyRoundIcon aria-hidden="true" />
+                    {m.change_password()}
+                  </DropdownMenuItem>
+                  <DropdownMenuItem disabled={isLoggingOut} onClick={() => void logOut()}>
+                    <LogOutIcon aria-hidden="true" />
+                    {m.logout()}
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </SidebarMenuItem>
+          </SidebarMenu>
+          {logoutError && <p role="alert" className="px-2 text-sm text-destructive">{m.request_failed()}</p>}
         </SidebarFooter>
         <SidebarRail />
       </Sidebar>
@@ -142,42 +180,31 @@ export const AppShell = ({ children }: AppShellProps) => {
               </BreadcrumbItem>
             </BreadcrumbList>
           </Breadcrumb>
-          <label className="sr-only" htmlFor="dashboard-language">{m.language_label()}</label>
-          <select
-            id="dashboard-language"
-            className="h-8 rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            value={getLocale()}
-            onChange={(event) => {
-              const locale = event.currentTarget.value
-              if (locale === "en" || locale === "zh-CN") {
-                document.documentElement.lang = locale
-                setLocale(locale)
-              }
-            }}
-          >
-            <option value="en">{m.language_english()}</option>
-            <option value="zh-CN">{m.language_chinese()}</option>
-          </select>
-          <label className="sr-only" htmlFor="dashboard-theme">{m.theme_label()}</label>
-          <select
-            id="dashboard-theme"
-            className="h-8 rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            value={theme}
-            onChange={(event) => {
-              const value = event.currentTarget.value
-              if (value === "system" || value === "light" || value === "dark") setTheme(value)
-            }}
-          >
-            <option value="system">{m.theme_system()}</option>
-            <option value="light">{m.theme_light()}</option>
-            <option value="dark">{m.theme_dark()}</option>
-          </select>
-          {logoutError && <p role="alert" className="basis-full text-sm text-destructive">{m.request_failed()}</p>}
         </header>
         <main id="main-content" className="flex-1 p-6 md:p-8">
           {children}
         </main>
       </SidebarInset>
+      <Drawer open={passwordOpen} onOpenChange={setPasswordOpen} swipeDirection="right">
+        <DrawerContent className="data-[swipe-axis=x]:sm:[--drawer-content-width:28rem]">
+          <DrawerHeader>
+            <DrawerTitle>{m.password_change_title()}</DrawerTitle>
+            <DrawerDescription>{m.password_change_description()}</DrawerDescription>
+          </DrawerHeader>
+          <ScrollArea className="min-h-0 flex-1">
+            <div className="p-4">
+              <PasswordForm
+                onChangePassword={(input) => password.mutateAsync(input)}
+                onChanged={async () => {
+                  setPasswordOpen(false)
+                  await router.invalidate()
+                  await navigate({ to: "/login" })
+                }}
+              />
+            </div>
+          </ScrollArea>
+        </DrawerContent>
+      </Drawer>
     </SidebarProvider>
   )
 }

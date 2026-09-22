@@ -1,14 +1,16 @@
 import { createFileRoute } from "@tanstack/react-router"
 
-import { m } from "@/paraglide/messages.js"
+import { librariesQueryOptions } from "@/modules/libraries/services/library-service"
+import { OverviewPage } from "@/modules/overview/overview-page"
+import { serversQueryOptions } from "@/modules/servers/services/server-service"
+import { outboxFailuresQueryOptions, systemQueryOptions } from "@/modules/system/services/system-service"
 
-const Overview = () => (
-  <div className="max-w-3xl space-y-2">
-    <h1 className="font-heading text-2xl font-medium">{m.overview()}</h1>
-    <p className="max-w-prose text-sm leading-6 text-muted-foreground">
-      {m.overview_description()}
-    </p>
-  </div>
-)
-
-export const Route = createFileRoute("/_authenticated/")({ component: Overview })
+export const Route = createFileRoute("/_authenticated/")({
+  loader: ({ context }) => Promise.all([
+    context.queryClient.prefetchQuery(serversQueryOptions(context.queryClient)),
+    context.queryClient.prefetchQuery(librariesQueryOptions(context.queryClient)),
+    context.queryClient.prefetchQuery(systemQueryOptions(context.queryClient)),
+    context.queryClient.prefetchQuery(outboxFailuresQueryOptions(context.queryClient))
+  ]),
+  component: OverviewPage
+})
