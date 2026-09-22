@@ -223,8 +223,14 @@ export const makeServerServiceLayer: Layer.Layer<ServerService, never, Repositor
         lastSuccessAtMs: generationChanged ? null : current.lastSuccessAtMs,
         updatedAtMs: nowMs
       }
-      if (current.verifiedCatalogId !== null) {
-        for (const endpoint of endpoints.filter(({ verifiedCatalogId }) => verifiedCatalogId === null)) {
+      if (current.verifiedCatalogId !== null || current.verifiedBaseUrl !== null) {
+        const changedEndpoints = endpoints.filter((endpoint) => {
+          const previous = current.endpoints.find(({ id }) => id === endpoint.id)
+          return previous === undefined ||
+            normalizeUpstreamBaseUrl(endpointUrl(previous).href) !==
+              normalizeUpstreamBaseUrl(endpointUrl(endpoint).href)
+        })
+        for (const endpoint of changedEndpoints) {
           const probed = yield* upstream.probeServerIdentity(candidate, endpoint).pipe(Effect.result)
           if (probed._tag === "Failure") {
             if (
@@ -233,6 +239,9 @@ export const makeServerServiceLayer: Layer.Layer<ServerService, never, Repositor
               (probed.failure._tag === "UpstreamRejected" && [500, 502, 503, 504].includes(probed.failure.status))
             ) continue
             return yield* Effect.fail(probed.failure)
+          }
+          if (current.verifiedCatalogId === null) {
+            return yield* Effect.fail(new CatalogIdentityUnverifiable({ serverId }))
           }
           if (probed.success !== current.verifiedCatalogId) {
             return yield* Effect.fail(probed.success === null

@@ -564,12 +564,14 @@ export const makeUpstreamClientLayer = (
         )
 
       const endpointForUrl = (server: UpstreamServer, url: URL): UpstreamEndpoint | undefined =>
-        eligibleEndpoints(server).find((endpoint) => {
+        eligibleEndpoints(server).map((endpoint) => {
           const base = endpointUrl(endpoint)
           const basePath = base.pathname.replace(/\/+$/, "")
+          return { endpoint, base, basePath }
+        }).filter(({ base, basePath }) => {
           const prefix = basePath === "" ? "/" : `${basePath}/`
           return url.origin === base.origin && (url.pathname === basePath || url.pathname.startsWith(prefix))
-        })
+        }).sort((left, right) => right.basePath.length - left.basePath.length)[0]?.endpoint
 
       const endpointAttemptsForUrl = (
         server: UpstreamServer,
@@ -956,9 +958,9 @@ export const makeUpstreamClientLayer = (
           Effect.catchTag("TimeoutError", () => Effect.fail(new UpstreamTimeout({ serverId: server.id }))),
           Effect.result
         )
-        const nextAttempt = attempt.endpoint?.id === endpointForUrl(server, current)?.id
-          ? endpointAttemptsForUrl(server, current)[1]
-          : undefined
+        const nextAttempt = endpointForUrl(server, current) === undefined
+          ? undefined
+          : endpointAttemptsForUrl(server, current)[1]
         if (fetched._tag === "Failure") {
           if (nextAttempt !== undefined && endpointFailure(fetched.failure)) {
             attempts[attemptIndex + 1] = nextAttempt

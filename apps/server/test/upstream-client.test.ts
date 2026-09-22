@@ -1106,6 +1106,93 @@ describe("UpstreamClient", () => {
     ])
   })
 
+  it("continues endpoint failover after redirecting to another configured endpoint", async () => {
+    const calls: Array<string> = []
+    const received = await run(
+      async () => { throw new Error("control fetch must not run") },
+      Effect.scoped(Effect.gen(function*() {
+        const client = yield* UpstreamClient
+        const response = yield* client.requestResource({
+          serverId: "server-1",
+          generation: 1,
+          url: new URL("https://one.example.com/Items/item/asset"),
+          accept: ["image/png"]
+        })
+        return { status: response.status, endpoint: response.headers.get("x-endpoint") }
+      })),
+      {
+        server: server({
+          endpoints: [
+            endpoint("one.example.com"),
+            endpoint("two.example.com", 1),
+            endpoint("three.example.com", 2)
+          ]
+        }),
+        fetchRegisteredResource: async (request) => {
+          calls.push(request.url)
+          if (request.url.startsWith("https://one.example.com/")) {
+            return new Response(null, {
+              status: 302,
+              headers: { location: "https://two.example.com/redirected?tag=signed" }
+            })
+          }
+          if (request.url.startsWith("https://two.example.com/")) return new Response(null, { status: 503 })
+          return new Response(null, { headers: { "x-endpoint": "three" } })
+        }
+      }
+    )
+
+    expect(received).toEqual({ status: 200, endpoint: "three" })
+    expect(calls).toEqual([
+      "https://one.example.com/Items/item/asset",
+      "https://two.example.com/redirected?tag=signed",
+      "https://three.example.com/redirected?tag=signed"
+    ])
+  })
+
+  it("attributes same-origin URLs to the longest configured base path", async () => {
+    const calls: Array<string> = []
+    const status = await run(
+      async () => { throw new Error("control fetch must not run") },
+      Effect.scoped(Effect.gen(function*() {
+        const client = yield* UpstreamClient
+        return (yield* client.requestResource({
+          serverId: "server-1",
+          generation: 1,
+          url: new URL("https://one.example.com/emby/backup/Items/item/asset?tag=signed"),
+          accept: ["image/png"]
+        })).status
+      })),
+      {
+        server: server({
+          endpoints: [
+            endpoint("one.example.com", 0, { path: "/emby", displayUrl: "https://one.example.com/emby" as any }),
+            endpoint("one.example.com", 1, {
+              path: "/emby/backup",
+              displayUrl: "https://one.example.com/emby/backup" as any
+            }),
+            endpoint("two.example.com", 2, {
+              path: "/emby/backup",
+              displayUrl: "https://two.example.com/emby/backup" as any
+            })
+          ]
+        }),
+        fetchRegisteredResource: async (request) => {
+          calls.push(request.url)
+          return request.url.startsWith("https://one.example.com/")
+            ? new Response(null, { status: 503 })
+            : new Response(null)
+        }
+      }
+    )
+
+    expect(status).toBe(200)
+    expect(calls).toEqual([
+      "https://one.example.com/emby/backup/Items/item/asset?tag=signed",
+      "https://two.example.com/emby/backup/Items/item/asset?tag=signed"
+    ])
+  })
+
   it("enforces registered resource origins on Workers", async () => {
     const version = {
       id: "version-1",

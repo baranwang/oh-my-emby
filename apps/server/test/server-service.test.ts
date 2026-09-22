@@ -438,10 +438,11 @@ describe("ServerService", () => {
       const service = yield* ServerService
       const created = yield* service.create(input)
       expect(yield* service.testConnection(created.id)).toMatchObject({ reachable: true, catalogId: null })
-      yield* service.update(created.id, { ...input,
+      const before = yield* service.getRecord(created.id)
+      expect((yield* Effect.flip(service.update(created.id, { ...input,
           endpoints: [endpointInput("two.example.com")]
-        })
-      expect((yield* Effect.flip(service.testConnection(created.id)))._tag).toBe("CatalogIdentityUnverifiable")
+        })))._tag).toBe("CatalogIdentityUnverifiable")
+      expect(yield* service.getRecord(created.id)).toEqual(before)
     }).pipe(Effect.provide(layer(async (input) => {
       const url = new Request(input).url
       return url.endsWith("/Users/AuthenticateByName")
