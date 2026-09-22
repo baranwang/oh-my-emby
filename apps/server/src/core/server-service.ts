@@ -48,7 +48,7 @@ export interface ServerServiceApi {
   readonly update: (
     serverId: string,
     input: ServerInput
-  ) => Effect.Effect<ServerView, ObsoleteGeneration | ServerNotFound | import("./errors.js").RepositoryError>
+  ) => Effect.Effect<ServerView, UpstreamFailure>
   readonly delete: (
     serverId: string
   ) => Effect.Effect<void, ServerNotFound | import("./errors.js").RepositoryError>
@@ -197,7 +197,7 @@ export const makeServerServiceLayer: Layer.Layer<ServerService, never, Repositor
     const update: ServerServiceApi["update"] = (serverId, input) => Effect.gen(function*() {
       const current = yield* getRecord(serverId)
       const nowMs = Date.now()
-        const endpoints = normalizedEndpoints(input.endpoints, nowMs, current.endpoints)
+      let endpoints = normalizedEndpoints(input.endpoints, nowMs, current.endpoints)
       const password = nextPassword(current.password, input.password)
       const authenticationChanged =
           endpointOrder(endpoints) !== endpointOrder(current.endpoints) ||
@@ -205,7 +205,7 @@ export const makeServerServiceLayer: Layer.Layer<ServerService, never, Repositor
       const generationChanged = authenticationChanged || input.enabled !== current.enabled ||
           input.userAgentPolicy !== current.userAgentPolicy ||
           input.userAgent !== current.userAgent
-        const saved = yield* repositories.saveServerConfiguration({
+      const candidate: UpstreamServer = {
         ...current,
         generation: generationChanged ? current.generation + 1 : current.generation,
         name: input.name,
@@ -222,7 +222,34 @@ export const makeServerServiceLayer: Layer.Layer<ServerService, never, Repositor
         health: generationChanged ? "unknown" : current.health,
         lastSuccessAtMs: generationChanged ? null : current.lastSuccessAtMs,
         updatedAtMs: nowMs
-          }, current.generation)
+      }
+      if (current.verifiedCatalogId !== null) {
+        for (const endpoint of endpoints.filter(({ verifiedCatalogId }) => verifiedCatalogId === null)) {
+          const probed = yield* upstream.probeServerIdentity(candidate, endpoint).pipe(Effect.result)
+          if (probed._tag === "Failure") {
+            if (
+              probed.failure._tag === "UpstreamUnavailable" ||
+              probed.failure._tag === "UpstreamTimeout" ||
+              (probed.failure._tag === "UpstreamRejected" && [500, 502, 503, 504].includes(probed.failure.status))
+            ) continue
+            return yield* Effect.fail(probed.failure)
+          }
+          if (probed.success !== current.verifiedCatalogId) {
+            return yield* Effect.fail(probed.success === null
+              ? new CatalogIdentityUnverifiable({ serverId })
+              : new CatalogIdentityMismatch({ serverId }))
+          }
+          endpoints = endpoints.map((item) => item.id === endpoint.id
+            ? {
+              ...item,
+              verifiedCatalogId: probed.success,
+              health: "healthy",
+              lastSuccessAtMs: nowMs
+            }
+            : item)
+        }
+      }
+      const saved = yield* repositories.saveServerConfiguration({ ...candidate, endpoints }, current.generation)
       if (saved === null) return yield* Effect.fail(new ObsoleteGeneration({ serverId }))
       return toView(saved)
     })

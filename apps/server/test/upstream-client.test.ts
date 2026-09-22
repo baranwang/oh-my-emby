@@ -91,6 +91,7 @@ describe("UpstreamClient", () => {
       readonly policy?: DestinationPolicy
       readonly timeoutMs?: number
       readonly rawBaseUrl?: string
+      readonly fetchRegisteredResource?: Parameters<typeof makeUpstreamClientLayer>[0]["fetchRegisteredResource"]
     } = {}
   ) => {
     const repositories = makeSqliteRepositoriesLayer({ filename })
@@ -107,7 +108,8 @@ describe("UpstreamClient", () => {
       makeUpstreamClientLayer({
         fetch,
         destinationPolicy: options.policy ?? workers,
-        timeoutMs: options.timeoutMs
+        timeoutMs: options.timeoutMs,
+        fetchRegisteredResource: options.fetchRegisteredResource
       }).pipe(Layer.provide(repositories))
     )))
   }
@@ -901,6 +903,207 @@ describe("UpstreamClient", () => {
     expect(observed?.headers.get("x-emby-authorization")).toBe(
       'MediaBrowser Client="oh-my-emby", Device="oh-my-emby", DeviceId="server-1", Version="0.0.0"'
     )
+  })
+
+  it.each(["transport", "timeout", "status"] as const)(
+    "fails playback preparation over to the next endpoint after %s failure",
+    async (failure) => {
+      const calls: Array<string> = []
+      const result = await run(async (input, init) => {
+        const request = new Request(input, init)
+        calls.push(request.url)
+        if (request.url.startsWith("https://one.example.com/")) {
+          if (failure === "transport") throw new TypeError("temporary network failure")
+          if (failure === "timeout") return await new Promise<Response>(() => undefined)
+          return new Response(null, { status: 503 })
+        }
+        return new Response(null, {
+          status: 302,
+          headers: { location: "https://cdn.example.net/video.mp4?auth_key=signed" }
+        })
+      }, Effect.gen(function*() {
+        const client = yield* UpstreamClient
+        return yield* client.resolvePlaybackRedirect({
+          serverId: "server-1",
+          generation: 1,
+          url: "https://one.example.com/Videos/item/stream?api_key=signed"
+        })
+      }), {
+        timeoutMs: 5,
+        server: server({ endpoints: [endpoint("one.example.com"), endpoint("two.example.com", 1)] })
+      })
+
+      expect(result.href).toBe("https://cdn.example.net/video.mp4?auth_key=signed")
+      expect(calls).toEqual([
+        "https://one.example.com/Videos/item/stream?api_key=signed",
+        "https://two.example.com/Videos/item/stream?api_key=signed"
+      ])
+    }
+  )
+
+  it.each([
+    ["image/png", "transport"],
+    ["image/png", "timeout"],
+    ["image/png", "status"],
+    ["text/plain", "transport"],
+    ["text/plain", "timeout"],
+    ["text/plain", "status"]
+  ] as const)("fails registered %s resources over after %s failure", async (contentType, failure) => {
+    const calls: Array<string> = []
+    const result = await run(
+      async () => { throw new Error("control fetch must not run") },
+      Effect.scoped(Effect.gen(function*() {
+        const client = yield* UpstreamClient
+        const response = yield* client.requestResource({
+          serverId: "server-1",
+          generation: 1,
+          url: new URL("https://one.example.com/Items/item/asset?tag=signed"),
+          accept: [contentType]
+        })
+        return {
+          contentType: response.headers.get("content-type"),
+          status: response.status
+        }
+      })),
+      {
+        timeoutMs: 5,
+        server: server({ endpoints: [endpoint("one.example.com"), endpoint("two.example.com", 1)] }),
+        fetchRegisteredResource: async (request) => {
+          calls.push(request.url)
+          if (request.url.startsWith("https://one.example.com/")) {
+            if (failure === "transport") throw new TypeError("temporary network failure")
+            if (failure === "timeout") return await new Promise<Response>(() => undefined)
+            return new Response(null, { status: 503 })
+          }
+          return new Response(null, { headers: { "content-type": contentType } })
+        }
+      }
+    )
+
+    expect(result).toEqual({ contentType, status: 200 })
+    expect(calls).toEqual([
+      "https://one.example.com/Items/item/asset?tag=signed",
+      "https://two.example.com/Items/item/asset?tag=signed"
+    ])
+  })
+
+  it.each([401, 404])("does not fail playback preparation over after HTTP %i", async (status) => {
+    const calls: Array<string> = []
+    const result = await run(async (input, init) => {
+      const request = new Request(input, init)
+      calls.push(request.url)
+      return new Response(null, { status })
+    }, Effect.gen(function*() {
+      const client = yield* UpstreamClient
+      return yield* client.resolvePlaybackRedirect({
+        serverId: "server-1",
+        generation: 1,
+        url: "https://one.example.com/Videos/item/stream"
+      })
+    }), {
+      server: server({ endpoints: [endpoint("one.example.com"), endpoint("two.example.com", 1)] })
+    })
+
+    expect(result.href).toBe("https://one.example.com/Videos/item/stream")
+    expect(calls).toEqual(["https://one.example.com/Videos/item/stream"])
+  })
+
+  it.each([401, 404])("does not fail registered resources over after HTTP %i", async (status) => {
+    const calls: Array<string> = []
+    const received = await run(
+      async () => { throw new Error("control fetch must not run") },
+      Effect.scoped(Effect.gen(function*() {
+        const client = yield* UpstreamClient
+        return (yield* client.requestResource({
+          serverId: "server-1",
+          generation: 1,
+          url: new URL("https://one.example.com/Items/item/asset"),
+          accept: ["image/png"]
+        })).status
+      })),
+      {
+        server: server({ endpoints: [endpoint("one.example.com"), endpoint("two.example.com", 1)] }),
+        fetchRegisteredResource: async (request) => {
+          calls.push(request.url)
+          return new Response(null, { status })
+        }
+      }
+    )
+
+    expect(received).toBe(status)
+    expect(calls).toEqual(["https://one.example.com/Items/item/asset"])
+  })
+
+  it("does not restart endpoint failover after redirecting to a registered CDN", async () => {
+    const calls: Array<string> = []
+    const status = await run(
+      async () => { throw new Error("control fetch must not run") },
+      Effect.scoped(Effect.gen(function*() {
+        const client = yield* UpstreamClient
+        return (yield* client.requestResource({
+          serverId: "server-1",
+          generation: 1,
+          url: new URL("https://one.example.com/Items/item/asset"),
+          accept: ["image/png"]
+        })).status
+      })),
+      {
+        policy: { platform: "workers", registeredResourceOrigins: ["https://cdn.example.net"] },
+        server: server({ endpoints: [endpoint("one.example.com"), endpoint("two.example.com", 1)] }),
+        fetchRegisteredResource: async (request) => {
+          calls.push(request.url)
+          if (request.url.startsWith("https://one.example.com/")) {
+            return new Response(null, {
+              status: 302,
+              headers: { location: "https://cdn.example.net/asset" }
+            })
+          }
+          if (request.url.startsWith("https://two.example.com/")) return new Response(null, { status: 200 })
+          return new Response(null, { status: 503 })
+        }
+      }
+    )
+
+    expect(status).toBe(503)
+    expect(calls).toEqual([
+      "https://one.example.com/Items/item/asset",
+      "https://cdn.example.net/asset"
+    ])
+  })
+
+  it("keeps endpoint failover available across a same-endpoint redirect", async () => {
+    const calls: Array<string> = []
+    const received = await run(
+      async () => { throw new Error("control fetch must not run") },
+      Effect.scoped(Effect.gen(function*() {
+        const client = yield* UpstreamClient
+        const response = yield* client.requestResource({
+          serverId: "server-1",
+          generation: 1,
+          url: new URL("https://one.example.com/Items/item/asset"),
+          accept: ["image/png"]
+        })
+        return { status: response.status, endpoint: response.headers.get("x-endpoint") }
+      })),
+      {
+        server: server({ endpoints: [endpoint("one.example.com"), endpoint("two.example.com", 1)] }),
+        fetchRegisteredResource: async (request) => {
+          calls.push(request.url)
+          if (request.url === "https://one.example.com/Items/item/asset") {
+            return new Response(null, { status: 302, headers: { location: "/redirected?tag=signed" } })
+          }
+          if (request.url.startsWith("https://one.example.com/")) return new Response(null, { status: 503 })
+          return new Response(null, { headers: { "x-endpoint": "two" } })
+        }
+      }
+    )
+
+    expect(received).toEqual({ status: 200, endpoint: "two" })
+    expect(calls).toEqual([
+      "https://one.example.com/Items/item/asset",
+      "https://one.example.com/redirected?tag=signed",
+      "https://two.example.com/redirected?tag=signed"
+    ])
   })
 
   it("enforces registered resource origins on Workers", async () => {

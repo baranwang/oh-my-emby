@@ -374,28 +374,63 @@ describe("ServerService", () => {
     )
   })
 
-  it("rejects a reported catalog mismatch and keeps that endpoint ineligible", async () => {
+  it("rejects a reported catalog mismatch before persisting an update", async () => {
     await Effect.runPromise(
       Effect.gen(function* () {
         const service = yield* ServerService
-        const created = yield* service.create({
+        const created = yield* service.create(input)
+        yield* service.testConnection(created.id)
+        const before = yield* service.getRecord(created.id)
+
+        expect((yield* Effect.flip(service.update(created.id, {
           ...input,
-          endpoints: [endpointInput("one.example.com"), endpointInput("mismatch.example.com")]
+          endpoints: [
+            endpointInput("one.example.com", created.endpoints[0]!.id),
+            endpointInput("mismatch.example.com")
+          ]
+        })))._tag).toBe("CatalogIdentityMismatch")
+        expect(yield* service.getRecord(created.id)).toEqual(before)
+      }).pipe(Effect.provide(layer(async (input, init) => {
+        const request = new Request(input, init)
+        return Response.json({
+          AccessToken: "token",
+          User: { Id: "upstream-user-id" },
+          ServerId: request.url.includes("mismatch.example.com") ? "different-id" : "stable-id"
         })
-        expect((yield* Effect.flip(service.testConnection(created.id)))._tag).toBe("CatalogIdentityMismatch")
-        const stored = yield* service.getRecord(created.id)
-        expect(stored.endpoints.map(({ verifiedCatalogId }) => verifiedCatalogId)).toEqual(["stable-id", null])
-    }).pipe(Effect.provide(layer(async (input, init) => {
-            const request = new Request(input, init)
-            return Response.json({
-              AccessToken: "token",
-              User: { Id: "upstream-user-id" },
-              ServerId: request.url.includes("mismatch.example.com") ? "different-id" : "stable-id"
-            })
-          })
-        )
-      )
+      })))
     )
+  })
+
+  it("saves an unreachable candidate endpoint as unverified and ineligible", async () => {
+    const calls: Array<string> = []
+    await Effect.runPromise(Effect.gen(function*() {
+      const service = yield* ServerService
+      const created = yield* service.create(input)
+      yield* service.testConnection(created.id)
+
+      const updated = yield* service.update(created.id, {
+        ...input,
+        endpoints: [
+          endpointInput("one.example.com", created.endpoints[0]!.id),
+          endpointInput("offline.example.com")
+        ]
+      })
+      expect(updated.endpoints[1]).toMatchObject({
+        host: "offline.example.com",
+        verifiedCatalogId: null,
+        health: "unknown"
+      })
+    }).pipe(Effect.provide(layer(async (input, init) => {
+      const request = new Request(input, init)
+      calls.push(request.url)
+      if (request.url.includes("offline.example.com")) return new Response(null, { status: 503 })
+      return Response.json({
+        AccessToken: "token",
+        User: { Id: "upstream-user-id" },
+        ServerId: "stable-id"
+      })
+    }))))
+    expect(calls).toContain("https://offline.example.com/Users/AuthenticateByName")
   })
 
   it("does not let an identity-less endpoint replacement reuse its namespace", async () => {

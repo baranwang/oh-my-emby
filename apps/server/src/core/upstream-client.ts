@@ -96,6 +96,11 @@ export interface UpstreamClientService {
     includeDiagnostic?: boolean,
     endpointId?: string
   ) => Effect.Effect<string | null, UpstreamFailure>
+  readonly probeServerIdentity: (
+    server: UpstreamServer,
+    endpoint: UpstreamEndpoint,
+    includeDiagnostic?: boolean
+  ) => Effect.Effect<string | null, UpstreamFailure>
   readonly listSourceLibraries: (
     serverId: string
   ) => Effect.Effect<ReadonlyArray<SourceLibrary>, UpstreamFailure>
@@ -566,6 +571,24 @@ export const makeUpstreamClientLayer = (
           return url.origin === base.origin && (url.pathname === basePath || url.pathname.startsWith(prefix))
         })
 
+      const endpointAttemptsForUrl = (
+        server: UpstreamServer,
+        url: URL
+      ): ReadonlyArray<{ readonly endpoint: UpstreamEndpoint; readonly url: URL }> => {
+        const endpoints = eligibleEndpoints(server)
+        const initial = endpointForUrl(server, url)
+        if (initial === undefined) return []
+        const initialBasePath = endpointUrl(initial).pathname.replace(/\/+$/, "")
+        const relativePath = url.pathname.slice(initialBasePath.length)
+        return endpoints.slice(endpoints.indexOf(initial)).map((endpoint) => {
+          const next = endpointUrl(endpoint)
+          const basePath = next.pathname.replace(/\/+$/, "")
+          next.pathname = `${basePath}${relativePath}` || "/"
+          next.search = url.search
+          return { endpoint, url: next }
+        })
+      }
+
       const endpointById = (
         server: UpstreamServer,
         endpointId: string
@@ -581,9 +604,10 @@ export const makeUpstreamClientLayer = (
         failure._tag === "UpstreamTimeout" ||
         (failure._tag === "UpstreamRejected" && failoverStatuses.has(failure.status))
 
-      const authenticate: UpstreamClientService["authenticate"] = (server, includeDiagnostic = false,
-        endpointId,
-        clientUserAgent
+      const authenticateServer = (server: UpstreamServer, includeDiagnostic = false,
+        endpointId?: string,
+        clientUserAgent?: string,
+        persist = true
       ) => deadline(Effect.gen(function*() {
     if (server.password === null) return yield* Effect.fail(new UpstreamRejected({ serverId: server.id, status: 401 }))
     const endpoint = endpointId === undefined ? server.endpoints[0] : yield* endpointById(server, endpointId)
@@ -601,14 +625,16 @@ export const makeUpstreamClientLayer = (
               }, null,
               includeDiagnostic)
     const authenticated = yield* decodeResponse(response, server.id, AuthenticationResponse, includeDiagnostic)
-    const saved = yield* repositories.saveServerResult({
-      serverId: server.id,
-      expectedGeneration: server.generation,
-      accessToken: authenticated.AccessToken,
-      accessTokenExpiresAtMs: null,
-      upstreamUserId: authenticated.User.Id,
-      updatedAtMs: Date.now()
-    })
+    const saved = persist
+      ? yield* repositories.saveServerResult({
+        serverId: server.id,
+        expectedGeneration: server.generation,
+        accessToken: authenticated.AccessToken,
+        accessTokenExpiresAtMs: null,
+        upstreamUserId: authenticated.User.Id,
+        updatedAtMs: Date.now()
+      })
+      : { ...server, accessToken: authenticated.AccessToken, upstreamUserId: authenticated.User.Id }
     if (saved === null) return yield* Effect.fail(new ObsoleteGeneration({ serverId: server.id }))
     return {
       server: saved,
@@ -616,6 +642,11 @@ export const makeUpstreamClientLayer = (
       upstreamUserId: authenticated.User.Id
     }
   }), server.id)
+
+      const authenticate: UpstreamClientService["authenticate"] = (server, includeDiagnostic = false,
+        endpointId,
+        clientUserAgent
+      ) => authenticateServer(server, includeDiagnostic, endpointId, clientUserAgent)
 
   const request: UpstreamClientService["request"] = <A>(
     input: UpstreamRequest,
@@ -738,27 +769,48 @@ export const makeUpstreamClientLayer = (
     )
   }
 
-  const getServerIdentity: UpstreamClientService["getServerIdentity"] = (serverId, includeDiagnostic = false,
-        endpointId
+      const serverIdentity = (
+        server: UpstreamServer,
+        endpoint: UpstreamEndpoint,
+        includeDiagnostic: boolean,
+        persistAuthentication: boolean
       ) => deadline(Effect.gen(function*() {
-    const server = yield* getServer(serverId)
-    const endpoint = endpointId === undefined ? server.endpoints[0] : yield* endpointById(server, endpointId)
-            if (endpoint === undefined) return yield* Effect.fail(new UpstreamUnavailable({ serverId }))
-            const authenticated = yield* authenticate(server, includeDiagnostic, endpoint.id)
+            const authenticated = yield* authenticateServer(
+              server,
+              includeDiagnostic,
+              endpoint.id,
+              undefined,
+              persistAuthentication
+            )
     if (authenticated.catalogId !== null) return authenticated.catalogId
     const refreshedEndpoint = yield* endpointById(authenticated.server, endpoint.id)
             const response = yield* fetchWithRedirects(authenticated.server,
               refreshedEndpoint,
               {
-      serverId,
+      serverId: server.id,
       generation: server.generation,
       path: "/System/Info/Public",
       method: "GET"
     }, null,
               includeDiagnostic)
-    const info = yield* decodeResponse(response, serverId, PublicSystemInfo, includeDiagnostic)
+    const info = yield* decodeResponse(response, server.id, PublicSystemInfo, includeDiagnostic)
     return info.Id?.trim() || null
-  }), serverId)
+  }), server.id)
+
+  const getServerIdentity: UpstreamClientService["getServerIdentity"] = (serverId, includeDiagnostic = false,
+        endpointId
+      ) => Effect.gen(function*() {
+    const server = yield* getServer(serverId)
+    const endpoint = endpointId === undefined ? server.endpoints[0] : yield* endpointById(server, endpointId)
+            if (endpoint === undefined) return yield* Effect.fail(new UpstreamUnavailable({ serverId }))
+            return yield* serverIdentity(server, endpoint, includeDiagnostic, true)
+  })
+
+      const probeServerIdentity: UpstreamClientService["probeServerIdentity"] = (
+        server,
+        endpoint,
+        includeDiagnostic = false
+      ) => serverIdentity(server, endpoint, includeDiagnostic, false)
 
   const listSourceLibraries: UpstreamClientService["listSourceLibraries"] = (serverId) => Effect.gen(function*() {
     const server = yield* getServer(serverId)
@@ -820,9 +872,8 @@ export const makeUpstreamClientLayer = (
       try: () => new URL(playback.url),
       catch: () => new InvalidUpstreamUrl()
     })
-    const endpoint = endpointForUrl(server, current)
-          if (endpoint === undefined) return yield* Effect.fail(new UpstreamInvalidResponse({ serverId: server.id }))
-    yield* validateDestination(current, server, endpoint, config.destinationPolicy)
+    const attempts = endpointAttemptsForUrl(server, current)
+          if (attempts.length === 0) return yield* Effect.fail(new UpstreamInvalidResponse({ serverId: server.id }))
     const headers = new Headers({
       accept: "*/*",
       range: "bytes=0-",
@@ -831,19 +882,34 @@ export const makeUpstreamClientLayer = (
       "x-emby-authorization": embyAuthorization(server)
     })
     if (server.accessToken !== null) headers.set("x-emby-token", server.accessToken)
-    const response = yield* fetchOnce(server, current, { method: "GET", headers, redirect: "manual" })
-    void response.body?.cancel().catch(() => undefined)
-    if (!redirects.has(response.status)) return current
-    const location = response.headers.get("location")
-    if (location === null) return yield* Effect.fail(new UpstreamInvalidResponse({ serverId: server.id }))
-    const next = yield* Effect.try({
-      try: () => new URL(location, current),
-      catch: () => new InvalidUpstreamUrl()
-    })
-    if ((next.protocol !== "http:" && next.protocol !== "https:") || next.username !== "" || next.password !== "") {
-      return yield* Effect.fail(new UpstreamInvalidResponse({ serverId: server.id }))
+    for (let index = 0; index < attempts.length; index++) {
+      const attempt = attempts[index]!
+      yield* validateDestination(attempt.url, server, attempt.endpoint, config.destinationPolicy)
+      const fetched = yield* fetchOnce(
+        server,
+        attempt.url,
+        { method: "GET", headers, redirect: "manual" }
+      ).pipe(Effect.result)
+      if (fetched._tag === "Failure") {
+        if (index + 1 < attempts.length && endpointFailure(fetched.failure)) continue
+        return yield* Effect.fail(fetched.failure)
+      }
+      const response = fetched.success
+      if (response.body !== null) yield* Effect.promise(() => response.body!.cancel()).pipe(Effect.ignore)
+      if (index + 1 < attempts.length && failoverStatuses.has(response.status)) continue
+      if (!redirects.has(response.status)) return attempt.url
+      const location = response.headers.get("location")
+      if (location === null) return yield* Effect.fail(new UpstreamInvalidResponse({ serverId: server.id }))
+      const next = yield* Effect.try({
+        try: () => new URL(location, attempt.url),
+        catch: () => new InvalidUpstreamUrl()
+      })
+      if ((next.protocol !== "http:" && next.protocol !== "https:") || next.username !== "" || next.password !== "") {
+        return yield* Effect.fail(new UpstreamInvalidResponse({ serverId: server.id }))
+      }
+      return next
     }
-    return next
+    return yield* Effect.fail(new UpstreamUnavailable({ serverId: server.id }))
   })
 
   const requestResource: UpstreamClientService["requestResource"] = (input) => Effect.gen(function*() {
@@ -856,16 +922,22 @@ export const makeUpstreamClientLayer = (
     if (!server.enabled || server.health !== "healthy" || eligibleEndpoints(server).length === 0) {
       return yield* Effect.fail(new UpstreamUnavailable({ serverId: server.id }))
     }
-    let current = new URL(input.url)
-    const visited = new Set<string>()
-    for (let redirectCount = 0; ; redirectCount++) {
-      yield* validateDestination(current, server,
-              endpointForUrl(server, current),
-              config.destinationPolicy, "registered-resource")
-      if (visited.has(current.href)) return yield* Effect.fail(new RedirectLoop({ serverId: server.id }))
-      visited.add(current.href)
-      const response = yield* Effect.tryPromise({
-        try: (signal) => transport(new Request(current, {
+    const initial = new URL(input.url)
+    const endpointAttempts = endpointAttemptsForUrl(server, initial)
+    const attempts: Array<{ readonly endpoint?: UpstreamEndpoint; readonly url: URL }> =
+      endpointAttempts.length === 0 ? [{ url: initial }] : [...endpointAttempts]
+    attempts: for (let attemptIndex = 0; attemptIndex < attempts.length; attemptIndex++) {
+      const attempt = attempts[attemptIndex]!
+      let current = attempt.url
+      const visited = new Set<string>()
+      for (let redirectCount = 0; ; redirectCount++) {
+        yield* validateDestination(current, server,
+                endpointForUrl(server, current),
+                config.destinationPolicy, "registered-resource")
+        if (visited.has(current.href)) return yield* Effect.fail(new RedirectLoop({ serverId: server.id }))
+        visited.add(current.href)
+        const fetched = yield* Effect.tryPromise({
+          try: (signal) => transport(new Request(current, {
           method: "GET",
           redirect: "manual",
           signal,
@@ -873,14 +945,34 @@ export const makeUpstreamClientLayer = (
             accept: input.accept.join(", "),
             "user-agent": effectiveUserAgent(server, input.clientUserAgent)
                     }
-        }), {
-          server,
-          destinationPolicy: config.destinationPolicy,
-          isConnectedAddressAllowed: connectedAddressAllowed(current, config.destinationPolicy)
-        }),
-        catch: () => new UpstreamUnavailable({ serverId: server.id })
-      })
-      if (!redirects.has(response.status)) {
+          }), {
+            server,
+            destinationPolicy: config.destinationPolicy,
+            isConnectedAddressAllowed: connectedAddressAllowed(current, config.destinationPolicy)
+          }),
+          catch: () => new UpstreamUnavailable({ serverId: server.id })
+        }).pipe(
+          Effect.timeout(timeoutMs),
+          Effect.catchTag("TimeoutError", () => Effect.fail(new UpstreamTimeout({ serverId: server.id }))),
+          Effect.result
+        )
+        const nextAttempt = attempt.endpoint?.id === endpointForUrl(server, current)?.id
+          ? endpointAttemptsForUrl(server, current)[1]
+          : undefined
+        if (fetched._tag === "Failure") {
+          if (nextAttempt !== undefined && endpointFailure(fetched.failure)) {
+            attempts[attemptIndex + 1] = nextAttempt
+            continue attempts
+          }
+          return yield* Effect.fail(fetched.failure)
+        }
+        const response = fetched.success
+        if (nextAttempt !== undefined && failoverStatuses.has(response.status)) {
+          if (response.body !== null) yield* Effect.promise(() => response.body!.cancel()).pipe(Effect.ignore)
+          attempts[attemptIndex + 1] = nextAttempt
+          continue attempts
+        }
+        if (!redirects.has(response.status)) {
         const latest = yield* getServer(server.id)
         if (latest.generation !== input.generation) {
           if (response.body !== null) yield* Effect.promise(() => response.body!.cancel()).pipe(Effect.ignore)
@@ -892,28 +984,31 @@ export const makeUpstreamClientLayer = (
             ? Effect.void
             : Effect.promise(() => value.body!.cancel()).pipe(Effect.ignore)
         )
+        }
+        if (response.body !== null) yield* Effect.promise(() => response.body!.cancel()).pipe(Effect.ignore)
+        if (redirectCount >= MAX_REDIRECTS) {
+          return yield* Effect.fail(new RedirectLimitExceeded({ serverId: server.id }))
+        }
+        const location = response.headers.get("location")
+        if (location === null) return yield* Effect.fail(new UpstreamInvalidResponse({ serverId: server.id }))
+        const next = yield* Effect.try({
+          try: () => new URL(location, current),
+          catch: () => new InvalidUpstreamUrl()
+        })
+        if (current.protocol === "https:" && next.protocol === "http:") {
+          return yield* Effect.fail(new HttpsDowngrade({ serverId: server.id }))
+        }
+        current = next
       }
-      if (response.body !== null) yield* Effect.promise(() => response.body!.cancel()).pipe(Effect.ignore)
-      if (redirectCount >= MAX_REDIRECTS) {
-        return yield* Effect.fail(new RedirectLimitExceeded({ serverId: server.id }))
-      }
-      const location = response.headers.get("location")
-      if (location === null) return yield* Effect.fail(new UpstreamInvalidResponse({ serverId: server.id }))
-      const next = yield* Effect.try({
-        try: () => new URL(location, current),
-        catch: () => new InvalidUpstreamUrl()
-      })
-      if (current.protocol === "https:" && next.protocol === "http:") {
-        return yield* Effect.fail(new HttpsDowngrade({ serverId: server.id }))
-      }
-      current = next
     }
+    return yield* Effect.fail(new UpstreamUnavailable({ serverId: server.id }))
   })
 
   return UpstreamClient.of({
     request,
     authenticate,
     getServerIdentity,
+    probeServerIdentity,
     listSourceLibraries,
     resolvePlayback,
     resolvePlaybackRedirect,
