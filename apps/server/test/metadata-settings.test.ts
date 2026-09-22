@@ -108,7 +108,7 @@ describe("MetadataSettings", () => {
     ])
   })
 
-  it("retains an observed degraded status until a credential is replaced or cleared", async () => {
+  it("retains an observed degraded status across saves until the credential is cleared", async () => {
     await Effect.runPromise(Effect.gen(function*() {
       const repository = yield* Repositories
       yield* repository.writeMetadataSettings([
@@ -131,7 +131,15 @@ describe("MetadataSettings", () => {
         { id: "trakt", enabled: false, order: 1, language: null, credential: { _tag: "Preserve" } }
       ] })
     }))
-    expect(replaced.providers[0]?.status).toBe("ready")
+    expect(replaced.providers[0]?.status).toBe("degraded")
+
+    const cleared = await run(Effect.gen(function*() {
+      return yield* (yield* MetadataSettings).update({ providers: [
+        { id: "tmdb", enabled: false, order: 0, language: null, credential: { _tag: "Clear" } },
+        { id: "trakt", enabled: false, order: 1, language: null, credential: { _tag: "Preserve" } }
+      ] })
+    }))
+    expect(cleared.providers[0]?.status).toBe("unconfigured")
   })
 
   it("rejects missing or duplicate provider IDs and duplicate order without writing", async () => {

@@ -80,7 +80,7 @@ export const makeMetadataSettingsLayer: Layer.Layer<MetadataSettings, never, Rep
           credential,
           status: credential === null
             ? "unconfigured" as const
-            : provider.credential._tag === "Preserve" && previous.status === "degraded"
+            : previous.status === "degraded"
               ? "degraded" as const
               : "ready" as const,
           updatedAtMs: nowMs
