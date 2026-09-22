@@ -27,6 +27,12 @@ describe("Dashboard contracts", () => {
   it.each([
     ["http endpoint", { protocol: "http", host: "192.168.1.10", port: 8096, path: "/emby" }, true],
     ["https endpoint", { protocol: "https", host: "emby.example.com", port: null, path: "" }, true],
+    ["Unicode IDN host", { protocol: "https", host: "例子.测试", port: null, path: "" }, true],
+    [
+      "expanded IPv6 host",
+      { protocol: "https", host: "[2001:0db8:0:0:0:0:0:1]", port: null, path: "" },
+      true,
+    ],
     [
       "unsupported protocol",
       { protocol: "ftp", host: "emby.example.com", port: null, path: "" },

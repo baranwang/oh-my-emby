@@ -55,7 +55,9 @@ const isEndpointHost = (host: string) => {
   try {
     const url = new URL(`http://${host}`);
     return (
-      url.host.toLowerCase() === host.toLowerCase() &&
+      host === host.trim() &&
+      (host.startsWith("[") ? /^\[[^\]]+\]$/.test(host) : !host.includes(":")) &&
+      url.hostname !== "" &&
       url.username === "" &&
       url.password === "" &&
       url.port === "" &&
