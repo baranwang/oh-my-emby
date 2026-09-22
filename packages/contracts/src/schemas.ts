@@ -51,6 +51,27 @@ export const MetadataProviderId = Schema.Literals(["tmdb", "trakt"]);
 export const MetadataProviderStatus = Schema.Literals(["unconfigured", "ready", "degraded"]);
 
 const EndpointPort = Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 65535 }));
+const isEndpointHost = (host: string) => {
+  try {
+    const url = new URL(`http://${host}`);
+    return (
+      url.host.toLowerCase() === host.toLowerCase() &&
+      url.username === "" &&
+      url.password === "" &&
+      url.port === "" &&
+      url.pathname === "/" &&
+      url.search === "" &&
+      url.hash === ""
+    );
+  } catch {
+    return false;
+  }
+};
+const EndpointHost = Schema.NonEmptyString.check(
+  Schema.makeFilter(isEndpointHost, {
+    expected: "a hostname without credentials, port, path, query, or fragment",
+  }),
+);
 const EndpointPath = Schema.String.check(
   Schema.makeFilter(
     (path) => path === "" || (path.startsWith("/") && !path.includes("?") && !path.includes("#")),
@@ -59,7 +80,7 @@ const EndpointPath = Schema.String.check(
 );
 const ServerEndpointFields = {
   protocol: Schema.Literals(["http", "https"]),
-  host: Schema.NonEmptyString,
+  host: EndpointHost,
   port: Schema.NullOr(EndpointPort),
   path: EndpointPath,
 };
@@ -70,9 +91,8 @@ export const ServerEndpointInput = Schema.Struct({
 });
 
 const endpointKey = (endpoint: typeof ServerEndpointInput.Type) => {
-  const port = endpoint.port ?? (endpoint.protocol === "http" ? 80 : 443);
-  const path = endpoint.path === "/" ? "" : endpoint.path.replace(/\/+$/, "");
-  return `${endpoint.protocol}://${endpoint.host.toLowerCase()}:${port}${path}`;
+  const port = endpoint.port === null ? "" : `:${endpoint.port}`;
+  return new URL(`${endpoint.protocol}://${endpoint.host}${port}${endpoint.path}`).href;
 };
 
 const ServerEndpointsInput = Schema.Array(ServerEndpointInput).check(

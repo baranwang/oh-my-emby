@@ -33,9 +33,21 @@ describe("Dashboard contracts", () => {
       false,
     ],
     ["port zero", { protocol: "https", host: "emby.example.com", port: 0, path: "" }, false],
+    ["minimum port", { protocol: "https", host: "emby.example.com", port: 1, path: "" }, true],
+    ["maximum port", { protocol: "https", host: "emby.example.com", port: 65535, path: "" }, true],
     [
       "port above range",
       { protocol: "https", host: "emby.example.com", port: 65536, path: "" },
+      false,
+    ],
+    [
+      "non-integer port",
+      { protocol: "https", host: "emby.example.com", port: 8096.5, path: "" },
+      false,
+    ],
+    [
+      "host with userinfo",
+      { protocol: "https", host: "alice:secret@emby.example.com", port: null, path: "" },
       false,
     ],
     [
@@ -95,6 +107,16 @@ describe("Dashboard contracts", () => {
         endpoints: [
           { protocol: "https", host: "emby.example.com", port: null, path: "" },
           { protocol: "https", host: "EMBY.EXAMPLE.COM", port: 443, path: "/" },
+        ],
+      }),
+    ).rejects.toBeDefined();
+    await expect(
+      Schema.decodeUnknownPromise(ServerInput)({
+        ...baseServer,
+        ...fixed,
+        endpoints: [
+          { protocol: "https", host: "emby.example.com", port: null, path: "" },
+          { protocol: "https", host: "emby.example.com", port: null, path: "/a/../" },
         ],
       }),
     ).rejects.toBeDefined();
