@@ -272,6 +272,31 @@ export const repositoryContract = (makeHarness: () => Promise<RepositoryHarness>
       }).pipe(Effect.provide(harness.layer)))
     })
 
+    it("rejects a replayed server configuration without replacing endpoints", async () => {
+      const original = server("server-endpoint-replay")
+      const accepted = {
+        ...original,
+        generation: 2,
+        updatedAtMs: 3_000,
+        endpoints: [endpoint("endpoint-accepted", "https", "accepted.example.com", null, "", 0)]
+      }
+
+      await Effect.runPromise(Effect.gen(function*() {
+        const repo = yield* Repositories
+        yield* repo.saveServer(original)
+        expect(yield* repo.saveServerConfiguration(accepted, 1)).not.toBeNull()
+
+        const replayed = yield* repo.saveServerConfiguration({
+          ...accepted,
+          endpoints: [endpoint("endpoint-replayed", "https", "replayed.example.com", null, "", 0)]
+        }, 1)
+        expect(replayed).toBeNull()
+
+        const persisted = yield* repo.getServer(original.id)
+        expect(persisted?.endpoints.map(({ id }) => id)).toEqual(["endpoint-accepted"])
+      }).pipe(Effect.provide(harness.layer)))
+    })
+
     it("seeds and atomically round-trips the two metadata provider settings", async () => {
       const configured: readonly [MetadataProviderSetting, MetadataProviderSetting] = [
         {

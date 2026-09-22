@@ -1078,10 +1078,10 @@ const makeRepositories = Effect.gen(function*() {
     database(
       "saveServerConfiguration",
       Effect.gen(function* () {
-        const fenceSql =
-          "SELECT 1 FROM upstream_servers WHERE id = ? AND generation = ? AND updated_at_ms = ?"
-        yield* sql.batch([
-          sql.unsafe(
+        const fenceSql = "SELECT 1 FROM upstream_servers WHERE id = ? AND generation = ?"
+        const results = yield* sql.batch([
+          ...replaceEndpointStatements(input, fenceSql, [input.id, expectedGeneration]),
+          sql.unsafe<{ readonly id: string }>(
             `
         UPDATE upstream_servers SET
           verified_catalog_id = ?, verified_base_url = ?, generation = ?, name = ?, base_url = ?,
@@ -1089,6 +1089,7 @@ const makeRepositories = Effect.gen(function*() {
           user_agent_policy = ?,
           enabled = ?, health = ?, last_success_at_ms = ?, updated_at_ms = ?
         WHERE id = ? AND generation = ?
+        RETURNING id
       `,
             [
               input.verifiedCatalogId,
@@ -1110,17 +1111,10 @@ const makeRepositories = Effect.gen(function*() {
               input.id,
               expectedGeneration
             ]
-          ),
-          ...replaceEndpointStatements(input, fenceSql, [
-            input.id,
-            input.generation,
-            input.updatedAtMs
-          ])
+          )
         ])
-        const saved = yield* readServer(input.id)
-        return saved?.generation === input.generation && saved.updatedAtMs === input.updatedAtMs
-          ? saved
-          : null
+        if (results[results.length - 1]?.[0] === undefined) return null
+        return yield* readServer(input.id)
       })
     )
 
