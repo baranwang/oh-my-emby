@@ -166,6 +166,29 @@ describe("server query behavior", () => {
     expect(invalidate).toHaveBeenCalledWith({ queryKey: queryKeys.serverHealth("server-1"), exact: true })
   })
 
+  it("refreshes persisted health after a rejected connection test", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => json({
+      _tag: "CatalogIdentityMismatch",
+      serverId: "server-1"
+    }, 409)))
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries").mockResolvedValue()
+
+    await expect(testServerConnection("server-1", queryClient)).rejects.toBeTruthy()
+
+    for (const queryKey of [
+      queryKeys.servers,
+      queryKeys.server("server-1"),
+      queryKeys.serverHealth("server-1"),
+      queryKeys.serverLibraries("server-1"),
+      queryKeys.libraries,
+      queryKeys.system,
+      queryKeys.outboxFailures
+    ]) {
+      expect(invalidate).toHaveBeenCalledWith({ queryKey, exact: true })
+    }
+  })
+
   it("invalidates the list and Overview constituents after creating a server", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => json(server)))
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })

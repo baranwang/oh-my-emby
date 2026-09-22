@@ -298,6 +298,15 @@ describe("server page states", () => {
     expect(markup).toContain("Home")
     expect(markup).toContain("https://emby.example.com")
   })
+
+  it("names each server edit action", () => {
+    const archive = { ...server, id: "server-2", name: "Archive" }
+    const markup = renderToStaticMarkup(
+      <ServerList state="success" servers={[server, archive]} onRetry={vi.fn()} onCreate={vi.fn()} />
+    )
+    expect(markup).toContain(m.server_edit_action({ name: "Home" }))
+    expect(markup).toContain(m.server_edit_action({ name: "Archive" }))
+  })
 })
 
 it("distinguishes missing health from stale health", () => {

@@ -74,15 +74,17 @@ export const deleteServer = async (id: ServerId, queryClient: QueryClient) => {
 }
 
 export const testServerConnection = async (id: ServerId, queryClient: QueryClient) => {
-  const result = await runProtected(apiClient.servers.testServerConnection({ params: { id } }), queryClient)
-  await invalidate(queryClient, [
-    queryKeys.servers,
-    queryKeys.server(id),
-    queryKeys.serverHealth(id),
-    queryKeys.serverLibraries(id),
-    queryKeys.libraries,
-    queryKeys.system,
-    queryKeys.outboxFailures
-  ])
-  return result
+  try {
+    return await runProtected(apiClient.servers.testServerConnection({ params: { id } }), queryClient)
+  } finally {
+    await invalidate(queryClient, [
+      queryKeys.servers,
+      queryKeys.server(id),
+      queryKeys.serverHealth(id),
+      queryKeys.serverLibraries(id),
+      queryKeys.libraries,
+      queryKeys.system,
+      queryKeys.outboxFailures
+    ])
+  }
 }

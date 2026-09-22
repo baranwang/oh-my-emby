@@ -87,7 +87,8 @@ export const ServerList = ({ state, servers, onRetry, onCreate }: ServerListProp
                   size="sm"
                   variant="outline"
                 >
-                  {m.server_edit_title()}
+                  <span className="sr-only">{m.server_edit_action({ name: server.name })}</span>
+                  <span aria-hidden="true">{m.server_edit_title()}</span>
                   <ArrowRightIcon />
                 </Button>
               </div>
