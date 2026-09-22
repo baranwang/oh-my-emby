@@ -1,8 +1,8 @@
 import { act } from "react"
 import { createRoot } from "react-dom/client"
 import { renderToStaticMarkup } from "react-dom/server"
-import { QueryClient } from "@tanstack/react-query"
-import { createMemoryHistory } from "@tanstack/react-router"
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
+import { createMemoryHistory, RouterProvider } from "@tanstack/react-router"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { sectionFromPathname } from "../src/components/app-shell/app-shell.js"
@@ -156,6 +156,37 @@ describe("Dashboard authentication routing", () => {
     expect(router.state.location.publicHref).toBe("/dashboard/servers")
     expect(router.state.matches.some((match) => match.routeId === "/_authenticated/servers/"))
       .toBe(true)
+  })
+
+  it("clears an expired drawer session and redirects after a protected 401", async () => {
+    let sessionReads = 0
+    const fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const path = new URL(input instanceof Request ? input.url : input.toString()).pathname
+      if (path === "/api/dashboard/bootstrap") return json({ initialized: true })
+      if (path === "/api/dashboard/session") return json(
+        sessionReads++ === 0
+          ? { authenticated: true, username: "owner" }
+          : { authenticated: false, username: null }
+      )
+      if (path === "/api/dashboard/servers" || path === "/api/dashboard/servers/server-1") {
+        return json({ _tag: "Unauthorized" }, 401)
+      }
+      return json({ _tag: "NotFound" }, 404)
+    })
+    const { queryClient, router } = makeTestRouter("/dashboard/servers/server-1", fetch)
+    const container = document.body.appendChild(document.createElement("div"))
+    const root = createRoot(container)
+
+    await router.load()
+    await act(async () => root.render(
+      <QueryClientProvider client={queryClient}><RouterProvider router={router} /></QueryClientProvider>
+    ))
+    await vi.waitFor(() => expect(router.state.location.publicHref).toBe("/dashboard/login"))
+
+    expect(queryClient.getQueryData(queryKeys.session)).toEqual({ authenticated: false, username: null })
+    expect(router.state.matches.some((match) => match.routeId.startsWith("/_authenticated/"))).toBe(false)
+    await act(async () => root.unmount())
+    container.remove()
   })
 })
 

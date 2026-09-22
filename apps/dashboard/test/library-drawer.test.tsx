@@ -143,6 +143,24 @@ describe("route-controlled virtual-library Drawer", () => {
     expect(router.state.location.publicHref).toBe("/dashboard/libraries/library-1")
   })
 
+  it("keeps a direct edit Drawer open after remounting at the same URL", async () => {
+    const path = "/dashboard/libraries/library-1"
+    const first = await renderRoute(path, fetchFor())
+    expect(first.router.state.location.publicHref).toBe(path)
+    expect(document.body.querySelector('[data-slot="drawer-popup"]')).not.toBeNull()
+
+    while (mounted.length) {
+      const item = mounted.pop()
+      if (!item) continue
+      await act(async () => item.root.unmount())
+      item.container.remove()
+    }
+
+    const refreshed = await renderRoute(path, fetchFor())
+    expect(refreshed.router.state.location.publicHref).toBe(path)
+    expect(document.body.querySelector('[data-slot="drawer-popup"]')).not.toBeNull()
+  })
+
   it("renders a typed missing-ID failure with a collection return action", async () => {
     const { router } = await renderRoute("/dashboard/libraries/library-1", fetchFor({ missing: true }))
 

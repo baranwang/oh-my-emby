@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { UpstreamUnavailable } from "../src/core/errors.js"
 import { Federation, makeFederationLayer } from "../src/core/federation.js"
 import { makeIdentityLayer } from "../src/core/identity.js"
-import { MetadataProviders } from "../src/core/metadata-providers.js"
+import { makeMetadataProvidersLayer, MetadataProviders } from "../src/core/metadata-providers.js"
 import type { UpstreamServer } from "../src/core/model.js"
 import { Repositories, type RepositoriesService } from "../src/core/repositories.js"
 import { makeUpstreamClientLayer, UpstreamClient } from "../src/core/upstream-client.js"
@@ -462,6 +462,49 @@ export const crossPlatformAcceptance = (
       await publicServers.text()
     ].join("\n")
     for (const secret of secretValues) expect(publicBodies).not.toContain(secret)
+  })
+
+  it("fails closed when a credential-bearing provider response redirects", async () => {
+    const cookie = await claimOwner(app)
+    const secret = "tmdb-redirect-secret"
+    const savedSettings = await app.request("/api/dashboard/metadata-settings", {
+      method: "PUT",
+      headers: { ...jsonHeaders(app.publicOrigin), cookie },
+      body: JSON.stringify({ providers: [
+        { id: "tmdb", enabled: true, order: 0, language: null, credential: { _tag: "Set", value: secret } },
+        { id: "trakt", enabled: false, order: 1, language: null, credential: { _tag: "Clear" } }
+      ] })
+    })
+    expect(savedSettings.status).toBe(200)
+
+    const federation = await prepareFederation(app)
+    const [record] = await useRepositories(app.repositories, (repositories) =>
+      repositories.readCatalogItems([federation.page.items[0]!.id]))
+    expect(record).toBeDefined()
+
+    const requests: Array<Request> = []
+    const metadataProviders = makeMetadataProvidersLayer({
+      fetch: async (input, init) => {
+        const request = new Request(input, init)
+        requests.push(request)
+        return new Response(JSON.stringify({ movie_results: [{ title: secret }] }), {
+          status: 302,
+          headers: { location: "https://redirected.example.com/metadata" }
+        })
+      }
+    }).pipe(Layer.provide(app.repositories))
+    const refreshed = await Effect.runPromise(Effect.gen(function*() {
+      return yield* (yield* MetadataProviders).refresh(record!)
+    }).pipe(Effect.provide(metadataProviders)))
+
+    expect(requests.map(({ url }) => new URL(url).origin)).toEqual(["https://api.themoviedb.org"])
+    expect(requests[0]?.headers.get("authorization")).toBe(`Bearer ${secret}`)
+    expect(refreshed.canonical.displayMetadata).toEqual(record!.canonical.displayMetadata)
+    expect(JSON.stringify(refreshed)).not.toContain(secret)
+    await useRepositories(app.repositories, (repositories) => Effect.gen(function*() {
+      expect(yield* repositories.readExternalMetadata("tmdb", "imdb:title", "tt10")).toBeNull()
+      expect((yield* repositories.readMetadataSettings()).find(({ id }) => id === "tmdb")?.status).toBe("degraded")
+    }))
   })
 
   it("preserves repository encoding, source order, and applied migrations", async () => {
