@@ -138,8 +138,10 @@ const tmdbPayload = (value: unknown, itemType: string): ExternalMetadataPayload 
   )
 }
 
-const traktPayload = (value: unknown): ExternalMetadataPayload => {
-  if (!object(value)) throw new TypeError("invalid Trakt response")
+const traktPayload = (value: unknown, requestedImdbId: string): ExternalMetadataPayload => {
+  if (!object(value) || !object(value.ids) || value.ids.imdb !== requestedImdbId) {
+    throw new TypeError("invalid Trakt response")
+  }
   const images = object(value.images) ? value.images : {}
   return payload(
     text(value.title),
@@ -239,15 +241,14 @@ export const makeMetadataProvidersLayer = (
     const deadlineMs = config.deadlineMs ?? PROVIDER_DEADLINE_MS
     const maxResponseBytes = config.maxResponseBytes ?? MAX_PROVIDER_RESPONSE_BYTES
 
-    const updateStatus = (providerId: ProviderId, status: "ready" | "degraded") => Effect.gen(function*() {
-      const current = yield* repositories.readMetadataSettings()
-      const provider = current.find(({ id }) => id === providerId)
-      if (provider === undefined || provider.status === status || provider.credential === null) return
-      yield* repositories.writeMetadataSettings(current.map((setting) => setting.id === providerId
-        ? { ...setting, status }
-        : setting
-      ) as unknown as [MetadataProviderSetting, MetadataProviderSetting])
-    })
+    const updateStatus = (setting: MetadataProviderSetting, status: "ready" | "degraded") =>
+      setting.status === status || setting.credential === null
+        ? Effect.void
+        : repositories.updateMetadataProviderStatus({
+            providerId: setting.id,
+            expectedUpdatedAtMs: setting.updatedAtMs,
+            status
+          }).pipe(Effect.asVoid)
 
     const requestJson = (
       setting: MetadataProviderSetting,
@@ -307,7 +308,7 @@ export const makeMetadataProvidersLayer = (
       } }))
       if (!result.found) return null
       return yield* Effect.try({
-        try: () => traktPayload(result.value),
+        try: () => traktPayload(result.value, imdbId),
         catch: () => providerFailure(setting.id, "invalid-response")
       })
     })
@@ -315,7 +316,9 @@ export const makeMetadataProvidersLayer = (
     const identity = (record: CatalogItemRecord) => {
       if (record.canonical.itemType !== "Movie" && record.canonical.itemType !== "Series") return null
       const claim = record.claims.find(({ namespace, state }) => namespace === "imdb:title" && state === "exact")
-      return claim === undefined ? null : { namespace: claim.namespace, value: claim.value }
+      return claim === undefined || !/^tt\d+$/.test(claim.value)
+        ? null
+        : { namespace: claim.namespace, value: claim.value }
     }
 
     const readCached = (
@@ -393,13 +396,13 @@ export const makeMetadataProvidersLayer = (
         const stale = yield* readCached(setting, key, false)
         const attempted = yield* fetchPayload(setting, record.canonical.itemType, key.value).pipe(Effect.result)
         if (Result.isFailure(attempted)) {
-          yield* updateStatus(setting.id, "degraded")
+          yield* updateStatus(setting, "degraded")
           const normalized = stale?.found ? cachedPayload(setting.id, stale.payload) : null
           if (normalized !== null) values.push(normalized)
           continue
         }
         yield* writeCache(setting, key, attempted.success)
-        yield* updateStatus(setting.id, "ready")
+        yield* updateStatus(setting, "ready")
         if (attempted.success !== null) values.push(attempted.success)
       }
       const external = mergePayloads(values)

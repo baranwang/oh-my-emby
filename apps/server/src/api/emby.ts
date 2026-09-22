@@ -348,10 +348,27 @@ const backdropImageTags = (metadata: Readonly<Record<string, JsonValue>>) => Arr
   ? metadata.BackdropImageTags.flatMap((tag) => (typeof tag === "string" && tag.length > 0 ? ["local"] : []))
     : []
 
+const externalImageTags = (metadata: Readonly<Record<string, JsonValue>>) => {
+  const images = object(metadata.ExternalImages ?? null)
+  return {
+    primary: typeof images.Primary === "string" && images.Primary.length > 0,
+    backdrops: Array.isArray(images.Backdrop)
+      ? images.Backdrop.flatMap((image, index) =>
+          typeof image === "string" && image.length > 0 ? [`external-${index}`] : []
+        )
+      : []
+  }
+}
+
 const itemDto = (item: CanonicalItemView, serverId: string): EmbyItemDtoValue => {
   const metadata = object(item.displayMetadata)
-  const imageTags = imageTagTypes(metadata)
-  const backdrops = backdropImageTags(metadata)
+  const upstreamImageTags = imageTagTypes(metadata)
+  const upstreamBackdrops = backdropImageTags(metadata)
+  const external = externalImageTags(metadata)
+  const imageTags = external.primary && upstreamImageTags.Primary === undefined
+    ? { ...upstreamImageTags, Primary: "external" }
+    : upstreamImageTags
+  const backdrops = upstreamBackdrops.length > 0 ? upstreamBackdrops : external.backdrops
   return {
     ...pickScalars(metadata, itemScalarFields),
     Id: item.id,

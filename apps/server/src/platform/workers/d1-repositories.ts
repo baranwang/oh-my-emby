@@ -1203,6 +1203,17 @@ const makeRepositories = Effect.gen(function*() {
       })
     )
 
+  const updateMetadataProviderStatus: RepositoriesService["updateMetadataProviderStatus"] = (input) =>
+    database(
+      "updateMetadataProviderStatus",
+      sql.unsafe<{ provider_id: string }>(`
+        UPDATE metadata_provider_settings
+        SET status = ?
+        WHERE provider_id = ? AND updated_at_ms = ? AND credential IS NOT NULL
+        RETURNING provider_id
+      `, [input.status, input.providerId, input.expectedUpdatedAtMs])
+    ).pipe(Effect.map((rows) => rows.length === 1))
+
   interface ExternalMetadataRow {
     readonly provider_id: unknown
     readonly identity_namespace: string
@@ -3598,6 +3609,7 @@ const makeRepositories = Effect.gen(function*() {
     deleteServer,
     readMetadataSettings,
     writeMetadataSettings,
+    updateMetadataProviderStatus,
     readExternalMetadata,
     writeExternalMetadata,
     listVirtualLibraries,

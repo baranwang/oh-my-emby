@@ -63,15 +63,39 @@ const fixture = (options: {
   readonly now?: () => number
   readonly deadlineMs?: number
   readonly maxResponseBytes?: number
+  readonly beforeStatusMutation?: (
+    current: [MetadataProviderSetting, MetadataProviderSetting]
+  ) => [MetadataProviderSetting, MetadataProviderSetting]
 }) => {
   let providerSettings = options.providerSettings ?? settings()
+  let beforeStatusMutation = options.beforeStatusMutation
+  const mutateBeforeStatus = () => {
+    if (beforeStatusMutation === undefined) return
+    providerSettings = beforeStatusMutation(providerSettings)
+    beforeStatusMutation = undefined
+  }
   const cache = new Map<string, ExternalMetadataCacheEntry>()
   const writes: Array<ExternalMetadataCacheEntry> = []
   const repositories = Layer.succeed(Repositories, Repositories.of({
     readMetadataSettings: () => Effect.succeed(providerSettings),
     writeMetadataSettings: (next) => Effect.sync(() => {
+      mutateBeforeStatus()
       providerSettings = [...next] as [MetadataProviderSetting, MetadataProviderSetting]
       return providerSettings
+    }),
+    updateMetadataProviderStatus: ({ providerId, expectedUpdatedAtMs, status }) => Effect.sync(() => {
+      mutateBeforeStatus()
+      const provider = providerSettings.find(({ id }) => id === providerId)
+      if (
+        provider === undefined ||
+        provider.updatedAtMs !== expectedUpdatedAtMs ||
+        provider.credential === null
+      ) return false
+      providerSettings = providerSettings.map((setting) => setting.id === providerId
+        ? { ...setting, status }
+        : setting
+      ) as [MetadataProviderSetting, MetadataProviderSetting]
+      return true
     }),
     readExternalMetadata: (providerId, namespace, value) =>
       Effect.succeed(cache.get(`${providerId}:${namespace}:${value}`) ?? null),
@@ -106,6 +130,7 @@ describe("MetadataProviders", () => {
         return Response.json({
           title: "Trakt title",
           overview: "",
+          ids: { imdb: "tt1104001" },
           images: {
             poster: ["//walter-r2.trakt.tv/images/poster.jpg"],
             fanart: ["https://images.example.com/rejected.jpg"]
@@ -193,7 +218,12 @@ describe("MetadataProviders", () => {
         }
         return url.includes("themoviedb")
           ? Response.json({ movie_results: [{ title: "Recovered" }], tv_results: [] })
-          : Response.json({ title: "Trakt recovered", overview: "", images: {} })
+          : Response.json({
+              title: "Trakt recovered",
+              overview: "",
+              ids: { imdb: "tt1104001" },
+              images: {}
+            })
       },
       maxResponseBytes: 80
     })
@@ -212,6 +242,79 @@ describe("MetadataProviders", () => {
     }))
     expect(recovered.canonical.displayMetadata).toMatchObject({ Name: "Recovered" })
     expect(test.settings.map(({ status }) => status)).toEqual(["ready", "ready"])
+  })
+
+  it("does not overwrite a concurrent credential clear while observing degraded status", async () => {
+    const configured = settings()
+    configured[1] = { ...configured[1], enabled: false }
+    const test = fixture({
+      providerSettings: configured,
+      fetch: async () => new Response(null, { status: 429 }),
+      beforeStatusMutation: ([tmdb, trakt]) => [{
+        ...tmdb,
+        enabled: false,
+        credential: null,
+        status: "unconfigured",
+        updatedAtMs: 2
+      }, trakt]
+    })
+
+    await test.run(Effect.gen(function*() {
+      yield* (yield* MetadataProviders).refresh(record())
+    }))
+    expect(test.settings[0]).toMatchObject({
+      enabled: false,
+      credential: null,
+      status: "unconfigured",
+      updatedAtMs: 2
+    })
+  })
+
+  it("does not call providers for a malformed IMDb title claim", async () => {
+    const configured = settings(["trakt", "tmdb"])
+    configured[1] = { ...configured[1], enabled: false }
+    let calls = 0
+    const test = fixture({
+      providerSettings: configured,
+      fetch: async () => {
+        calls++
+        return Response.json({ title: "Wrong", ids: { imdb: "slug-like" } })
+      }
+    })
+    const original = record()
+    const malformed: CatalogItemRecord = {
+      ...original,
+      claims: original.claims.map((claim) => claim.namespace === "imdb:title"
+        ? { ...claim, value: "tron-legacy-2010" }
+        : claim)
+    }
+
+    const result = await test.run(Effect.gen(function*() {
+      return yield* (yield* MetadataProviders).refresh(malformed)
+    }))
+    expect(result.canonical.displayMetadata).toEqual(original.canonical.displayMetadata)
+    expect(calls).toBe(0)
+    expect(test.writes).toEqual([])
+  })
+
+  it.each([
+    ["mismatched", { imdb: "tt9999999" }],
+    ["missing", {}]
+  ] as const)("does not cache or recover a %s Trakt identity", async (_case, ids) => {
+    const configured = settings(["trakt", "tmdb"])
+    configured[0] = { ...configured[0], status: "degraded" }
+    configured[1] = { ...configured[1], enabled: false }
+    const test = fixture({
+      providerSettings: configured,
+      fetch: async () => Response.json({ title: "Wrong", ids })
+    })
+
+    const result = await test.run(Effect.gen(function*() {
+      return yield* (yield* MetadataProviders).refresh(record())
+    }))
+    expect(result.canonical.displayMetadata).toMatchObject({ Name: "Upstream title" })
+    expect(test.writes).toEqual([])
+    expect(test.settings[0].status).toBe("degraded")
   })
 
   it.each([
@@ -270,6 +373,7 @@ describe("MetadataProviders", () => {
       fetch: async (input) => new Request(input).url.includes("trakt.tv")
         ? Response.json({
             title: "Trakt",
+            ids: { imdb: "tt1104001" },
             images: {
               poster: "http://walter-r2.trakt.tv/insecure.jpg",
               fanart: [
@@ -360,7 +464,12 @@ describe("MetadataProviders", () => {
       providerSettings: settings(["trakt", "tmdb"]),
       fetch: async (input) => {
         urls.push(new Request(input).url)
-        return Response.json({ title: "Show", overview: "Overview", images: {} })
+        return Response.json({
+          title: "Show",
+          overview: "Overview",
+          ids: { imdb: "tt1104001" },
+          images: {}
+        })
       }
     })
     await test.run(Effect.gen(function*() {

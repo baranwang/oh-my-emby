@@ -112,6 +112,82 @@ describe("bounded auxiliary resources", () => {
     expect(response.headers.get("cache-control")).toBe("private, no-store")
   })
 
+  it("advertises cached provider artwork with opaque tags and serves the advertised routes", async () => {
+    const selections: Array<unknown> = []
+    const item = {
+      id: "movie-1",
+      itemType: "Movie",
+      displayMetadata: {
+        Name: "Movie",
+        ExternalImages: {
+          Primary: "https://image.tmdb.org/t/p/w780/poster.jpg",
+          Backdrop: [
+            "https://image.tmdb.org/t/p/w1280/backdrop-0.jpg",
+            "https://image.tmdb.org/t/p/w1280/backdrop-1.jpg"
+          ]
+        }
+      },
+      mediaVersions: [],
+      userState: null,
+      incompleteSourceIds: []
+    } as const
+    const app = makeEmbyHandler(baseServices({
+      federation: {
+        list: () => Effect.succeed({
+          items: [item],
+          totalRecordCount: 1,
+          exhausted: true,
+          incompleteSourceIds: []
+        }),
+        search: () => Effect.die("unused"),
+        detail: () => Effect.succeed(item),
+        lookupMembership: () => Effect.succeed(null)
+      },
+      playback: {
+        getInfo: () => Effect.die("unused"),
+        resolveImage: (input) => {
+          selections.push(input)
+          const suffix = input.imageType === "Primary"
+            ? "w780/poster.jpg"
+            : `w1280/backdrop-${input.imageIndex ?? 0}.jpg`
+          return Effect.succeed({
+            _tag: "Redirect",
+            location: new URL(`https://image.tmdb.org/t/p/${suffix}`)
+          })
+        }
+      }
+    }))
+    const authorization = { authorization: "Bearer local-token" }
+
+    const list = await Effect.runPromise(app(new Request(
+      "https://local/Users/owner/Items?ParentId=library-1",
+      { headers: authorization }
+    )))
+    const body = await list.json() as any
+    expect(body.Items[0]).toMatchObject({
+      ImageTags: { Primary: "external" },
+      BackdropImageTags: ["external-0", "external-1"]
+    })
+    expect(JSON.stringify(body)).not.toContain("image.tmdb.org")
+
+    const primary = await Effect.runPromise(app(new Request(
+      "https://local/Items/movie-1/Images/Primary",
+      { headers: authorization }
+    )))
+    const backdrop = await Effect.runPromise(app(new Request(
+      "https://local/Items/movie-1/Images/Backdrop/1",
+      { headers: authorization }
+    )))
+    expect(primary.status).toBe(302)
+    expect(primary.headers.get("location")).toBe("https://image.tmdb.org/t/p/w780/poster.jpg")
+    expect(backdrop.status).toBe(302)
+    expect(backdrop.headers.get("location")).toBe("https://image.tmdb.org/t/p/w1280/backdrop-1.jpg")
+    expect(selections).toEqual([
+      { canonicalId: "movie-1", imageType: "Primary" },
+      { canonicalId: "movie-1", imageType: "Backdrop", imageIndex: 1 }
+    ])
+  })
+
   it("streams allowlisted images, strips unsafe headers, and caches only the complete body", async () => {
     const responseCache = cache()
     const body = new TextEncoder().encode("png-body")

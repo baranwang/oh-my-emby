@@ -341,6 +341,63 @@ export const repositoryContract = (makeHarness: () => Promise<RepositoryHarness>
       }).pipe(Effect.provide(harness.layer)))
     })
 
+    it("updates one provider status only while its settings revision still matches", async () => {
+      const configured: readonly [MetadataProviderSetting, MetadataProviderSetting] = [
+        {
+          id: "trakt",
+          enabled: true,
+          order: 0,
+          language: null,
+          credential: "trakt-client-id",
+          status: "ready",
+          updatedAtMs: 2_000
+        },
+        {
+          id: "tmdb",
+          enabled: true,
+          order: 1,
+          language: "zh-CN",
+          credential: "tmdb-token",
+          status: "ready",
+          updatedAtMs: 2_000
+        }
+      ]
+
+      await Effect.runPromise(Effect.gen(function*() {
+        const repo = yield* Repositories
+        yield* repo.writeMetadataSettings(configured)
+        expect(yield* repo.updateMetadataProviderStatus({
+          providerId: "tmdb",
+          expectedUpdatedAtMs: 2_000,
+          status: "degraded"
+        })).toBe(true)
+
+        yield* repo.writeMetadataSettings([
+          configured[0],
+          {
+            ...configured[1],
+            credential: "rotated-token",
+            status: "ready",
+            updatedAtMs: 3_000
+          }
+        ])
+        expect(yield* repo.updateMetadataProviderStatus({
+          providerId: "tmdb",
+          expectedUpdatedAtMs: 2_000,
+          status: "degraded"
+        })).toBe(false)
+        expect(yield* repo.readMetadataSettings()).toEqual([
+          configured[0],
+          {
+            ...configured[1],
+            credential: "rotated-token",
+            status: "ready",
+            updatedAtMs: 3_000
+          }
+        ])
+      }).pipe(Effect.provide(harness.layer)))
+    })
+
     it("round-trips positive and negative external metadata cache entries", async () => {
       const positive: ExternalMetadataCacheEntry = {
         providerId: "tmdb",

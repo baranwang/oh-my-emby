@@ -120,6 +120,11 @@ export interface RepositoriesService {
   readonly writeMetadataSettings: (
     settings: readonly [MetadataProviderSetting, MetadataProviderSetting]
   ) => Effect.Effect<readonly [MetadataProviderSetting, MetadataProviderSetting], RepositoryError>
+  readonly updateMetadataProviderStatus: (input: {
+    readonly providerId: MetadataProviderSetting["id"]
+    readonly expectedUpdatedAtMs: number
+    readonly status: Extract<MetadataProviderSetting["status"], "ready" | "degraded">
+  }) => Effect.Effect<boolean, RepositoryError>
   readonly readExternalMetadata: (
     providerId: ExternalMetadataCacheEntry["providerId"],
     identityNamespace: string,
