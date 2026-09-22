@@ -81,3 +81,23 @@ The full Dashboard suite reports 49/57 passing. Its eight failures are the same 
 
 1. Dashboard typecheck and the full suite remain staged red on the unchanged legacy Server UI/fixtures described above; Task 7 must migrate them to ordered endpoints before the package can be globally green.
 2. No browser screenshot evidence was produced. The installed `agent-browser` binary lacks the skill-required `skills get` command, so the browser workflow could not be loaded safely. Build, component-render tests, responsive composition classes, shadcn lint, and the Impeccable detector are verified; this report does not present them as browser evidence.
+
+## Fix round — setup state no longer hides exceptions
+
+### RED
+
+Added a regression covering a degraded Server and failed synchronization while no virtual libraries exist. Before the fix, the focused suite reported 1 failure and 27 passes: the mixed state returned only the library setup screen instead of showing the actionable exceptions first.
+
+### GREEN
+
+The Overview now derives exceptions before choosing its setup presentation. A clean empty state is unchanged; when exceptions and incomplete setup coexist, exceptions render first and the relevant setup action remains available below them.
+
+The focused suite reports 28/28 passing. `bun run build`, `bunx oxlint apps/dashboard/src`, and `git diff --check` pass. The full Dashboard suite reports 50/58 passing, with the same eight staged Task 7 failures: three legacy query-behavior inputs omit `endpoints`, and five Server-form tests still exercise `baseUrl`. Typecheck retains the same six Task 7 diagnostics (five in `server-form.tsx`, one in `server-list.tsx`).
+
+### Self-review
+
+- Confirmed exception derivation is shared by setup, healthy, and attention states rather than duplicated in a special-case branch.
+- Confirmed zero-Server and zero-library clean setup screens retain their original single action.
+- Confirmed mixed setup/exception states keep the corrective exception links ahead of the setup action.
+- Confirmed the healthy layout and Card-free presentation are unchanged.
+- Kept the Password Drawer minor explicitly deferred and did not absorb Task 7's Server migration.

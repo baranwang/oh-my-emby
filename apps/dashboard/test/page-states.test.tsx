@@ -206,6 +206,29 @@ describe("Overview states", () => {
     expect(view.container.textContent).toContain(m.add_server())
   })
 
+  it("keeps exceptions ahead of the library setup action when no library exists", async () => {
+    const failure = {
+      serverId: server.id,
+      code: "DeliveryFailed",
+      failedAtMs: 1,
+      attemptCount: 2,
+      nextAttemptAtMs: null,
+      uncertainSinceMs: null
+    } as OutboxFailureView
+    const view = await renderOverview(overviewClient({
+      servers: [{ ...server, health: "degraded" } as ServerView],
+      libraries: [],
+      system: { ...system, upstreamHealthy: 0, upstreamDegraded: 1, outboxFailed: 1 },
+      failures: [failure]
+    }))
+
+    expect(view.container.textContent).toContain("Needs attention")
+    expect(view.container.textContent).toContain("Home")
+    expect(view.container.textContent).toContain("State synchronization needs attention")
+    expect(view.container.textContent).toContain("Create your first virtual library")
+    expect(view.container.textContent).toContain(m.add_library())
+  })
+
   it("links every degraded exception to the place that can resolve it", async () => {
     const degradedServer = { ...server, health: "degraded" } as ServerView
     const unusableLibrary = { ...library, name: "Offline films", sources: [] } as VirtualLibraryView

@@ -77,39 +77,6 @@ export const OverviewPage = () => {
   const libraryData = libraries.data ?? []
   const systemData = system.data!
   const failureData = failures.data ?? []
-
-  if (serverData.length === 0) {
-    return (
-      <OverviewFrame>
-        <SetupState
-          icon={ServerIcon}
-          title={m.overview_setup_server_title()}
-          description={m.overview_setup_server_description()}
-        >
-          <Button nativeButton={false} render={<Link to="/servers" search={{ new: true }} />}>
-            {m.add_server()}
-          </Button>
-        </SetupState>
-      </OverviewFrame>
-    )
-  }
-
-  if (libraryData.length === 0) {
-    return (
-      <OverviewFrame>
-        <SetupState
-          icon={LibraryIcon}
-          title={m.overview_setup_library_title()}
-          description={m.overview_setup_library_description()}
-        >
-          <Button nativeButton={false} render={<Link to="/libraries" search={{ new: true }} />}>
-            {m.add_library()}
-          </Button>
-        </SetupState>
-      </OverviewFrame>
-    )
-  }
-
   const serverExceptions = serverData.filter((server) => server.enabled && (
     server.health !== "healthy" || server.verifiedCatalogId === null
   ))
@@ -117,8 +84,32 @@ export const OverviewPage = () => {
     library.enabled && !hasUsableSource(library, serverData)
   )
   const hasSyncException = failureData.length > 0 || systemData.outboxFailed > 0 || systemData.outboxUncertain > 0
+  const hasExceptions = serverExceptions.length > 0 || libraryExceptions.length > 0 || hasSyncException
+  const setupState = serverData.length === 0 ? (
+    <SetupState
+      icon={ServerIcon}
+      title={m.overview_setup_server_title()}
+      description={m.overview_setup_server_description()}
+    >
+      <Button nativeButton={false} render={<Link to="/servers" search={{ new: true }} />}>
+        {m.add_server()}
+      </Button>
+    </SetupState>
+  ) : libraryData.length === 0 ? (
+    <SetupState
+      icon={LibraryIcon}
+      title={m.overview_setup_library_title()}
+      description={m.overview_setup_library_description()}
+    >
+      <Button nativeButton={false} render={<Link to="/libraries" search={{ new: true }} />}>
+        {m.add_library()}
+      </Button>
+    </SetupState>
+  ) : null
 
-  if (serverExceptions.length === 0 && libraryExceptions.length === 0 && !hasSyncException) {
+  if (setupState && !hasExceptions) return <OverviewFrame>{setupState}</OverviewFrame>
+
+  if (!hasExceptions) {
     return (
       <OverviewFrame>
         <section className="flex max-w-3xl flex-col gap-5 rounded-xl border p-5 sm:flex-row sm:items-center sm:justify-between">
@@ -189,6 +180,7 @@ export const OverviewPage = () => {
           )}
         </ul>
       </section>
+      {setupState}
     </OverviewFrame>
   )
 }
