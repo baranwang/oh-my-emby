@@ -1,6 +1,6 @@
 import { act } from "react"
 import { createRoot } from "react-dom/client"
-import type { ServerInput, ServerView } from "@oh-my-emby/contracts"
+import type { MetadataProviderSettingsInput, ServerInput, ServerView } from "@oh-my-emby/contracts"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
@@ -15,6 +15,7 @@ import {
   updateServer
 } from "../src/modules/servers/services/server-service.js"
 import { useServerHealth } from "../src/modules/servers/hooks/use-servers.js"
+import { updateMetadataSettings } from "../src/modules/system/services/system-service.js"
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true
 
@@ -247,4 +248,26 @@ describe("library and account mutation behavior", () => {
     expect(queryClient.getQueriesData({ queryKey: queryKeys.system })).toEqual([])
     expect(queryClient.getQueryData(queryKeys.session)).toEqual({ authenticated: false, username: null })
   })
+})
+
+it("invalidates only metadata settings after an atomic provider update", async () => {
+  const metadataInput = {
+    providers: [
+      { id: "tmdb", enabled: true, order: 0, language: "en-US", credential: { _tag: "Set", value: "token" } },
+      { id: "trakt", enabled: false, order: 1, language: null, credential: { _tag: "Preserve" } }
+    ]
+  } as MetadataProviderSettingsInput
+  vi.stubGlobal("fetch", vi.fn(async () => json({
+    providers: [
+      { id: "tmdb", enabled: true, order: 0, language: "en-US", hasCredential: true, status: "ready" },
+      { id: "trakt", enabled: false, order: 1, language: null, hasCredential: false, status: "unconfigured" }
+    ]
+  })))
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  const invalidate = vi.spyOn(queryClient, "invalidateQueries").mockResolvedValue()
+
+  await updateMetadataSettings(metadataInput, queryClient)
+
+  expect(invalidate).toHaveBeenCalledOnce()
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: queryKeys.metadataSettings, exact: true })
 })

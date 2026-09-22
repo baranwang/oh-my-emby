@@ -6,7 +6,7 @@ import { serversQueryOptions } from "@/modules/servers/services/server-service"
 
 export const Route = createFileRoute("/_authenticated/libraries/")({
   validateSearch: (search: Record<string, unknown>) => ({
-    new: search.new === true || search.new === "true"
+    new: search.new === true || search.new === "true" ? true : undefined
   }),
   loader: ({ context }) => Promise.all([
     context.queryClient.prefetchQuery(librariesQueryOptions(context.queryClient)),
@@ -17,9 +17,10 @@ export const Route = createFileRoute("/_authenticated/libraries/")({
     const navigate = Route.useNavigate()
     return (
       <LibrariesPage
-        creating={search.new}
+        creating={search.new === true}
         onAddServer={() => void navigate({ to: "/servers", search: { new: true } })}
-        onCreatingChange={(creating) => void navigate({ search: { new: creating }, replace: true })}
+        onCreate={() => void navigate({ search: { new: true } })}
+        onClose={() => void navigate({ to: "/libraries", search: { new: undefined } })}
       />
     )
   }

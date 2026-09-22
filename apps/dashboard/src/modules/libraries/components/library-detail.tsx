@@ -1,5 +1,4 @@
 import type { VirtualLibraryView } from "@oh-my-emby/contracts"
-import { useNavigate } from "@tanstack/react-router"
 
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -15,8 +14,10 @@ import { m } from "@/paraglide/messages.js"
 
 type LibraryId = VirtualLibraryView["id"]
 
-export const LibraryDetailPage = ({ id }: { readonly id: LibraryId }) => {
-  const navigate = useNavigate()
+const isNotFound = (error: unknown) =>
+  typeof error === "object" && error !== null && "_tag" in error && error._tag === "NotFound"
+
+export const LibraryDetailPage = ({ id, onClose }: { readonly id: LibraryId; readonly onClose: () => void }) => {
   const library = useLibrary(id)
   const servers = useServers()
   const groups = useSourceLibraryGroups(servers.data ?? [])
@@ -27,6 +28,17 @@ export const LibraryDetailPage = ({ id }: { readonly id: LibraryId }) => {
     return <div aria-label={m.loading()} className="max-w-3xl space-y-4"><Skeleton className="h-10 w-52" /><Skeleton className="h-96" /></div>
   }
   if (library.isError || servers.isError || !library.data) {
+    if (isNotFound(library.error)) {
+      return (
+        <div role="alert" className="space-y-4 rounded-lg border border-destructive/40 p-4">
+          <div>
+            <h2 className="font-medium text-destructive">{m.library_not_found_title()}</h2>
+            <p className="mt-1 text-sm text-muted-foreground">{m.library_not_found_description()}</p>
+          </div>
+          <Button variant="outline" onClick={onClose}>{m.library_back_to_list()}</Button>
+        </div>
+      )
+    }
     return (
       <div role="alert" className="max-w-3xl space-y-3 rounded-lg border border-destructive/40 p-4">
         <p className="text-sm text-destructive">{m.libraries_load_failed()}</p>
@@ -36,19 +48,16 @@ export const LibraryDetailPage = ({ id }: { readonly id: LibraryId }) => {
   }
 
   return (
-    <div className="max-w-3xl space-y-8">
-      <header className="space-y-2">
-        <h1 className="font-heading text-2xl font-medium">{library.data.name}</h1>
-        <p className="text-sm text-muted-foreground">{library.data.mediaType === "movies" ? m.media_movies() : m.media_series()}</p>
-      </header>
-      <section className="space-y-4 rounded-lg border p-5" aria-labelledby="library-edit-title">
-        <h2 id="library-edit-title" className="font-heading text-xl font-medium">{m.library_edit_title()}</h2>
-        <LibraryForm
-          library={library.data}
-          groups={groups}
-          onSave={(input) => update.mutateAsync(input).then(() => undefined)}
-        />
-      </section>
+    <div className="space-y-8">
+      <LibraryForm
+        library={library.data}
+        groups={groups}
+        onCancel={onClose}
+        onSave={async (input) => {
+          await update.mutateAsync(input)
+          onClose()
+        }}
+      />
       <section className="border-t pt-6">
         <Button
           variant="destructive"
@@ -57,7 +66,7 @@ export const LibraryDetailPage = ({ id }: { readonly id: LibraryId }) => {
             if (!window.confirm(m.library_delete_confirm())) return
             try {
               await remove.mutateAsync()
-              await navigate({ to: "/libraries", search: { new: false } })
+              onClose()
             } catch {
               // Mutation state renders the localized failure below.
             }

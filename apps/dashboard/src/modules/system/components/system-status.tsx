@@ -22,11 +22,11 @@ export const SystemStatus = ({ status }: { readonly status: SystemStatusView }) 
   ] as const
 
   return (
-    <dl className="grid gap-px overflow-hidden rounded-lg border bg-border sm:grid-cols-2 lg:grid-cols-3">
+    <dl className="divide-y">
       {diagnostics.map(([label, value]) => (
-        <div key={label} className="bg-card p-4 text-card-foreground">
+        <div key={label} className="flex items-center justify-between gap-4 py-3 first:pt-0">
           <dt className="text-sm text-muted-foreground">{label}</dt>
-          <dd className="mt-1 font-medium tabular-nums">{value}</dd>
+          <dd className="text-sm font-medium tabular-nums">{value}</dd>
         </div>
       ))}
     </dl>

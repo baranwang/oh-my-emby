@@ -353,7 +353,8 @@ describe("library create prerequisites", () => {
       <LibrariesPage
         creating
         onAddServer={vi.fn()}
-        onCreatingChange={vi.fn()}
+        onCreate={vi.fn()}
+        onClose={vi.fn()}
         {...props}
       />
     </QueryClientProvider>
@@ -367,26 +368,26 @@ describe("library create prerequisites", () => {
 
   it("shows server loading without silently rendering an empty form", async () => {
     vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>(() => {})))
-    const view = await renderPage(queryClientWithLibraries())
+    await renderPage(queryClientWithLibraries())
 
-    expect(view.container.querySelector('[data-slot="skeleton"]')?.getAttribute("aria-label"))
+    expect(document.body.querySelector('[data-slot="skeleton"]')?.getAttribute("aria-label"))
       .toBe(m.servers_loading())
-    expect(view.container.querySelector("form")).toBeNull()
+    expect(document.body.querySelector("form")).toBeNull()
   })
 
   it("shows a server error with retry without rendering the form", async () => {
     const fetch = vi.fn(async () => json({ _tag: "Internal", requestId: "request-1" }, 500))
     vi.stubGlobal("fetch", fetch)
-    const view = await renderPage(queryClientWithLibraries())
+    await renderPage(queryClientWithLibraries())
 
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 0))
     })
-    expect(view.container.textContent).toContain(m.servers_load_failed())
-    expect(view.container.querySelector("form")).toBeNull()
+    expect(document.body.textContent).toContain(m.servers_load_failed())
+    expect(document.body.querySelector("form")).toBeNull()
 
     await act(async () => {
-      buttonByName(view.container, m.retry()).click()
+      buttonByName(document.body, m.retry()).click()
       await new Promise((resolve) => setTimeout(resolve, 0))
     })
     expect(fetch).toHaveBeenCalledTimes(2)
@@ -395,14 +396,14 @@ describe("library create prerequisites", () => {
   it("shows an actionable zero-server state without rendering the form", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => json([])))
     const onAddServer = vi.fn()
-    const view = await renderPage(queryClientWithLibraries(), { onAddServer })
+    await renderPage(queryClientWithLibraries(), { onAddServer })
 
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 0))
     })
-    expect(view.container.textContent).toContain(m.servers_empty())
-    expect(view.container.querySelector("form")).toBeNull()
-    await act(async () => buttonByName(view.container, m.add_server()).click())
+    expect(document.body.textContent).toContain(m.servers_empty())
+    expect(document.body.querySelector("form")).toBeNull()
+    await act(async () => buttonByName(document.body, m.add_server()).click())
     expect(onAddServer).toHaveBeenCalledOnce()
   })
 
@@ -424,10 +425,10 @@ describe("library create prerequisites", () => {
     const queryClient = queryClientWithLibraries()
     queryClient.setQueryData(queryKeys.servers, [{ ...server, verifiedCatalogId: null }])
 
-    const view = await renderPage(queryClient)
+    await renderPage(queryClient)
     await act(async () => {
       await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce())
-      await vi.waitFor(() => expect(view.container.querySelector("#source-server-1-source-1"))
+      await vi.waitFor(() => expect(document.body.querySelector("#source-server-1-source-1"))
         .toBeInstanceOf(HTMLInputElement))
     })
   })

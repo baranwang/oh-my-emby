@@ -100,11 +100,12 @@ type LibraryFormProps = {
   readonly library?: VirtualLibraryView
   readonly groups: ReadonlyArray<SourceLibraryGroup>
   readonly onSave: (input: VirtualLibraryInput) => Promise<void>
+  readonly onCancel?: () => void
 }
 
 const libraryValidator = Schema.toStandardSchemaV1(VirtualLibraryInputSchema)
 
-export const LibraryForm = ({ library, groups, onSave }: LibraryFormProps) => {
+export const LibraryForm = ({ library, groups, onSave, onCancel }: LibraryFormProps) => {
   const [formError, setFormError] = useState<string | null>(null)
   const defaultValues: typeof VirtualLibraryInputSchema.Encoded = {
     name: library?.name ?? "",
@@ -271,7 +272,10 @@ export const LibraryForm = ({ library, groups, onSave }: LibraryFormProps) => {
       </form.Field>
       <form.Subscribe selector={(state) => [state.canSubmit, state.isSubmitting]}>
         {([canSubmit, isSubmitting]) => (
-          <Button type="submit" disabled={!canSubmit || isSubmitting}>{isSubmitting ? m.saving() : m.save()}</Button>
+          <div className="flex gap-2">
+            <Button type="submit" disabled={!canSubmit || isSubmitting}>{isSubmitting ? m.saving() : m.save()}</Button>
+            {onCancel && <Button type="button" variant="ghost" onClick={onCancel}>{m.cancel()}</Button>}
+          </div>
         )}
       </form.Subscribe>
     </form>
