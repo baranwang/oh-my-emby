@@ -44,10 +44,10 @@ const dashboardHeaders = {
 describe("Bun process lifecycle", () => {
   it("applies migrations before listening and never listens after a migration failure", async () => {
     const { directory, config } = await fixture()
-    await Bun.write(join(config.migrationsDir, "0002_marker.sql"), `
+    await Bun.write(join(config.migrationsDir, "0003_marker.sql"), `
       CREATE TABLE startup_marker (value TEXT NOT NULL);
       INSERT INTO startup_marker VALUES ('migrated');
-      INSERT INTO schema_migrations(version, name, applied_at_ms) VALUES (2, 'marker', 2);
+      INSERT INTO schema_migrations(version, name, applied_at_ms) VALUES (3, 'marker', 3);
     `)
     const runtime = await startBunRuntime(config)
     try {
@@ -59,7 +59,7 @@ describe("Bun process lifecycle", () => {
       await runtime.close()
     }
 
-    await Bun.write(join(config.migrationsDir, "0003_broken.sql"), "THIS IS NOT SQL")
+    await Bun.write(join(config.migrationsDir, "0004_broken.sql"), "THIS IS NOT SQL")
     await expect(startBunRuntime({ ...config, port: 49173 })).rejects.toBeDefined()
     await expect(fetch("http://127.0.0.1:49173/health")).rejects.toBeDefined()
     await rm(directory, { recursive: true, force: true })

@@ -13,6 +13,9 @@ import {
 } from "./repository-contract.js"
 
 const tables = [
+  "external_metadata_cache",
+  "metadata_provider_settings",
+  "upstream_server_endpoints",
   "playback_watermarks",
   "playback_sessions",
   "state_outbox",
@@ -50,6 +53,15 @@ const makeHarness = async (): Promise<RepositoryHarness> => ({
         ) VALUES (?, ?, ?, ?, 1, ?, ?, 'user', 'password', NULL, NULL, ?, 'test', 1, 'healthy', 1000, NULL, 1000, 1000)
       `).bind("server-1", "catalog:server-1", "verified:server-1", "https://server-1.example.com", "Server", "https://server-1.example.com", "upstream-user:server-1"),
       env.DB.prepare(`
+        INSERT INTO upstream_server_endpoints (
+          id, server_id, protocol, host, port, path, endpoint_order,
+          verified_catalog_id, health, last_success_at_ms, created_at_ms, updated_at_ms
+        ) VALUES (
+          'server-1:endpoint', 'server-1', 'https', 'server-1.example.com', NULL, '', 0,
+          'verified:server-1', 'healthy', 1000, 1000, 1000
+        )
+      `),
+      env.DB.prepare(`
         INSERT INTO virtual_libraries (id, name, media_type, enabled, created_at_ms, updated_at_ms)
         VALUES ('library-1', 'Movies', 'movies', 1, 1000, 1000)
       `),
@@ -73,12 +85,17 @@ const makeHarness = async (): Promise<RepositoryHarness> => ({
     ])
   },
   failNext: async (operation) => {
-    if (operation !== "state_outbox_insert") throw new Error(`unsupported operation: ${operation}`)
-    await run(`
-      CREATE TRIGGER fail_state_outbox_insert
-      BEFORE INSERT ON state_outbox
-      BEGIN SELECT RAISE(ABORT, 'injected state_outbox_insert failure'); END
-    `)
+    const trigger = operation === "state_outbox_insert"
+      ? `CREATE TRIGGER fail_state_outbox_insert BEFORE INSERT ON state_outbox
+        BEGIN SELECT RAISE(ABORT, 'injected state_outbox_insert failure'); END`
+      : operation === "server_endpoint_insert"
+        ? `CREATE TRIGGER fail_server_endpoint_insert BEFORE INSERT ON upstream_server_endpoints
+          WHEN NEW.id = 'endpoint-trigger-failure'
+          BEGIN SELECT RAISE(ABORT, 'injected server endpoint failure'); END`
+        : `CREATE TRIGGER fail_metadata_setting_write BEFORE INSERT ON metadata_provider_settings
+          WHEN NEW.provider_id = 'tmdb' AND NEW.updated_at_ms = 3000
+          BEGIN SELECT RAISE(ABORT, 'injected metadata setting failure'); END`
+    await run(trigger)
   },
   getUserState: async (canonicalId) => {
     const row = await env.DB.prepare("SELECT * FROM user_state WHERE canonical_id = ?").bind(canonicalId).first<Record<string, unknown>>()
@@ -99,7 +116,11 @@ const makeHarness = async (): Promise<RepositoryHarness> => ({
     await run("UPDATE state_outbox SET payload_json = ?", payloadJson)
   },
   dispose: async () => {
-    await env.DB.prepare("DROP TRIGGER IF EXISTS fail_state_outbox_insert").run()
+    await env.DB.batch([
+      env.DB.prepare("DROP TRIGGER IF EXISTS fail_state_outbox_insert"),
+      env.DB.prepare("DROP TRIGGER IF EXISTS fail_server_endpoint_insert"),
+      env.DB.prepare("DROP TRIGGER IF EXISTS fail_metadata_setting_write")
+    ])
     await env.DB.batch(tables.map((table) => env.DB.prepare(`DELETE FROM ${table}`)))
   }
 })
@@ -121,12 +142,26 @@ describe("D1 parity regressions", () => {
     verifiedBaseUrl: `https://${id}.example.com`,
     generation: 1,
     name: id,
-    baseUrl: `https://${id}.example.com`,
+    endpoints: [{
+      id: `${id}:endpoint`,
+      protocol: "https" as const,
+      host: `${id}.example.com`,
+      port: null,
+      path: "",
+      displayUrl: `https://${id}.example.com/` as any,
+      verifiedCatalogId: `verified:${id}`,
+      health: "healthy" as const,
+      lastSuccessAtMs: 1_000,
+      order: 0,
+      createdAtMs: 1_000,
+      updatedAtMs: 1_000
+    }],
     username: "upstream-user",
     password: "upstream-password",
     accessToken: null,
     accessTokenExpiresAtMs: null,
     upstreamUserId: `upstream-user:${id}`,
+    userAgentPolicy: "fixed" as const,
     userAgent: "oh-my-emby-test",
     enabled: true,
     health: "healthy" as const,
@@ -1047,8 +1082,12 @@ it("keeps Wrangler and application migration bookkeeping separate", async () => 
 
   expect(wrangler.results.map(({ name }) => name)).toEqual(["id", "name", "applied_at"])
   expect(application.results.map(({ name }) => name)).toEqual(["version", "name", "applied_at_ms"])
-  expect(await env.DB.prepare("SELECT version, name FROM schema_migrations").first()).toEqual({
-    version: 1,
-    name: "initial"
+  expect(await env.DB.prepare("SELECT version, name FROM schema_migrations ORDER BY version").all()).toEqual({
+    success: true,
+    meta: expect.any(Object),
+    results: [
+      { version: 1, name: "initial" },
+      { version: 2, name: "dashboard_alignment" }
+    ]
   })
 })

@@ -12,10 +12,12 @@ import type {
   DashboardSessionLookup,
   DashboardSessionRecord,
   EligibleSource,
+  ExternalMetadataCacheEntry,
   IdentityClaim,
   IdentityResolution,
   JsonValue,
   MaintenanceResult,
+  MetadataProviderSetting,
   OutboxAcknowledgement,
   OutboxClaim,
   OutboxDispatch,
@@ -111,6 +113,21 @@ export interface RepositoriesService {
     input: SaveServerResultCommand
   ) => Effect.Effect<UpstreamServer | null, RepositoryError>
   readonly deleteServer: (id: string) => Effect.Effect<void, RepositoryError>
+  readonly readMetadataSettings: () => Effect.Effect<
+    readonly [MetadataProviderSetting, MetadataProviderSetting],
+    RepositoryError
+  >
+  readonly writeMetadataSettings: (
+    settings: readonly [MetadataProviderSetting, MetadataProviderSetting]
+  ) => Effect.Effect<readonly [MetadataProviderSetting, MetadataProviderSetting], RepositoryError>
+  readonly readExternalMetadata: (
+    providerId: ExternalMetadataCacheEntry["providerId"],
+    identityNamespace: string,
+    identityValue: string
+  ) => Effect.Effect<ExternalMetadataCacheEntry | null, RepositoryError>
+  readonly writeExternalMetadata: (
+    entry: ExternalMetadataCacheEntry
+  ) => Effect.Effect<void, RepositoryError>
   readonly listVirtualLibraries: () => Effect.Effect<ReadonlyArray<VirtualLibrary>, RepositoryError>
   readonly saveVirtualLibrary: (
     input: SaveVirtualLibraryCommand,

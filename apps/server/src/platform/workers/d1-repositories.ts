@@ -33,17 +33,20 @@ import type {
   CanonicalItem,
   DesiredUserState,
   EligibleSource,
+  ExternalMetadataCacheEntry,
   IdentityClaim,
   IdentityResolution,
   JsonValue,
   LibrarySource,
   MaintenanceResult,
   MediaType,
+  MetadataProviderSetting,
   OutboxClaim,
   QueryGeneration,
   ServerHealth,
   SourceItemRecord,
   SourceMediaVersion,
+  UpstreamEndpoint,
   UpstreamServer,
   UserRecord,
   UserStateRecord,
@@ -115,6 +118,21 @@ const mediaType = (value: unknown): MediaType => {
 const health = (value: unknown): ServerHealth => {
   if (value === "unknown" || value === "healthy" || value === "degraded") return value
   throw new TypeError("health is invalid")
+}
+
+const userAgentPolicy = (value: unknown): UpstreamServer["userAgentPolicy"] => {
+  if (value === "fixed" || value === "client-preferred" || value === "passthrough") return value
+  throw new TypeError("user_agent_policy is invalid")
+}
+
+const metadataProviderId = (value: unknown): MetadataProviderSetting["id"] => {
+  if (value === "tmdb" || value === "trakt") return value
+  throw new TypeError("provider_id is invalid")
+}
+
+const metadataProviderStatus = (value: unknown): MetadataProviderSetting["status"] => {
+  if (value === "unconfigured" || value === "ready" || value === "degraded") return value
+  throw new TypeError("provider status is invalid")
 }
 
 const normalizeJson = (value: unknown): JsonValue => {
@@ -265,6 +283,7 @@ interface ServerRow {
   readonly access_token_expires_at_ms: unknown | null
   readonly upstream_user_id: string | null
   readonly user_agent: string
+  readonly user_agent_policy: unknown
   readonly enabled: unknown
   readonly health: unknown
   readonly last_success_at_ms: unknown | null
@@ -273,15 +292,76 @@ interface ServerRow {
   readonly updated_at_ms: unknown
 }
 
-const upstreamServer = (row: ServerRow): UpstreamServer => ({
+interface EndpointRow {
+  readonly endpoint_id: string | null
+  readonly endpoint_protocol: string | null
+  readonly endpoint_host: string | null
+  readonly endpoint_port: unknown | null
+  readonly endpoint_path: string | null
+  readonly endpoint_order: unknown | null
+  readonly endpoint_verified_catalog_id: string | null
+  readonly endpoint_health: unknown | null
+  readonly endpoint_last_success_at_ms: unknown | null
+  readonly endpoint_created_at_ms: unknown | null
+  readonly endpoint_updated_at_ms: unknown | null
+}
+
+type ServerWithEndpointRow = ServerRow & EndpointRow
+
+const endpointUrl = (endpoint: Pick<UpstreamEndpoint, "protocol" | "host" | "port" | "path">) =>
+  new URL(
+    `${endpoint.protocol}://${endpoint.host}${endpoint.port === null ? "" : `:${endpoint.port}`}${endpoint.path}`
+  ).href
+
+const upstreamEndpoint = (row: EndpointRow): UpstreamEndpoint => {
+  if (
+    row.endpoint_id === null ||
+    row.endpoint_protocol === null ||
+    row.endpoint_host === null ||
+    row.endpoint_path === null ||
+    row.endpoint_order === null ||
+    row.endpoint_health === null ||
+    row.endpoint_created_at_ms === null ||
+    row.endpoint_updated_at_ms === null
+  )
+    throw new TypeError("endpoint row is incomplete")
+  if (row.endpoint_protocol !== "http" && row.endpoint_protocol !== "https") {
+    throw new TypeError("endpoint protocol is invalid")
+  }
+  const endpoint: Pick<UpstreamEndpoint, "id" | "protocol" | "host" | "port" | "path"> = {
+    id: row.endpoint_id,
+    protocol: row.endpoint_protocol,
+    host: row.endpoint_host,
+    port: row.endpoint_port === null ? null : integer(row.endpoint_port, "endpoint_port"),
+    path: row.endpoint_path
+  }
+  return {
+    ...endpoint,
+    displayUrl: endpointUrl(endpoint) as UpstreamEndpoint["displayUrl"],
+    verifiedCatalogId: row.endpoint_verified_catalog_id,
+    health: health(row.endpoint_health),
+    lastSuccessAtMs:
+      row.endpoint_last_success_at_ms === null
+        ? null
+        : integer(row.endpoint_last_success_at_ms, "endpoint_last_success_at_ms"),
+    order: integer(row.endpoint_order, "endpoint_order"),
+    createdAtMs: integer(row.endpoint_created_at_ms, "endpoint_created_at_ms"),
+    updatedAtMs: integer(row.endpoint_updated_at_ms, "endpoint_updated_at_ms")
+  }
+}
+
+const upstreamServer = (
+  row: ServerRow,
+  endpoints: ReadonlyArray<UpstreamEndpoint>
+): UpstreamServer => ({
   id: decodeServerId(row.id),
   catalogNamespace: row.catalog_namespace,
   verifiedCatalogId: row.verified_catalog_id,
   verifiedBaseUrl: row.verified_base_url,
   generation: integer(row.generation, "generation"),
   name: row.name,
-  // Revalidate at the outbound request boundary as well as the Dashboard contract.
-  baseUrl: row.base_url as UpstreamServer["baseUrl"],
+  endpoints,
+  baseUrl: endpoints[0]!.displayUrl,
   username: row.username,
   password: row.password,
   accessToken: row.access_token,
@@ -289,7 +369,8 @@ const upstreamServer = (row: ServerRow): UpstreamServer => ({
     ? null
     : integer(row.access_token_expires_at_ms, "access_token_expires_at_ms"),
   upstreamUserId: row.upstream_user_id,
-  userAgent: row.user_agent,
+  userAgentPolicy: userAgentPolicy(row.user_agent_policy),
+  userAgent: row.user_agent === "" ? null : row.user_agent,
   enabled: boolean(row.enabled, "enabled"),
   health: health(row.health),
   lastSuccessAtMs: row.last_success_at_ms === null
@@ -299,6 +380,38 @@ const upstreamServer = (row: ServerRow): UpstreamServer => ({
   createdAtMs: integer(row.created_at_ms, "created_at_ms"),
   updatedAtMs: integer(row.updated_at_ms, "updated_at_ms")
 })
+
+const upstreamServers = (
+  rows: ReadonlyArray<ServerWithEndpointRow>
+): ReadonlyArray<UpstreamServer> => {
+  const servers = new Map<string, { row: ServerRow; endpoints: Array<UpstreamEndpoint> }>()
+  for (const row of rows) {
+    let server = servers.get(row.id)
+    if (!server) {
+      server = { row, endpoints: [] }
+      servers.set(row.id, server)
+    }
+    if (row.endpoint_id !== null) server.endpoints.push(upstreamEndpoint(row))
+  }
+  return Array.from(servers.values(), ({ row, endpoints }) => upstreamServer(row, endpoints))
+}
+
+const serverSelect = `
+  SELECT server.*,
+    endpoint.id AS endpoint_id,
+    endpoint.protocol AS endpoint_protocol,
+    endpoint.host AS endpoint_host,
+    endpoint.port AS endpoint_port,
+    endpoint.path AS endpoint_path,
+    endpoint.endpoint_order,
+    endpoint.verified_catalog_id AS endpoint_verified_catalog_id,
+    endpoint.health AS endpoint_health,
+    endpoint.last_success_at_ms AS endpoint_last_success_at_ms,
+    endpoint.created_at_ms AS endpoint_created_at_ms,
+    endpoint.updated_at_ms AS endpoint_updated_at_ms
+  FROM upstream_servers server
+  LEFT JOIN upstream_server_endpoints endpoint ON endpoint.server_id = server.id
+`
 
 interface UserStateRow {
   readonly canonical_id: string
@@ -432,36 +545,46 @@ const makeRepositories = Effect.gen(function*() {
         ) SELECT 1, ?, ?, ?, ?, 1, ?, ?
         WHERE NOT EXISTS (SELECT 1 FROM users WHERE singleton = 1)
         RETURNING *
-      `, [
-        input.username,
-        input.password.hash,
-        input.password.salt,
-        input.password.iterations,
-        nowMs,
-        nowMs
-      ]))
-      if (Result.isFailure(inserted)) {
-        const existing = yield* sql.unsafe<{ readonly singleton: number }>(
-          "SELECT singleton FROM users WHERE singleton = 1"
+      `,
+            [
+              input.username,
+              input.password.hash,
+              input.password.salt,
+              input.password.iterations,
+              nowMs,
+              nowMs
+            ]
+          )
         )
-        if (existing[0]) return yield* Effect.fail(new AlreadyInitialized())
-        return yield* Effect.fail(inserted.failure)
-      }
-      if (inserted.success[0] === undefined) return yield* Effect.fail(new AlreadyInitialized())
-      return yield* decode("claimUser", () => userRecord(inserted.success[0]!))
-    }).pipe(Effect.mapError((cause) =>
-      cause instanceof AlreadyInitialized ? cause : failure("claimUser", cause)
-    ))
-  })
+        if (Result.isFailure(inserted)) {
+          const existing = yield* sql.unsafe<{ readonly singleton: number }>(
+            "SELECT singleton FROM users WHERE singleton = 1"
+          )
+          if (existing[0]) return yield* Effect.fail(new AlreadyInitialized())
+          return yield* Effect.fail(inserted.failure)
+        }
+        if (inserted.success[0] === undefined) return yield* Effect.fail(new AlreadyInitialized())
+        return yield* decode("claimUser", () => userRecord(inserted.success[0]!))
+      }).pipe(
+        Effect.mapError((cause) =>
+          cause instanceof AlreadyInitialized ? cause : failure("claimUser", cause)
+        )
+      )
+    })
 
   const getUserByName: RepositoriesService["getUserByName"] = (username) =>
-    database("getUserByName", sql.unsafe<UserRow>("SELECT * FROM users WHERE username = ?", [username])).pipe(
-      Effect.flatMap((rows) => decode("getUserByName", () => rows[0] ? userRecord(rows[0]) : null))
+    database(
+      "getUserByName",
+      sql.unsafe<UserRow>("SELECT * FROM users WHERE username = ?", [username])
+    ).pipe(
+      Effect.flatMap((rows) =>
+        decode("getUserByName", () => (rows[0] ? userRecord(rows[0]) : null))
+      )
     )
 
   const getUser: RepositoriesService["getUser"] = () =>
     database("getUser", sql.unsafe<UserRow>("SELECT * FROM users WHERE singleton = 1")).pipe(
-      Effect.flatMap((rows) => decode("getUser", () => rows[0] ? userRecord(rows[0]) : null))
+      Effect.flatMap((rows) => decode("getUser", () => (rows[0] ? userRecord(rows[0]) : null)))
     )
 
   const issueDashboardSession: RepositoriesService["issueDashboardSession"] = (input) =>
@@ -694,83 +817,169 @@ const makeRepositories = Effect.gen(function*() {
             WHERE singleton = 1 AND auth_generation = ? AND updated_at_ms = ?
               AND password_hash = ? AND password_salt = ? AND pbkdf2_iterations = ?
           )
-        `, [
-          input.expectedAuthGeneration + 1,
-          input.updatedAtMs,
-          input.password.hash,
-          input.password.salt,
-          input.password.iterations
-        ])
-      ]))
-      if (Result.isFailure(result)) {
-        const users = yield* sql.unsafe<{ readonly auth_generation: unknown }>(
-          "SELECT auth_generation FROM users WHERE singleton = 1"
+        `,
+              [
+                input.expectedAuthGeneration + 1,
+                input.updatedAtMs,
+                input.password.hash,
+                input.password.salt,
+                input.password.iterations
+              ]
+            )
+          ])
         )
-        if (
-          users[0] === undefined ||
-          integer(users[0].auth_generation, "auth_generation") !== input.expectedAuthGeneration
-        ) return yield* Effect.fail(new AuthenticationChanged())
-        return yield* Effect.fail(result.failure)
-      }
-    }))
+        if (Result.isFailure(result)) {
+          const users = yield* sql.unsafe<{ readonly auth_generation: unknown }>(
+            "SELECT auth_generation FROM users WHERE singleton = 1"
+          )
+          if (
+            users[0] === undefined ||
+            integer(users[0].auth_generation, "auth_generation") !== input.expectedAuthGeneration
+          )
+            return yield* Effect.fail(new AuthenticationChanged())
+          return yield* Effect.fail(result.failure)
+        }
+      })
+    )
+
+  const replaceEndpointStatements = (
+    input: UpstreamServer,
+    fenceSql: string,
+    fenceParameters: ReadonlyArray<unknown>
+  ) => [
+    sql.unsafe(
+      `
+      DELETE FROM upstream_server_endpoints
+      WHERE server_id = ? AND EXISTS (${fenceSql})
+    `,
+      [input.id, ...fenceParameters]
+    ),
+    ...input.endpoints.map((endpoint, order) =>
+      sql.unsafe(
+        `
+      INSERT INTO upstream_server_endpoints (
+        id, server_id, protocol, host, port, path, endpoint_order,
+        verified_catalog_id, health, last_success_at_ms, created_at_ms, updated_at_ms
+      )
+      SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+      WHERE EXISTS (${fenceSql})
+    `,
+        [
+          endpoint.id,
+          input.id,
+          endpoint.protocol,
+          endpoint.host,
+          endpoint.port,
+          endpoint.path,
+          order,
+          endpoint.verifiedCatalogId,
+          endpoint.health,
+          endpoint.lastSuccessAtMs,
+          endpoint.createdAtMs,
+          endpoint.updatedAtMs,
+          ...fenceParameters
+        ]
+      )
+    )
+  ]
+
+  const readServer = (id: string) =>
+    Effect.gen(function* () {
+      const rows = yield* sql.unsafe<ServerWithEndpointRow>(
+        `
+      ${serverSelect}
+      WHERE server.id = ?
+      ORDER BY endpoint.endpoint_order
+    `,
+        [id]
+      )
+      return yield* decode("readServer", () => upstreamServers(rows)[0] ?? null)
+    })
 
   const listServers: RepositoriesService["listServers"] = () =>
-    database("listServers", sql.unsafe<ServerRow>(
-      "SELECT * FROM upstream_servers WHERE deleted_at_ms IS NULL ORDER BY id"
-    )).pipe(
-      Effect.flatMap((rows) => decode("listServers", () => rows.map(upstreamServer)))
-    )
+    database(
+      "listServers",
+      sql.unsafe<ServerWithEndpointRow>(`
+      ${serverSelect}
+      WHERE server.deleted_at_ms IS NULL
+      ORDER BY server.id, endpoint.endpoint_order
+    `)
+    ).pipe(Effect.flatMap((rows) => decode("listServers", () => upstreamServers(rows))))
 
   const getServer: RepositoriesService["getServer"] = (id) =>
-    database("getServer", sql.unsafe<ServerRow>(
-      "SELECT * FROM upstream_servers WHERE id = ? AND deleted_at_ms IS NULL",
-      [id]
-    )).pipe(
-      Effect.flatMap((rows) => decode("getServer", () => rows[0] === undefined ? null : upstreamServer(rows[0])))
-    )
+    database(
+      "getServer",
+      sql.unsafe<ServerWithEndpointRow>(
+        `
+      ${serverSelect}
+      WHERE server.id = ? AND server.deleted_at_ms IS NULL
+      ORDER BY endpoint.endpoint_order
+    `,
+        [id]
+      )
+    ).pipe(Effect.flatMap((rows) => decode("getServer", () => upstreamServers(rows)[0] ?? null)))
 
   const createServer: RepositoriesService["createServer"] = (input, limit) =>
-    database("createServer", sql.unsafe<ServerRow>(`
-      INSERT INTO upstream_servers (
-        id, catalog_namespace, verified_catalog_id, verified_base_url, generation, name, base_url,
-        username, password, access_token, access_token_expires_at_ms, upstream_user_id, user_agent,
-        enabled, health, last_success_at_ms, deleted_at_ms, created_at_ms, updated_at_ms
-      )
-      SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-      WHERE (SELECT count(*) FROM upstream_servers WHERE deleted_at_ms IS NULL) < ?
-      RETURNING *
-    `, [
-      input.id,
-      input.catalogNamespace,
-      input.verifiedCatalogId,
-      input.verifiedBaseUrl,
-      input.generation,
-      input.name,
-      input.baseUrl,
-      input.username,
-      input.password,
-      input.accessToken,
-      input.accessTokenExpiresAtMs,
-      input.upstreamUserId,
-      input.userAgent,
-      input.enabled ? 1 : 0,
-      input.health,
-      input.lastSuccessAtMs,
-      input.deletedAtMs,
-      input.createdAtMs,
-      input.updatedAtMs,
-      limit
-    ])).pipe(
-      Effect.flatMap((rows) => decode("createServer", () => rows[0] === undefined ? null : upstreamServer(rows[0])))
+    database(
+      "createServer",
+      Effect.gen(function* () {
+        const fenceSql = "SELECT 1 FROM upstream_servers WHERE id = ? AND created_at_ms = ?"
+        yield* sql.batch([
+          sql.unsafe(
+            `
+          INSERT INTO upstream_servers (
+            id, catalog_namespace, verified_catalog_id, verified_base_url, generation, name, base_url,
+            username, password, access_token, access_token_expires_at_ms, upstream_user_id, user_agent,
+            enabled, health, last_success_at_ms, deleted_at_ms, created_at_ms, updated_at_ms,
+            user_agent_policy
+          )
+          SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+          WHERE (SELECT count(*) FROM upstream_servers WHERE deleted_at_ms IS NULL) < ?
+        `,
+            [
+              input.id,
+              input.catalogNamespace,
+              input.verifiedCatalogId,
+              input.verifiedBaseUrl,
+              input.generation,
+              input.name,
+              endpointUrl(input.endpoints[0]!),
+              input.username,
+              input.password,
+              input.accessToken,
+              input.accessTokenExpiresAtMs,
+              input.upstreamUserId,
+              input.userAgent ?? "",
+              input.enabled ? 1 : 0,
+              input.health,
+              input.lastSuccessAtMs,
+              input.deletedAtMs,
+              input.createdAtMs,
+              input.updatedAtMs,
+              input.userAgentPolicy,
+              limit
+            ]
+          ),
+          ...replaceEndpointStatements(input, fenceSql, [input.id, input.createdAtMs])
+        ])
+        return yield* readServer(input.id)
+      })
     )
 
   const saveServer: RepositoriesService["saveServer"] = (input) =>
-    database("saveServer", sql.unsafe<ServerRow>(`
+    database(
+      "saveServer",
+      Effect.gen(function* () {
+        const fenceSql = "SELECT 1 FROM upstream_servers WHERE id = ?"
+        yield* sql.batch([
+          sql.unsafe(
+            `
         INSERT INTO upstream_servers (
           id, catalog_namespace, verified_catalog_id, verified_base_url, generation, name, base_url,
           username, password, access_token, access_token_expires_at_ms, upstream_user_id, user_agent,
-          enabled, health, last_success_at_ms, deleted_at_ms, created_at_ms, updated_at_ms
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          enabled, health, last_success_at_ms, deleted_at_ms, created_at_ms, updated_at_ms,
+          user_agent_policy
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           catalog_namespace = excluded.catalog_namespace,
           verified_catalog_id = excluded.verified_catalog_id,
@@ -784,33 +993,41 @@ const makeRepositories = Effect.gen(function*() {
           access_token_expires_at_ms = excluded.access_token_expires_at_ms,
           upstream_user_id = excluded.upstream_user_id,
           user_agent = excluded.user_agent,
+          user_agent_policy = excluded.user_agent_policy,
           enabled = excluded.enabled,
           health = excluded.health,
           last_success_at_ms = excluded.last_success_at_ms,
           deleted_at_ms = excluded.deleted_at_ms,
           updated_at_ms = excluded.updated_at_ms
-        RETURNING *
-      `, [
-        input.id,
-        input.catalogNamespace,
-        input.verifiedCatalogId,
-        input.verifiedBaseUrl,
-        input.generation,
-        input.name,
-        input.baseUrl,
-        input.username,
-        input.password,
-        input.accessToken,
-        input.accessTokenExpiresAtMs,
-        input.upstreamUserId,
-        input.userAgent,
-        input.enabled ? 1 : 0,
-        input.health,
-        input.lastSuccessAtMs,
-        input.deletedAtMs,
-        input.createdAtMs,
-        input.updatedAtMs
-      ])).pipe(Effect.flatMap((rows) => decode("saveServer", () => upstreamServer(rows[0]!))))
+      `,
+            [
+              input.id,
+              input.catalogNamespace,
+              input.verifiedCatalogId,
+              input.verifiedBaseUrl,
+              input.generation,
+              input.name,
+              endpointUrl(input.endpoints[0]!),
+              input.username,
+              input.password,
+              input.accessToken,
+              input.accessTokenExpiresAtMs,
+              input.upstreamUserId,
+              input.userAgent ?? "",
+              input.enabled ? 1 : 0,
+              input.health,
+              input.lastSuccessAtMs,
+              input.deletedAtMs,
+              input.createdAtMs,
+              input.updatedAtMs,
+              input.userAgentPolicy
+            ]
+          ),
+          ...replaceEndpointStatements(input, fenceSql, [input.id])
+        ])
+        return yield* readServer(input.id).pipe(Effect.map((server) => server!))
+      })
+    )
 
   const saveServerResult: RepositoriesService["saveServerResult"] = (input) =>
     database("saveServerResult", sql.unsafe<ServerRow>(`
@@ -825,59 +1042,87 @@ const makeRepositories = Effect.gen(function*() {
           updated_at_ms = MAX(updated_at_ms, ?)
         WHERE id = ? AND generation = ?
         RETURNING *
-      `, [
-        input.verifiedCatalogId === undefined ? 0 : 1,
-        input.verifiedCatalogId ?? null,
-        input.verifiedBaseUrl === undefined ? 0 : 1,
-        input.verifiedBaseUrl ?? null,
-        input.accessToken === undefined ? 0 : 1,
-        input.accessToken ?? null,
-        input.accessTokenExpiresAtMs === undefined ? 0 : 1,
-        input.accessTokenExpiresAtMs ?? null,
-        input.upstreamUserId === undefined ? 0 : 1,
-        input.upstreamUserId ?? null,
-        input.health === undefined ? 0 : 1,
-        input.health ?? "unknown",
-        input.lastSuccessAtMs === undefined ? 0 : 1,
-        input.lastSuccessAtMs ?? null,
-        input.updatedAtMs,
-        input.serverId,
-        input.expectedGeneration
-      ])).pipe(Effect.flatMap((saved) => decode(
-        "saveServerResult",
-        () => saved[0] === undefined ? null : upstreamServer(saved[0])
-      )))
+      `,
+        [
+          input.verifiedCatalogId === undefined ? 0 : 1,
+          input.verifiedCatalogId ?? null,
+          input.verifiedBaseUrl === undefined ? 0 : 1,
+          input.verifiedBaseUrl ?? null,
+          input.accessToken === undefined ? 0 : 1,
+          input.accessToken ?? null,
+          input.accessTokenExpiresAtMs === undefined ? 0 : 1,
+          input.accessTokenExpiresAtMs ?? null,
+          input.upstreamUserId === undefined ? 0 : 1,
+          input.upstreamUserId ?? null,
+          input.health === undefined ? 0 : 1,
+          input.health ?? "unknown",
+          input.lastSuccessAtMs === undefined ? 0 : 1,
+          input.lastSuccessAtMs ?? null,
+          input.updatedAtMs,
+          input.serverId,
+          input.expectedGeneration
+        ]
+      )
+    ).pipe(
+      Effect.flatMap((saved) =>
+        saved[0] === undefined
+          ? Effect.succeed(null)
+          : database("readServerResult", readServer(input.serverId))
+      )
+    )
 
-  const saveServerConfiguration: RepositoriesService["saveServerConfiguration"] = (input, expectedGeneration) =>
-    database("saveServerConfiguration", sql.unsafe<ServerRow>(`
+  const saveServerConfiguration: RepositoriesService["saveServerConfiguration"] = (
+    input,
+    expectedGeneration
+  ) =>
+    database(
+      "saveServerConfiguration",
+      Effect.gen(function* () {
+        const fenceSql =
+          "SELECT 1 FROM upstream_servers WHERE id = ? AND generation = ? AND updated_at_ms = ?"
+        yield* sql.batch([
+          sql.unsafe(
+            `
         UPDATE upstream_servers SET
           verified_catalog_id = ?, verified_base_url = ?, generation = ?, name = ?, base_url = ?,
           username = ?, password = ?, access_token = ?, access_token_expires_at_ms = ?, upstream_user_id = ?, user_agent = ?,
+          user_agent_policy = ?,
           enabled = ?, health = ?, last_success_at_ms = ?, updated_at_ms = ?
         WHERE id = ? AND generation = ?
-        RETURNING *
-      `, [
-        input.verifiedCatalogId,
-        input.verifiedBaseUrl,
-        input.generation,
-        input.name,
-        input.baseUrl,
-        input.username,
-        input.password,
-        input.accessToken,
-        input.accessTokenExpiresAtMs,
-        input.upstreamUserId,
-        input.userAgent,
-        input.enabled ? 1 : 0,
-        input.health,
-        input.lastSuccessAtMs,
-        input.updatedAtMs,
-        input.id,
-        expectedGeneration
-      ])).pipe(Effect.flatMap((rows) => decode(
-        "saveServerConfiguration",
-        () => rows[0] === undefined ? null : upstreamServer(rows[0])
-      )))
+      `,
+            [
+              input.verifiedCatalogId,
+              input.verifiedBaseUrl,
+              input.generation,
+              input.name,
+              endpointUrl(input.endpoints[0]!),
+              input.username,
+              input.password,
+              input.accessToken,
+              input.accessTokenExpiresAtMs,
+              input.upstreamUserId,
+              input.userAgent ?? "",
+              input.userAgentPolicy,
+              input.enabled ? 1 : 0,
+              input.health,
+              input.lastSuccessAtMs,
+              input.updatedAtMs,
+              input.id,
+              expectedGeneration
+            ]
+          ),
+          ...replaceEndpointStatements(input, fenceSql, [
+            input.id,
+            input.generation,
+            input.updatedAtMs
+          ])
+        ])
+        const saved = yield* readServer(input.id)
+        return saved?.generation === input.generation && saved.updatedAtMs === input.updatedAtMs
+          ? saved
+          : null
+      })
+    )
 
   const deleteServer: RepositoriesService["deleteServer"] = (id) =>
     database("deleteServer", sql.unsafe(`
@@ -886,7 +1131,156 @@ const makeRepositories = Effect.gen(function*() {
         access_token = NULL, access_token_expires_at_ms = NULL, upstream_user_id = NULL,
         deleted_at_ms = ?, updated_at_ms = ?
       WHERE id = ? AND deleted_at_ms IS NULL
-    `, [Date.now(), Date.now(), id])).pipe(Effect.asVoid)
+    `,
+        [Date.now(), Date.now(), id]
+      )
+    ).pipe(Effect.asVoid)
+
+  interface MetadataProviderRow {
+    readonly provider_id: unknown
+    readonly enabled: unknown
+    readonly provider_order: unknown
+    readonly language: string | null
+    readonly credential: string | null
+    readonly status: unknown
+    readonly updated_at_ms: unknown
+  }
+
+  const metadataProviderSetting = (row: MetadataProviderRow): MetadataProviderSetting => ({
+    id: metadataProviderId(row.provider_id),
+    enabled: boolean(row.enabled, "enabled"),
+    order: integer(row.provider_order, "provider_order"),
+    language: row.language,
+    credential: row.credential,
+    status: metadataProviderStatus(row.status),
+    updatedAtMs: integer(row.updated_at_ms, "updated_at_ms")
+  })
+
+  const readMetadataSettings: RepositoriesService["readMetadataSettings"] = () =>
+    database(
+      "readMetadataSettings",
+      Effect.gen(function* () {
+        yield* sql.unsafe(`
+        INSERT OR IGNORE INTO metadata_provider_settings (
+          provider_id, enabled, provider_order, language, credential, status, updated_at_ms
+        ) VALUES
+          ('tmdb', 0, 0, NULL, NULL, 'unconfigured', 0),
+          ('trakt', 0, 1, NULL, NULL, 'unconfigured', 0)
+      `)
+        const rows = yield* sql.unsafe<MetadataProviderRow>(
+          "SELECT * FROM metadata_provider_settings ORDER BY provider_order"
+        )
+        return yield* decode("readMetadataSettings", () => {
+          if (rows.length !== 2) throw new TypeError("metadata settings must contain two providers")
+          return rows.map(metadataProviderSetting) as unknown as readonly [
+            MetadataProviderSetting,
+            MetadataProviderSetting
+          ]
+        })
+      })
+    )
+
+  const writeMetadataSettings: RepositoriesService["writeMetadataSettings"] = (settings) =>
+    database(
+      "writeMetadataSettings",
+      Effect.gen(function* () {
+        yield* sql.batch([
+          sql.unsafe("DELETE FROM metadata_provider_settings"),
+          ...settings.map((setting) =>
+            sql.unsafe(
+              `
+          INSERT INTO metadata_provider_settings (
+            provider_id, enabled, provider_order, language, credential, status, updated_at_ms
+          ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        `,
+              [
+                setting.id,
+                setting.enabled ? 1 : 0,
+                setting.order,
+                setting.language,
+                setting.credential,
+                setting.status,
+                setting.updatedAtMs
+              ]
+            )
+          )
+        ])
+        return settings
+      })
+    )
+
+  interface ExternalMetadataRow {
+    readonly provider_id: unknown
+    readonly identity_namespace: string
+    readonly identity_value: string
+    readonly payload_json: unknown | null
+    readonly found: unknown
+    readonly fetched_at_ms: unknown
+    readonly fresh_until_ms: unknown
+    readonly stale_until_ms: unknown
+  }
+
+  const externalMetadata = (row: ExternalMetadataRow): ExternalMetadataCacheEntry => ({
+    providerId: metadataProviderId(row.provider_id),
+    identityNamespace: row.identity_namespace,
+    identityValue: row.identity_value,
+    payload: row.payload_json === null ? null : json(row.payload_json, "payload_json"),
+    found: boolean(row.found, "found"),
+    fetchedAtMs: integer(row.fetched_at_ms, "fetched_at_ms"),
+    freshUntilMs: integer(row.fresh_until_ms, "fresh_until_ms"),
+    staleUntilMs: integer(row.stale_until_ms, "stale_until_ms")
+  })
+
+  const readExternalMetadata: RepositoriesService["readExternalMetadata"] = (
+    providerId,
+    identityNamespace,
+    identityValue
+  ) =>
+    database(
+      "readExternalMetadata",
+      sql.unsafe<ExternalMetadataRow>(
+        `
+    SELECT * FROM external_metadata_cache
+    WHERE provider_id = ? AND identity_namespace = ? AND identity_value = ?
+  `,
+        [providerId, identityNamespace, identityValue]
+      )
+    ).pipe(
+      Effect.flatMap((rows) =>
+        decode("readExternalMetadata", () =>
+          rows[0] === undefined ? null : externalMetadata(rows[0])
+        )
+      )
+    )
+
+  const writeExternalMetadata: RepositoriesService["writeExternalMetadata"] = (entry) =>
+    database(
+      "writeExternalMetadata",
+      sql.unsafe(
+        `
+      INSERT INTO external_metadata_cache (
+        provider_id, identity_namespace, identity_value, payload_json, found,
+        fetched_at_ms, fresh_until_ms, stale_until_ms
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(provider_id, identity_namespace, identity_value) DO UPDATE SET
+        payload_json = excluded.payload_json,
+        found = excluded.found,
+        fetched_at_ms = excluded.fetched_at_ms,
+        fresh_until_ms = excluded.fresh_until_ms,
+        stale_until_ms = excluded.stale_until_ms
+    `,
+        [
+          entry.providerId,
+          entry.identityNamespace,
+          entry.identityValue,
+          entry.payload === null ? null : canonicalJson(entry.payload),
+          entry.found ? 1 : 0,
+          entry.fetchedAtMs,
+          entry.freshUntilMs,
+          entry.staleUntilMs
+        ]
+      )
+    ).pipe(Effect.asVoid)
 
   interface LibraryRow {
     readonly id: string
@@ -1037,7 +1431,7 @@ const makeRepositories = Effect.gen(function*() {
       Effect.flatMap((rows) => decode("isSourceEligible", () => boolean(rows[0]?.eligible, "eligible")))
     )
 
-  interface EligibleSourceRow {
+  interface EligibleSourceRow extends EndpointRow {
     readonly virtual_library_id: string
     readonly server_id: string
     readonly server_name: string
@@ -1049,15 +1443,18 @@ const makeRepositories = Effect.gen(function*() {
     readonly catalog_namespace: string
     readonly verified_catalog_id: string
     readonly generation: unknown
-    readonly base_url: string
     readonly username: string
     readonly password: string | null
     readonly access_token: string | null
     readonly access_token_expires_at_ms: unknown | null
     readonly user_agent: string
+    readonly user_agent_policy: unknown
   }
 
-  const eligibleSource = (row: EligibleSourceRow): EligibleSource => ({
+  const eligibleSource = (
+    row: EligibleSourceRow,
+    endpoints: ReadonlyArray<UpstreamEndpoint>
+  ): EligibleSource => ({
     virtualLibraryId: decodeVirtualLibraryId(row.virtual_library_id),
     serverId: decodeServerId(row.server_id),
     name: row.server_name,
@@ -1069,15 +1466,37 @@ const makeRepositories = Effect.gen(function*() {
     catalogNamespace: row.catalog_namespace,
     verifiedCatalogId: row.verified_catalog_id ?? row.catalog_namespace,
     serverGeneration: integer(row.generation, "generation"),
-    baseUrl: row.base_url as EligibleSource["baseUrl"],
+    endpoints,
+    baseUrl: endpoints[0]!.displayUrl,
     username: row.username,
     password: row.password,
     accessToken: row.access_token,
-    accessTokenExpiresAtMs: row.access_token_expires_at_ms === null
-      ? null
-      : integer(row.access_token_expires_at_ms, "access_token_expires_at_ms"),
-    userAgent: row.user_agent
+    accessTokenExpiresAtMs:
+      row.access_token_expires_at_ms === null
+        ? null
+        : integer(row.access_token_expires_at_ms, "access_token_expires_at_ms"),
+    userAgentPolicy: userAgentPolicy(row.user_agent_policy),
+    userAgent: row.user_agent === "" ? null : row.user_agent
   })
+
+  const eligibleSources = (
+    rows: ReadonlyArray<EligibleSourceRow>
+  ): ReadonlyArray<EligibleSource> => {
+    const sources = new Map<
+      string,
+      { row: EligibleSourceRow; endpoints: Array<UpstreamEndpoint> }
+    >()
+    for (const row of rows) {
+      const key = `${row.virtual_library_id}\0${row.server_id}\0${row.source_library_id}`
+      let source = sources.get(key)
+      if (!source) {
+        source = { row, endpoints: [] }
+        sources.set(key, source)
+      }
+      if (row.endpoint_id !== null) source.endpoints.push(upstreamEndpoint(row))
+    }
+    return Array.from(sources.values(), ({ row, endpoints }) => eligibleSource(row, endpoints))
+  }
 
   const resolveEligibleSources: RepositoriesService["resolveEligibleSources"] = (libraryId) =>
     database("resolveEligibleSources", sql.unsafe<EligibleSourceRow>(`
@@ -1093,15 +1512,31 @@ const makeRepositories = Effect.gen(function*() {
         us.catalog_namespace,
         us.verified_catalog_id,
         us.generation,
-        us.base_url,
         us.username,
         us.password,
         us.access_token,
         us.access_token_expires_at_ms,
-        us.user_agent
+        us.user_agent,
+        us.user_agent_policy,
+        endpoint.id AS endpoint_id,
+        endpoint.protocol AS endpoint_protocol,
+        endpoint.host AS endpoint_host,
+        endpoint.port AS endpoint_port,
+        endpoint.path AS endpoint_path,
+        endpoint.endpoint_order,
+        endpoint.verified_catalog_id AS endpoint_verified_catalog_id,
+        endpoint.health AS endpoint_health,
+        endpoint.last_success_at_ms AS endpoint_last_success_at_ms,
+        endpoint.created_at_ms AS endpoint_created_at_ms,
+        endpoint.updated_at_ms AS endpoint_updated_at_ms
       FROM library_sources ls
       JOIN virtual_libraries vl ON vl.id = ls.virtual_library_id
       JOIN upstream_servers us ON us.id = ls.server_id
+      JOIN upstream_server_endpoints endpoint ON endpoint.server_id = us.id
+        AND (
+          endpoint.verified_catalog_id = us.verified_catalog_id OR
+          (us.verified_catalog_id IS NULL AND us.verified_base_url IS NOT NULL AND endpoint.endpoint_order = 0)
+        )
       WHERE ls.virtual_library_id = ?
         AND vl.enabled = 1
         AND ls.enabled = 1
@@ -1109,11 +1544,11 @@ const makeRepositories = Effect.gen(function*() {
         AND us.deleted_at_ms IS NULL
         AND us.health = 'healthy'
         AND (us.verified_catalog_id IS NOT NULL OR us.verified_base_url IS NOT NULL)
-      ORDER BY ls.source_order, ls.server_id, ls.source_library_id
-    `, [libraryId])).pipe(Effect.flatMap((rows) => decode(
-      "resolveEligibleSources",
-      () => rows.map(eligibleSource)
-    )))
+      ORDER BY ls.source_order, ls.server_id, ls.source_library_id, endpoint.endpoint_order
+    `,
+        [libraryId]
+      )
+    ).pipe(Effect.flatMap((rows) => decode("resolveEligibleSources", () => eligibleSources(rows))))
 
   const resolveCanonicalIdInTransaction = (id: string) => Effect.gen(function*() {
     const rows = yield* sql.unsafe<{ readonly canonical_id: string }>(`
@@ -1702,63 +2137,76 @@ const makeRepositories = Effect.gen(function*() {
           WHERE id = ? AND catalog_namespace = ? AND verified_catalog_id = ?
             AND generation = ? AND deleted_at_ms IS NULL
         )
-      `, [
-        candidate.serverId,
-        candidate.catalogNamespace,
-        candidate.verifiedCatalogId,
-        candidate.serverGeneration
-      ]))
-
-      const batchResult = yield* Effect.result(sql.batch(writes))
-      if (Result.isFailure(batchResult)) {
-        const fenceResult = yield* Effect.result(assertIdentityFence(candidate, false))
-        return yield* Effect.fail(
-          Result.isFailure(fenceResult) && fenceResult.failure instanceof IdentityConflict
-            ? fenceResult.failure
-            : batchResult.failure
+      `,
+            [
+              candidate.serverId,
+              candidate.catalogNamespace,
+              candidate.verifiedCatalogId,
+              candidate.serverGeneration
+            ]
+          )
         )
-      }
 
-      const canonicals = yield* sql.unsafe<CanonicalRow>("SELECT * FROM canonical_items WHERE id = ?", [survivorId])
-      const sources = yield* sql.unsafe<SourceItemRow>("SELECT * FROM source_items WHERE id = ?", [sourceItemId])
-      const claims = yield* sql.unsafe<IdentityClaimRow>(
-        "SELECT * FROM identity_claims WHERE canonical_id = ? ORDER BY namespace",
-        [survivorId]
-      )
-      const aliases = yield* sql.unsafe<{
-        readonly alias_id: string
-        readonly canonical_id: string
-        readonly retired_at_ms: unknown
-      }>("SELECT * FROM canonical_aliases WHERE canonical_id = ? ORDER BY alias_id", [survivorId])
-      const versions = yield* sql.unsafe<MediaVersionRow>(
-        "SELECT * FROM source_media_versions WHERE source_item_id = ? ORDER BY id",
-        [sourceItemId]
-      )
-      return yield* decode("resolveIdentity", (): IdentityResolution => ({
-        canonical: canonicalItem(canonicals[0]!),
-        aliases: aliases.map((row): CanonicalAlias => ({
-          aliasId: row.alias_id,
-          canonicalId: row.canonical_id,
-          retiredAtMs: integer(row.retired_at_ms, "retired_at_ms")
-        })),
-        claims: claims.map(identityClaim),
-        sourceItem: sourceItem(sources[0]!),
-        mediaVersions: versions.map(mediaVersion)
-      }))
-    }))
+        const batchResult = yield* Effect.result(sql.batch(writes))
+        if (Result.isFailure(batchResult)) {
+          const fenceResult = yield* Effect.result(assertIdentityFence(candidate, false))
+          return yield* Effect.fail(
+            Result.isFailure(fenceResult) && fenceResult.failure instanceof IdentityConflict
+              ? fenceResult.failure
+              : batchResult.failure
+          )
+        }
+
+        const canonicals = yield* sql.unsafe<CanonicalRow>(
+          "SELECT * FROM canonical_items WHERE id = ?",
+          [survivorId]
+        )
+        const sources = yield* sql.unsafe<SourceItemRow>(
+          "SELECT * FROM source_items WHERE id = ?",
+          [sourceItemId]
+        )
+        const claims = yield* sql.unsafe<IdentityClaimRow>(
+          "SELECT * FROM identity_claims WHERE canonical_id = ? ORDER BY namespace",
+          [survivorId]
+        )
+        const aliases = yield* sql.unsafe<{
+          readonly alias_id: string
+          readonly canonical_id: string
+          readonly retired_at_ms: unknown
+        }>("SELECT * FROM canonical_aliases WHERE canonical_id = ? ORDER BY alias_id", [survivorId])
+        const versions = yield* sql.unsafe<MediaVersionRow>(
+          "SELECT * FROM source_media_versions WHERE source_item_id = ? ORDER BY id",
+          [sourceItemId]
+        )
+        return yield* decode("resolveIdentity", (): IdentityResolution => ({
+          canonical: canonicalItem(canonicals[0]!),
+          aliases: aliases.map((row): CanonicalAlias => ({
+            aliasId: row.alias_id,
+            canonicalId: row.canonical_id,
+            retiredAtMs: integer(row.retired_at_ms, "retired_at_ms")
+          })),
+          claims: claims.map(identityClaim),
+          sourceItem: sourceItem(sources[0]!),
+          mediaVersions: versions.map(mediaVersion)
+        }))
+      })
+    )
 
   const persistIdentityResult: RepositoriesService["persistIdentityResult"] = (result) =>
-    database("persistIdentityResult", Effect.gen(function*() {
-      const canonical = result.canonical
-      const source = result.sourceItem
-      const stateRows = yield* sql.unsafe<UserStateRow>(
-        "SELECT * FROM user_state WHERE canonical_id = ?",
-        [canonical.id]
-      )
-      const state = stateRows[0] ? userState(stateRows[0]) : null
-      const targets = state === null ? [] : [...yield* readEligibleStateTargets(canonical.id)]
-      if (state !== null && !targets.some(({ id }) => id === source.id)) {
-        const eligible = yield* sql.unsafe<{ readonly eligible: unknown }>(`
+    database(
+      "persistIdentityResult",
+      Effect.gen(function* () {
+        const canonical = result.canonical
+        const source = result.sourceItem
+        const stateRows = yield* sql.unsafe<UserStateRow>(
+          "SELECT * FROM user_state WHERE canonical_id = ?",
+          [canonical.id]
+        )
+        const state = stateRows[0] ? userState(stateRows[0]) : null
+        const targets = state === null ? [] : [...(yield* readEligibleStateTargets(canonical.id))]
+        if (state !== null && !targets.some(({ id }) => id === source.id)) {
+          const eligible = yield* sql.unsafe<{ readonly eligible: unknown }>(
+            `
           SELECT EXISTS(
             SELECT 1
             FROM upstream_servers server
@@ -1925,12 +2373,14 @@ const makeRepositories = Effect.gen(function*() {
   })
 
   const readQueryGeneration: RepositoriesService["readQueryGeneration"] = (key) =>
-    database("readQueryGeneration", sql.unsafe<QueryGenerationRow>(
-      "SELECT * FROM query_generations WHERE query_key = ?",
-      [key]
-    )).pipe(Effect.flatMap((rows) =>
-      decode("readQueryGeneration", () => rows[0] ? queryGeneration(rows[0]) : null)
-    ))
+    database(
+      "readQueryGeneration",
+      sql.unsafe<QueryGenerationRow>("SELECT * FROM query_generations WHERE query_key = ?", [key])
+    ).pipe(
+      Effect.flatMap((rows) =>
+        decode("readQueryGeneration", () => (rows[0] ? queryGeneration(rows[0]) : null))
+      )
+    )
 
   interface QueryGenerationItemRow {
     readonly ordinal: unknown
@@ -2094,10 +2544,14 @@ const makeRepositories = Effect.gen(function*() {
     database("readMetadataProjection", sql.unsafe<MetadataProjectionRow>(`
       SELECT * FROM source_metadata_cache
       WHERE source_item_id = ? AND projection_key = ?
-    `, [sourceItemId, projectionKey])).pipe(Effect.flatMap((rows) => decode(
-      "readMetadataProjection",
-      () => rows[0] ? metadataProjection(rows[0]) : null
-    )))
+    `,
+        [sourceItemId, projectionKey]
+      )
+    ).pipe(
+      Effect.flatMap((rows) =>
+        decode("readMetadataProjection", () => (rows[0] ? metadataProjection(rows[0]) : null))
+      )
+    )
 
   const writeMetadataProjection: RepositoriesService["writeMetadataProjection"] = (input) =>
     database("writeMetadataProjection", sql.unsafe(`
@@ -2286,12 +2740,23 @@ const makeRepositories = Effect.gen(function*() {
         server.catalog_namespace,
         server.verified_catalog_id,
         server.generation,
-        server.base_url,
         server.username,
         server.password,
         server.access_token,
         server.access_token_expires_at_ms,
-        server.user_agent
+        server.user_agent,
+        server.user_agent_policy,
+        endpoint.id AS endpoint_id,
+        endpoint.protocol AS endpoint_protocol,
+        endpoint.host AS endpoint_host,
+        endpoint.port AS endpoint_port,
+        endpoint.path AS endpoint_path,
+        endpoint.endpoint_order,
+        endpoint.verified_catalog_id AS endpoint_verified_catalog_id,
+        endpoint.health AS endpoint_health,
+        endpoint.last_success_at_ms AS endpoint_last_success_at_ms,
+        endpoint.created_at_ms AS endpoint_created_at_ms,
+        endpoint.updated_at_ms AS endpoint_updated_at_ms
       FROM source_items item
       JOIN library_sources origin
         ON origin.server_id = item.server_id
@@ -2299,16 +2764,25 @@ const makeRepositories = Effect.gen(function*() {
       JOIN virtual_libraries library ON library.id = origin.virtual_library_id
       JOIN library_sources target ON target.virtual_library_id = library.id
       JOIN upstream_servers server ON server.id = target.server_id
+      JOIN upstream_server_endpoints endpoint ON endpoint.server_id = server.id
+        AND (
+          endpoint.verified_catalog_id = server.verified_catalog_id OR
+          (server.verified_catalog_id IS NULL AND server.verified_base_url IS NOT NULL AND endpoint.endpoint_order = 0)
+        )
       WHERE item.canonical_id = ?
         AND library.enabled = 1 AND origin.enabled = 1 AND target.enabled = 1
         AND server.enabled = 1 AND server.deleted_at_ms IS NULL
         AND server.health = 'healthy'
         AND (server.verified_catalog_id IS NOT NULL OR server.verified_base_url IS NOT NULL)
-      ORDER BY target.source_order, target.server_id, target.source_library_id
-    `, [canonicalId])).pipe(Effect.flatMap((rows) => decode(
-      "resolveEligibleSourcesForCanonical",
-      () => rows.map(eligibleSource)
-    )))
+      ORDER BY target.source_order, target.server_id, target.source_library_id, endpoint.endpoint_order
+    `,
+          [canonicalId]
+        )
+      ).pipe(
+        Effect.flatMap((rows) =>
+          decode("resolveEligibleSourcesForCanonical", () => eligibleSources(rows))
+        )
+      )
 
   const listStateMemberCanonicalIds: RepositoriesService["listStateMemberCanonicalIds"] = (input) => {
     const predicates = ["binding.virtual_library_id = ?"]
@@ -2433,31 +2907,40 @@ const makeRepositories = Effect.gen(function*() {
   ] as const
 
   const writeUserStateAndTargets: RepositoriesService["writeUserStateAndTargets"] = (input) =>
-    database("writeUserStateAndTargets", Effect.gen(function*() {
-      const previousRows = yield* sql.unsafe<UserStateRow>(
-        "SELECT * FROM user_state WHERE canonical_id = ?",
-        [input.canonicalId]
-      )
-      const previous = previousRows[0] ? userState(previousRows[0]) : null
-      const state: UserStateRecord = {
-        canonicalId: input.canonicalId,
-        revision: (previous?.revision ?? 0) + 1,
-        played: input.patch.played ?? previous?.played ?? false,
-        favorite: input.patch.favorite ?? previous?.favorite ?? false,
-        playCount: input.patch.playCount ?? previous?.playCount ?? 0,
-        positionTicks: input.patch.positionTicks ?? previous?.positionTicks ?? 0,
-        lastPlayedVersionId: "lastPlayedVersionId" in input.patch
-          ? input.patch.lastPlayedVersionId ?? null
-          : previous?.lastPlayedVersionId ?? null,
-        updatedAtMs: input.updatedAtMs
-      }
-      if (
-        !Number.isSafeInteger(state.updatedAtMs) ||
-        !Number.isSafeInteger(state.playCount) || state.playCount < 0 ||
-        !Number.isSafeInteger(state.positionTicks) || state.positionTicks < 0 ||
-        typeof state.played !== "boolean" || typeof state.favorite !== "boolean" ||
-        (state.lastPlayedVersionId !== null && typeof state.lastPlayedVersionId !== "string")
-      ) return yield* Effect.fail(failure("writeUserStateAndTargets", "invalid desired user state"))
+    database(
+      "writeUserStateAndTargets",
+      Effect.gen(function* () {
+        const previousRows = yield* sql.unsafe<UserStateRow>(
+          "SELECT * FROM user_state WHERE canonical_id = ?",
+          [input.canonicalId]
+        )
+        const previous = previousRows[0] ? userState(previousRows[0]) : null
+        const state: UserStateRecord = {
+          canonicalId: input.canonicalId,
+          revision: (previous?.revision ?? 0) + 1,
+          played: input.patch.played ?? previous?.played ?? false,
+          favorite: input.patch.favorite ?? previous?.favorite ?? false,
+          playCount: input.patch.playCount ?? previous?.playCount ?? 0,
+          positionTicks: input.patch.positionTicks ?? previous?.positionTicks ?? 0,
+          lastPlayedVersionId:
+            "lastPlayedVersionId" in input.patch
+              ? (input.patch.lastPlayedVersionId ?? null)
+              : (previous?.lastPlayedVersionId ?? null),
+          updatedAtMs: input.updatedAtMs
+        }
+        if (
+          !Number.isSafeInteger(state.updatedAtMs) ||
+          !Number.isSafeInteger(state.playCount) ||
+          state.playCount < 0 ||
+          !Number.isSafeInteger(state.positionTicks) ||
+          state.positionTicks < 0 ||
+          typeof state.played !== "boolean" ||
+          typeof state.favorite !== "boolean" ||
+          (state.lastPlayedVersionId !== null && typeof state.lastPlayedVersionId !== "string")
+        )
+          return yield* Effect.fail(
+            failure("writeUserStateAndTargets", "invalid desired user state")
+          )
 
       const targets = yield* readEligibleStateTargets(state.canonicalId)
       yield* sql.batch(stateBatchStatements(state, previous?.revision ?? 0, targets))
@@ -3119,6 +3602,10 @@ const makeRepositories = Effect.gen(function*() {
     saveServerConfiguration,
     saveServerResult,
     deleteServer,
+    readMetadataSettings,
+    writeMetadataSettings,
+    readExternalMetadata,
+    writeExternalMetadata,
     listVirtualLibraries,
     saveVirtualLibrary,
     deleteVirtualLibrary,

@@ -1,4 +1,10 @@
-import type { ServerView, SourceLibraryView, VirtualLibraryView } from "@oh-my-emby/contracts";
+import type {
+  MetadataProviderSettingsView,
+  ServerEndpointView,
+  ServerView,
+  SourceLibraryView,
+  VirtualLibraryView,
+} from "@oh-my-emby/contracts";
 
 export type JsonValue =
   | null
@@ -92,7 +98,16 @@ export interface AuthAttempt {
 
 export type ServerHealth = ServerView["health"];
 
-export interface UpstreamServer extends Omit<ServerView, "hasPassword"> {
+export interface UpstreamEndpoint extends ServerEndpointView {
+  readonly order: number;
+  readonly createdAtMs: number;
+  readonly updatedAtMs: number;
+}
+
+export interface UpstreamServer extends Omit<ServerView, "hasPassword" | "endpoints"> {
+  readonly endpoints: ReadonlyArray<UpstreamEndpoint>;
+  /** Transitional core URL derived from endpoints[0]; legacy base_url is never read. */
+  readonly baseUrl: ServerEndpointView["displayUrl"];
   readonly catalogNamespace: string;
   readonly verifiedBaseUrl: string | null;
   readonly password: string | null;
@@ -141,14 +156,35 @@ export interface VirtualLibrary extends Omit<VirtualLibraryView, "sources"> {
 export type SaveVirtualLibraryCommand = VirtualLibrary;
 
 export interface EligibleSource
-  extends LibrarySource, Pick<ServerView, "name" | "baseUrl" | "username" | "userAgent"> {
+  extends LibrarySource, Pick<ServerView, "name" | "username" | "userAgentPolicy" | "userAgent"> {
   readonly virtualLibraryId: VirtualLibraryView["id"];
+  readonly endpoints: ReadonlyArray<UpstreamEndpoint>;
+  /** Transitional core URL derived from endpoints[0]; legacy base_url is never read. */
+  readonly baseUrl: ServerEndpointView["displayUrl"];
   readonly catalogNamespace: string;
   readonly verifiedCatalogId: NonNullable<ServerView["verifiedCatalogId"]>;
   readonly serverGeneration: ServerView["generation"];
   readonly password: string | null;
   readonly accessToken: string | null;
   readonly accessTokenExpiresAtMs: number | null;
+}
+
+type MetadataProviderView = MetadataProviderSettingsView["providers"][number];
+
+export interface MetadataProviderSetting extends Omit<MetadataProviderView, "hasCredential"> {
+  readonly credential: string | null;
+  readonly updatedAtMs: number;
+}
+
+export interface ExternalMetadataCacheEntry {
+  readonly providerId: MetadataProviderSetting["id"];
+  readonly identityNamespace: string;
+  readonly identityValue: string;
+  readonly payload: JsonValue | null;
+  readonly found: boolean;
+  readonly fetchedAtMs: number;
+  readonly freshUntilMs: number;
+  readonly staleUntilMs: number;
 }
 
 export interface CanonicalItem {

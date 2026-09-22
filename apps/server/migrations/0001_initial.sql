@@ -33,6 +33,45 @@ CREATE TABLE upstream_servers (
   updated_at_ms INTEGER NOT NULL
 ) STRICT;
 
+CREATE TABLE upstream_server_endpoints (
+  id TEXT PRIMARY KEY,
+  server_id TEXT NOT NULL REFERENCES upstream_servers(id) ON DELETE CASCADE,
+  protocol TEXT NOT NULL CHECK (protocol IN ('http', 'https')),
+  host TEXT NOT NULL,
+  port INTEGER CHECK (port IS NULL OR port BETWEEN 1 AND 65535),
+  path TEXT NOT NULL,
+  endpoint_order INTEGER NOT NULL CHECK (endpoint_order >= 0),
+  verified_catalog_id TEXT,
+  health TEXT NOT NULL CHECK (health IN ('unknown', 'healthy', 'degraded')),
+  last_success_at_ms INTEGER,
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL,
+  UNIQUE (server_id, endpoint_order),
+  UNIQUE (server_id, protocol, host, port, path)
+) STRICT;
+
+CREATE TABLE metadata_provider_settings (
+  provider_id TEXT PRIMARY KEY CHECK (provider_id IN ('tmdb', 'trakt')),
+  enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+  provider_order INTEGER NOT NULL UNIQUE CHECK (provider_order IN (0, 1)),
+  language TEXT,
+  credential TEXT,
+  status TEXT NOT NULL CHECK (status IN ('unconfigured', 'ready', 'degraded')),
+  updated_at_ms INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE external_metadata_cache (
+  provider_id TEXT NOT NULL CHECK (provider_id IN ('tmdb', 'trakt')),
+  identity_namespace TEXT NOT NULL,
+  identity_value TEXT NOT NULL,
+  payload_json TEXT CHECK (payload_json IS NULL OR json_valid(payload_json)),
+  found INTEGER NOT NULL CHECK (found IN (0, 1)),
+  fetched_at_ms INTEGER NOT NULL,
+  fresh_until_ms INTEGER NOT NULL,
+  stale_until_ms INTEGER NOT NULL,
+  PRIMARY KEY (provider_id, identity_namespace, identity_value)
+) STRICT;
+
 CREATE TABLE emby_tokens (
   id TEXT PRIMARY KEY,
   user_singleton INTEGER NOT NULL REFERENCES users(singleton) ON DELETE CASCADE,

@@ -32,12 +32,26 @@ const serverFixture = (index: number): UpstreamServer => ({
   verifiedBaseUrl: `https://server-${index}.example.com`,
   generation: 1,
   name: `Server ${index}`,
-  baseUrl: `https://server-${index}.example.com` as any,
+  endpoints: [{
+    id: `server-${index}:endpoint`,
+    protocol: "https",
+    host: `server-${index}.example.com`,
+    port: null,
+    path: "",
+    displayUrl: `https://server-${index}.example.com/` as any,
+    verifiedCatalogId: `catalog-id:${index}`,
+    health: "healthy",
+    lastSuccessAtMs: 1_000,
+    order: 0,
+    createdAtMs: 1_000 + index,
+    updatedAtMs: 2_000 + index
+  }],
   username: "upstream-user",
   password: "upstream-password",
   accessToken: `token-${index}`,
   accessTokenExpiresAtMs: null,
   upstreamUserId: `upstream-user-${index}`,
+  userAgentPolicy: "fixed",
   userAgent: "oh-my-emby-acceptance",
   enabled: true,
   health: "healthy",
@@ -215,9 +229,10 @@ export const crossPlatformAcceptance = (
       headers: { ...jsonHeaders(app.publicOrigin), cookie },
       body: JSON.stringify({
         name: "Setup server",
-        baseUrl: "https://setup.example.com",
+        endpoints: [{ protocol: "https", host: "setup.example.com", port: null, path: "" }],
         username: "upstream-user",
         password: { _tag: "Set", value: "upstream-password" },
+        userAgentPolicy: "fixed",
         userAgent: "oh-my-emby-acceptance",
         enabled: true
       })
@@ -280,7 +295,7 @@ export const crossPlatformAcceptance = (
         .toEqual(["server-0", "server-1"])
     }))
     await expect(app.inspectStorage()).resolves.toEqual({
-      migrationNames: ["initial"],
+      migrationNames: ["initial", "dashboard_alignment"],
       enabledEncoding: 1
     })
   })
