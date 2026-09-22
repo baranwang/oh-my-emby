@@ -497,7 +497,9 @@ export const crossPlatformAcceptance = (
       return yield* (yield* MetadataProviders).refresh(record!)
     }).pipe(Effect.provide(metadataProviders)))
 
-    expect(requests.map(({ url }) => new URL(url).origin)).toEqual(["https://api.themoviedb.org"])
+    expect(requests).toHaveLength(1)
+    expect(requests[0]?.redirect).toBe("manual")
+    expect(new URL(requests[0]!.url).origin).toBe("https://api.themoviedb.org")
     expect(requests[0]?.headers.get("authorization")).toBe(`Bearer ${secret}`)
     expect(refreshed.canonical.displayMetadata).toEqual(record!.canonical.displayMetadata)
     expect(JSON.stringify(refreshed)).not.toContain(secret)
