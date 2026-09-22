@@ -41,6 +41,7 @@ export const MetadataProviderEditor = ({
 }) => {
   const update = useUpdateMetadataSettings()
   const [formError, setFormError] = useState(false)
+  const [confirmingClear, setConfirmingClear] = useState(false)
   const form = useForm({
     defaultValues: {
       enabled: provider.enabled,
@@ -102,19 +103,49 @@ export const MetadataProviderEditor = ({
               autoComplete="off"
               value={field.state.value._tag === "Set" ? field.state.value.value : ""}
               placeholder={provider.hasCredential ? m.metadata_credential_preserved() : undefined}
-              onChange={(event) => field.handleChange(event.target.value === ""
-                ? { _tag: "Preserve" }
-                : { _tag: "Set", value: event.target.value })}
+              onChange={(event) => {
+                setConfirmingClear(false)
+                field.handleChange(event.target.value === ""
+                  ? { _tag: "Preserve" }
+                  : { _tag: "Set", value: event.target.value })
+              }}
             />
             {provider.hasCredential && (
-              <Button
-                type="button"
-                size="sm"
-                variant="ghost"
-                onClick={() => field.handleChange({ _tag: "Clear" })}
-              >
-                {field.state.value._tag === "Clear" ? m.metadata_credential_will_clear() : m.metadata_credential_clear()}
-              </Button>
+              <div className="space-y-2">
+                <div className="flex flex-wrap gap-2">
+                  {!confirmingClear && field.state.value._tag !== "Clear" && (
+                    <Button type="button" size="sm" variant="outline" onClick={() => setConfirmingClear(true)}>
+                      {m.metadata_credential_clear()}
+                    </Button>
+                  )}
+                  {confirmingClear && (
+                    <>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="destructive"
+                        onClick={() => {
+                          field.handleChange({ _tag: "Clear" })
+                          setConfirmingClear(false)
+                        }}
+                      >
+                        {m.metadata_credential_clear_confirm()}
+                      </Button>
+                      <Button type="button" size="sm" variant="ghost" onClick={() => setConfirmingClear(false)}>
+                        {m.cancel()}
+                      </Button>
+                    </>
+                  )}
+                  {field.state.value._tag === "Clear" && (
+                    <Button type="button" size="sm" variant="outline" onClick={() => field.handleChange({ _tag: "Preserve" })}>
+                      {m.metadata_credential_clear_cancel()}
+                    </Button>
+                  )}
+                </div>
+                {field.state.value._tag === "Clear" && (
+                  <p role="status" className="text-sm text-destructive">{m.metadata_credential_will_clear()}</p>
+                )}
+              </div>
             )}
           </div>
         )}

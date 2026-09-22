@@ -82,13 +82,37 @@ const buttonIn = (container: ParentNode, name: string) => {
   return found
 }
 
-afterEach(async () => {
+const unmountAll = async () => {
   while (mounted.length) {
     const item = mounted.pop()
     if (!item) continue
     await act(async () => item.root.unmount())
     item.container.remove()
   }
+}
+
+const change = (input: HTMLInputElement, value: string) => {
+  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(input, value)
+  input.dispatchEvent(new Event("input", { bubbles: true }))
+  input.dispatchEvent(new Event("change", { bubbles: true }))
+}
+
+const savedCredential = async (fetch: ReturnType<typeof fetchFor>) => {
+  await vi.waitFor(() => expect(fetch.mock.calls.some(([input, init]) =>
+    (input instanceof Request ? input : new Request(input, init)).method === "PUT"
+  )).toBe(true))
+  const [input, init] = fetch.mock.calls.find(([candidate, candidateInit]) =>
+    (candidate instanceof Request ? candidate : new Request(candidate, candidateInit)).method === "PUT"
+  )!
+  const request = input instanceof Request ? input : new Request(input, init)
+  const payload = await request.clone().json() as {
+    readonly providers: ReadonlyArray<{ readonly id: string; readonly credential: { readonly _tag: string; readonly value?: string } }>
+  }
+  return payload.providers.find((provider) => provider.id === "tmdb")!.credential
+}
+
+afterEach(async () => {
+  await unmountAll()
   localStorage.clear()
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
@@ -151,6 +175,40 @@ describe("System settings", () => {
     await vi.waitFor(() => expect(document.body.textContent).toContain("Trakt settings"))
     expect(document.body.textContent).toContain("Client ID")
     expect(document.body.textContent).not.toContain("API Read Access Token")
+  })
+
+  it("requires explicit confirmation before clearing a write-only credential", async () => {
+    const canceled = await renderSystem()
+    await vi.waitFor(() => expect(canceled.container.textContent).toContain("TMDB"))
+    await act(async () => buttonIn(canceled.container.querySelectorAll("[data-provider-row]")[0]!, "Settings").click())
+    await act(async () => buttonIn(document.body, "Clear saved credential").click())
+    expect(document.body.textContent).toContain("Confirm credential removal")
+    expect(canceled.fetch.mock.calls.some(([input, init]) =>
+      (input instanceof Request ? input : new Request(input, init)).method === "PUT"
+    )).toBe(false)
+    await act(async () => buttonIn(document.body, "Cancel").click())
+    await act(async () => buttonIn(document.body, "Save").click())
+    expect(await savedCredential(canceled.fetch)).toEqual({ _tag: "Preserve" })
+
+    await unmountAll()
+    const confirmed = await renderSystem()
+    await vi.waitFor(() => expect(confirmed.container.textContent).toContain("TMDB"))
+    await act(async () => buttonIn(confirmed.container.querySelectorAll("[data-provider-row]")[0]!, "Settings").click())
+    await act(async () => buttonIn(document.body, "Clear saved credential").click())
+    await act(async () => buttonIn(document.body, "Confirm credential removal").click())
+    expect(document.body.textContent).toContain("Saved credential will be cleared when you save")
+    await act(async () => buttonIn(document.body, "Save").click())
+    expect(await savedCredential(confirmed.fetch)).toEqual({ _tag: "Clear" })
+
+    await unmountAll()
+    const edited = await renderSystem()
+    await vi.waitFor(() => expect(edited.container.textContent).toContain("TMDB"))
+    await act(async () => buttonIn(edited.container.querySelectorAll("[data-provider-row]")[0]!, "Settings").click())
+    await act(async () => buttonIn(document.body, "Clear saved credential").click())
+    await act(async () => change(document.body.querySelector('input[name="credential"]')!, "replacement"))
+    expect(document.body.textContent).not.toContain("Confirm credential removal")
+    await act(async () => buttonIn(document.body, "Save").click())
+    expect(await savedCredential(edited.fetch)).toEqual({ _tag: "Set", value: "replacement" })
   })
 
   it("keeps outbox detail collapsed until failed or uncertain work exists", async () => {
