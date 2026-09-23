@@ -1,7 +1,7 @@
 services:
   oh-my-emby:
-    build: .
-    image: oh-my-emby:local
+    image: ${IMAGE_REPOSITORY:-ghcr.io/baranwang/oh-my-emby}:${IMAGE_TAG:-latest}
+    pull_policy: ${PULL_POLICY:-missing}
     restart: unless-stopped
     environment:
       PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?PUBLIC_ORIGIN is required}
