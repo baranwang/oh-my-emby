@@ -52,7 +52,7 @@ export interface CatalogFilter {
 export interface FederatedQuery {
   readonly userId: string;
   readonly deviceId: string;
-  readonly virtualLibraryId: string;
+  readonly virtualLibraryId: string | null;
   readonly startIndex: number;
   readonly limit: number;
   readonly sort: ReadonlyArray<SortTerm>;
@@ -106,6 +106,7 @@ export type FederationFailure =
 export interface FederationService {
   readonly list: (query: FederatedQuery) => Effect.Effect<FederatedPage, FederationFailure>;
   readonly search: (query: SearchQuery) => Effect.Effect<FederatedPage, FederationFailure>;
+  readonly studios: (query: FederatedQuery) => Effect.Effect<FederatedPage, FederationFailure>;
   readonly detail: (
     canonicalId: string,
     clientUserAgent?: string,
@@ -315,12 +316,13 @@ const candidate = (
 const stateDependent = (query: FederatedQuery) =>
   query.filters.some(
     ({ field }) => field === "favorite" || field === "resume" || field === "played",
-  );
+  ) || query.sort.some(({ field }) => field === "DatePlayed" || field === "IsFavoriteOrLiked");
 
 const localMembershipOnly = (query: FederatedQuery) =>
   query.filters.length > 0 &&
   query.filters.every(
-    ({ field, value }) => (field === "favorite" || field === "resume") && value === true,
+    ({ field, value }) =>
+      (field === "favorite" || field === "resume" || field === "played") && value === true,
   );
 
 const stateMatches = (state: UserStateRecord | null, field: string, value: JsonValue): boolean => {
@@ -343,6 +345,12 @@ const matchesFilters = (
     const metadata = record.canonical.displayMetadata;
     if (!jsonObject(metadata)) return false;
     const actual = metadata[field];
+    if (field === "Studios" && Array.isArray(value) && Array.isArray(actual)) {
+      return actual.some((entry) => {
+        const name = jsonObject(entry) ? entry.Name : entry;
+        return typeof name === "string" && value.includes(name.trim().toLowerCase());
+      });
+    }
     return Array.isArray(actual) ? actual.some((entry) => entry === value) : actual === value;
   });
 
@@ -354,7 +362,11 @@ const sortValues = (
   sort: ReadonlyArray<SortTerm>,
 ): ReadonlyArray<JsonValue> => {
   const metadata = record.canonical.displayMetadata;
-  return sort.map(({ field }) => (jsonObject(metadata) ? (metadata[field] ?? null) : null));
+  return sort.map(({ field }) => {
+    if (field === "DatePlayed") return record.userState?.updatedAtMs ?? null;
+    if (field === "IsFavoriteOrLiked") return record.userState?.favorite ? 1 : 0;
+    return jsonObject(metadata) ? (metadata[field] ?? null) : null;
+  });
 };
 
 const compareValue = (left: JsonValue, right: JsonValue): number => {
@@ -407,6 +419,14 @@ const listPath = (
   if (searchTerm?.trim()) parameters.set("SearchTerm", searchTerm.trim());
   if (query.itemTypes.length > 0) {
     parameters.set("IncludeItemTypes", [...new Set(query.itemTypes)].join(","));
+  }
+  const studios = query.filters.find(({ field }) => field === "Studios")?.value;
+  if (Array.isArray(studios)) {
+    parameters.set("Studios", studios.join("|"));
+    parameters.set(
+      "Fields",
+      [...new Set([...(query.fields ?? []), "ProviderIds", "Studios"])].join(","),
+    );
   }
   return `/Items?${parameters}`;
 };
@@ -480,6 +500,35 @@ export const makeFederationLayer = (
       const now = config.now ?? Date.now;
       const listDeadlineMs = config.listDeadlineMs ?? UPSTREAM_LIST_DEADLINE_MS;
       const detailDeadlineMs = config.detailDeadlineMs ?? UPSTREAM_DETAIL_DEADLINE_MS;
+
+      const requestForUser = <A>(
+        source: EligibleSource,
+        path: string,
+        schema: Schema.Schema<A>,
+        clientUserAgent?: string,
+      ) =>
+        Effect.gen(function* () {
+          const server = yield* repositories.getServer(source.serverId);
+          if (server?.generation !== source.serverGeneration || server.upstreamUserId === null) {
+            return yield* Effect.fail(new UpstreamUnavailable({ serverId: source.serverId }));
+          }
+          const pathForUser = (userId: string) => {
+            const url = new URL(path, "https://local");
+            url.searchParams.set("UserId", userId);
+            return `${url.pathname}${url.search}`;
+          };
+          return yield* upstream.request(
+            {
+              serverId: source.serverId,
+              generation: source.serverGeneration,
+              method: "GET",
+              path: pathForUser(server.upstreamUserId),
+              replayPath: pathForUser,
+              ...(clientUserAgent === undefined ? {} : { clientUserAgent }),
+            },
+            schema,
+          );
+        });
 
       const readCatalog = (ids: ReadonlyArray<string>) =>
         Effect.gen(function* () {
@@ -571,7 +620,28 @@ export const makeFederationLayer = (
           return resolved;
         });
 
-      const runList = (
+      const scopedLibraries = (query: FederatedQuery) =>
+        repositories
+          .listVirtualLibraries()
+          .pipe(
+            Effect.map((libraries) =>
+              libraries.filter(
+                (library) =>
+                  library.enabled &&
+                  (query.virtualLibraryId === null || query.virtualLibraryId === library.id),
+              ),
+            ),
+          );
+
+      const scopedSources = (libraries: ReadonlyArray<{ readonly id: string }>) =>
+        Effect.gen(function* () {
+          const bindings = (yield* Effect.forEach(libraries, (library) =>
+            repositories.resolveEligibleSources(library.id),
+          )).flat();
+          return [...new Map(bindings.map((source) => [sourceKey(source), source])).values()];
+        });
+
+      const list = (
         query: FederatedQuery,
         searchTerm?: string,
       ): Effect.Effect<FederatedPage, FederationFailure> =>
@@ -592,8 +662,26 @@ export const makeFederationLayer = (
             );
           }
 
-          const sources = yield* repositories.resolveEligibleSources(query.virtualLibraryId);
-          const normalized = normalizedQuery(query, searchTerm);
+          const libraries = yield* scopedLibraries(query);
+          if (libraries.length === 0)
+            return { items: [], totalRecordCount: 0, exhausted: true, incompleteSourceIds: [] };
+          const sources = yield* scopedSources(libraries);
+          const localServerScope = localMembershipOnly(query)
+            ? (yield* repositories.listServers())
+                .filter(({ enabled }) => enabled)
+                .map(({ id, generation }) => [id, generation])
+            : [];
+          const normalized = {
+            query: normalizedQuery(query, searchTerm),
+            localServerScope,
+            // Membership includes enabled bindings even when their servers are temporarily unhealthy.
+            libraryScope: libraries.map((library) => ({
+              id: library.id,
+              sources: library.sources
+                .filter(({ enabled }) => enabled)
+                .map(({ serverId, sourceLibraryId }) => [serverId, sourceLibraryId]),
+            })),
+          };
           const key = queryKey(query, normalized);
           const projection = projectionKey(query);
 
@@ -617,7 +705,9 @@ export const makeFederationLayer = (
                 revision: 0,
                 userKey: query.userId,
                 deviceId: query.deviceId,
-                virtualLibraryId: query.virtualLibraryId,
+                // Cache FK anchor only; the query key retains null for global scope.
+                // Deleting this library safely expires the global cache with it.
+                virtualLibraryId: libraries[0]!.id,
                 normalizedQuery: normalized,
                 sourceState: state as unknown as JsonValue,
                 allSourcesExhausted: false,
@@ -655,17 +745,24 @@ export const makeFederationLayer = (
               if (
                 localMembershipOnly(query) &&
                 state.localBuffer.length === 0 &&
-                !state.sources.every((cursor) => cursor.exhausted)
+                published.length === 0
               ) {
                 const favorite = query.filters.find(({ field }) => field === "favorite")?.value;
                 const resume = query.filters.find(({ field }) => field === "resume")?.value;
-                const ids = yield* repositories.listStateMemberCanonicalIds({
-                  virtualLibraryId: query.virtualLibraryId,
-                  ...(typeof favorite === "boolean" ? { favorite } : {}),
-                  ...(typeof resume === "boolean" ? { resume } : {}),
-                  limit: MAX_MATERIALIZED_ITEMS,
-                });
-                const records = yield* readCatalog(ids);
+                const played = query.filters.find(({ field }) => field === "played")?.value;
+                const ids = new Set<string>();
+                for (const library of libraries) {
+                  if (ids.size >= MAX_MATERIALIZED_ITEMS) break;
+                  const members = yield* repositories.listStateMemberCanonicalIds({
+                    virtualLibraryId: library.id,
+                    ...(typeof favorite === "boolean" ? { favorite } : {}),
+                    ...(typeof resume === "boolean" ? { resume } : {}),
+                    ...(typeof played === "boolean" ? { played } : {}),
+                    limit: MAX_MATERIALIZED_ITEMS - ids.size,
+                  });
+                  for (const id of members) ids.add(id);
+                }
+                const records = yield* readCatalog([...ids]);
                 state.localBuffer = records
                   .filter(
                     (record) =>
@@ -729,22 +826,17 @@ export const makeFederationLayer = (
                           searchTerm,
                         );
                         const attempted = yield* deadline(
-                          upstream.request(
-                            {
-                              serverId: source.serverId,
-                              generation: source.serverGeneration,
-                              path,
-                              method: "GET",
-                              ...(query.clientUserAgent === undefined
-                                ? {}
-                                : { clientUserAgent: query.clientUserAgent }),
-                            },
-                            Schema.Unknown,
-                          ),
+                          requestForUser(source, path, Schema.Unknown, query.clientUserAgent),
                           source.serverId,
                           listDeadlineMs,
                         ).pipe(Effect.result);
                         dirty = true;
+                        if (
+                          Result.isFailure(attempted) &&
+                          attempted.failure instanceof RepositoryError
+                        ) {
+                          return yield* Effect.fail(attempted.failure);
+                        }
                         if (Result.isSuccess(attempted)) {
                           const processed = yield* Effect.gen(function* () {
                             const received = yield* Effect.try({
@@ -892,6 +984,91 @@ export const makeFederationLayer = (
               incompleteSourceIds,
             };
           }
+        });
+
+      const studios = (query: FederatedQuery): Effect.Effect<FederatedPage, FederationFailure> =>
+        Effect.gen(function* () {
+          const libraries = yield* scopedLibraries(query);
+          const sources = yield* scopedSources(libraries);
+          // ponytail: bounded facet discovery shares 2,000 rows across sources; add persisted
+          // facet cursors if catalogs need exhaustive studio traversal beyond this ceiling.
+          const sourceLimit = (index: number) =>
+            Math.floor(MAX_MATERIALIZED_ITEMS / sources.length) +
+            (index < MAX_MATERIALIZED_ITEMS % sources.length ? 1 : 0);
+          const results = yield* Effect.forEach(
+            sources,
+            (source, index) =>
+              Effect.gen(function* () {
+                if (sourceLimit(index) === 0) return { Items: [], TotalRecordCount: 1 };
+                const parameters = new URLSearchParams({
+                  ParentId: source.sourceLibraryId,
+                  Recursive: "true",
+                  StartIndex: "0",
+                  Limit: String(sourceLimit(index)),
+                  SortBy: "SortName",
+                  SortOrder: query.sort[0]?.direction ?? "Ascending",
+                });
+                if (query.itemTypes.length > 0)
+                  parameters.set("IncludeItemTypes", query.itemTypes.join(","));
+                return yield* deadline(
+                  requestForUser(
+                    source,
+                    `/Studios?${parameters}`,
+                    Schema.Struct({
+                      Items: Schema.Array(Schema.Struct({ Name: Schema.NonEmptyString })),
+                      TotalRecordCount: Schema.optionalKey(Schema.Natural),
+                    }),
+                    query.clientUserAgent,
+                  ),
+                  source.serverId,
+                  listDeadlineMs,
+                );
+              }).pipe(Effect.result),
+            { concurrency: MAX_FANOUT_CONCURRENCY },
+          );
+          const names = new Map<string, string>();
+          const incomplete = new Set<string>();
+          let successes = 0;
+          for (const [index, result] of results.entries()) {
+            if (Result.isFailure(result)) {
+              if (result.failure instanceof RepositoryError)
+                return yield* Effect.fail(result.failure);
+              incomplete.add(sources[index]!.serverId);
+              continue;
+            }
+            successes++;
+            const items = result.success.Items.slice(0, sourceLimit(index));
+            for (const { Name } of items) {
+              const name = Name.trim();
+              if (name) names.set(name.toLowerCase(), name);
+            }
+            if (
+              result.success.TotalRecordCount !== undefined
+                ? result.success.TotalRecordCount > items.length
+                : items.length >= sourceLimit(index)
+            )
+              incomplete.add(sources[index]!.serverId);
+          }
+          if (results.length > 0 && successes === 0)
+            return yield* Effect.fail(
+              new FederationUnavailable({ sourceIds: [...incomplete].sort() }),
+            );
+          const sorted = [...names.entries()].sort(([left], [right]) => left.localeCompare(right));
+          if (query.sort[0]?.direction === "Descending") sorted.reverse();
+          const end = query.startIndex + Math.min(query.limit, MAX_MATERIALIZED_ITEMS);
+          return {
+            items: sorted.slice(query.startIndex, end).map(([key, name]) => ({
+              id: `studio:${encodeURIComponent(key)}`,
+              itemType: "Studio",
+              displayMetadata: { Name: name },
+              mediaVersions: [],
+              userState: null,
+              incompleteSourceIds: [...incomplete].sort(),
+            })),
+            totalRecordCount: names.size,
+            exhausted: true,
+            incompleteSourceIds: [...incomplete].sort(),
+          };
         });
 
       const enrichVersions = (
@@ -1067,16 +1244,7 @@ export const makeFederationLayer = (
                   Limit: String(DB_BATCH_SIZE),
                 });
                 const attempted = yield* deadline(
-                  upstream.request(
-                    {
-                      serverId: source.serverId,
-                      generation: source.serverGeneration,
-                      path: `/Items?${parameters}`,
-                      method: "GET",
-                      ...(clientUserAgent === undefined ? {} : { clientUserAgent }),
-                    },
-                    Schema.Unknown,
-                  ),
+                  requestForUser(source, `/Items?${parameters}`, Schema.Unknown, clientUserAgent),
                   source.serverId,
                   detailDeadlineMs,
                 ).pipe(Effect.result);
@@ -1151,8 +1319,9 @@ export const makeFederationLayer = (
         });
 
       return Federation.of({
-        list: (query) => runList(query),
-        search: (query) => runList(query, query.searchTerm),
+        list: (query) => list(query),
+        search: (query) => list(query, query.searchTerm),
+        studios,
         detail: enrichVersions,
         lookupMembership,
         enrichVersions,

@@ -12,7 +12,7 @@ This specification is authoritative over earlier exploratory drafts. In particul
 
 oh-my-emby is an open-source, self-hosted Emby-compatible virtual server. One deployment connects to multiple upstream Emby servers and presents selected upstream libraries as one virtual Emby server.
 
-Equivalent movies, series, seasons, and episodes are represented once when their identities can be proven compatible. Every matching copy discovered from eligible upstream sources is exposed as a user-selectable media version. Detail and playback preparation perform bounded exact-ID enrichment because list/search federation alone cannot prove version completeness. The first compatibility target is SenPlayer.
+Equivalent movies, series, seasons, and episodes are represented once when their identities can be proven compatible. Every matching copy discovered from eligible upstream sources is exposed as a user-selectable media version. Detail and playback preparation perform bounded exact-ID enrichment because list/search federation alone cannot prove version completeness. The initial compatibility targets are SenPlayer and Rex; each client requires its own captured runtime evidence.
 
 The product supports two deployment shapes from one codebase:
 
@@ -72,11 +72,11 @@ The license is AGPL-3.0.
 
 One HTTP application owns three disjoint surfaces:
 
-| Surface | Prefix | Purpose |
-| --- | --- | --- |
-| Emby-compatible API | Emby-native paths | Client discovery, libraries, metadata, user state, playback, images, and subtitles. |
-| Dashboard API | `/api/dashboard/*` | Setup, authentication, upstream configuration, virtual libraries, and system status. |
-| Dashboard SPA | `/dashboard/*` | Static React application and prefix-scoped SPA fallback. |
+| Surface             | Prefix             | Purpose                                                                              |
+| ------------------- | ------------------ | ------------------------------------------------------------------------------------ |
+| Emby-compatible API | Emby-native paths  | Client discovery, libraries, metadata, user state, playback, images, and subtitles.  |
+| Dashboard API       | `/api/dashboard/*` | Setup, authentication, upstream configuration, virtual libraries, and system status. |
+| Dashboard SPA       | `/dashboard/*`     | Static React application and prefix-scoped SPA fallback.                             |
 
 ## Repository architecture
 
@@ -211,11 +211,13 @@ Credentials, server generation, or source-binding changes invalidate affected en
 
 Offset pagination is implemented over a server-owned query generation keyed by local user/device, virtual library, and normalized query excluding offset and limit. The generation stores ordered canonical IDs, published ordinals, per-source continuation state, source participation, and whether every source is exhausted.
 
+`ParentId` is optional for `/Items`, `/Users/{id}/Items`, and `/Users/{id}/Items/Latest`. Omitting it selects all enabled virtual libraries, deduplicates shared source bindings, and uses one global query generation. Its concurrency limit (four) and materialization/scan limit (2,000) apply across the entire query, not separately per library. The existing generation table uses the first enabled library as a cache-lifetime foreign-key anchor only; the actual query key retains a distinct global scope. Scope changes, including disabled bindings and servers used by local-state membership, cannot reuse the previous membership snapshot. No enabled libraries produce an empty result without creating an anchored generation.
+
 To serve a page, the federation layer performs bounded refill until the requested window is full or all participating sources are exhausted. Already published ordinals never move inside that generation. Ordering uses the normalized requested sort followed by canonical ID as a deterministic tie-breaker. A refresh or expired generation starts a new ordering; deep offsets beyond the configured materialization budget return a typed limit error rather than unbounded work.
 
 When all sources are exhausted, `TotalRecordCount` is exact. Otherwise it is a provisional continuation count: at least the materialized count and at least one item beyond the returned window when unread upstream rows remain. Because later rows may deduplicate or fail local filters, this value is not a mathematical lower bound on the final distinct count; it may overestimate and decrease, and the final request may return an empty terminal page. SenPlayer compatibility tests must confirm that evolving and downward-corrected counts continue pagination correctly; the service never labels the provisional value a complete-library count.
 
-State-independent catalog data is cached separately from local state. Favorites and resume membership come from canonical local state and hydrate already-known IDs. Other state filters are applied locally after discovery with bounded refill. A relevant user-state write invalidates state-dependent query generations.
+State-independent catalog data is cached separately from local state. Positive favorite, played-history, and resume membership come from canonical local state and hydrate already-known IDs without an upstream catalog scan. Other state filters are applied locally after discovery with bounded refill. A relevant user-state write invalidates state-dependent filter and sort generations. Temporarily unhealthy upstreams do not hide already-known local resume/history entries; disabled or removed sources do.
 
 Canonical display metadata uses the first fresh eligible source by virtual-library source order, then server ID and item ID; missing fields may be filled from compatible sources without overwriting present fields. Query generations persist their materialized sort values, so later metadata enrichment cannot reorder already published ordinals.
 
@@ -326,25 +328,25 @@ The user row carries an authentication generation. Login verifies and conditiona
 
 Both D1 and SQLite implement the same logical schema and migrations:
 
-| Entity | Purpose |
-| --- | --- |
-| `users` | Sole local user and password hash parameters. |
-| `emby_tokens` | Hashed client access tokens and device metadata. |
-| `dashboard_sessions` | Hashed browser sessions and rolling expiry. |
-| `upstream_servers` | Immutable catalog namespace, verified upstream identity, connection generations, credentials, UA, enabled, and health state. |
-| `virtual_libraries` | User-visible library definitions. |
-| `library_sources` | Virtual-to-upstream library bindings. |
-| `canonical_items` | Stable virtual item identities, type, and durable identity state. |
-| `canonical_aliases` | Permanent aliases from safely consolidated public IDs. |
-| `identity_claims` | Typed external-ID claims, ambiguity, and quarantine state. |
-| `source_items` | Upstream item mappings, source-library membership, and configuration generation. |
-| `source_media_versions` | Upstream media-source identities and bounded playback capability metadata. |
-| `user_state` | Canonical local watched/favorite/resume state. |
-| `source_metadata_cache` | Projection-aware normalized metadata and freshness. |
-| `query_generations` | Query identity, source continuation state, expiry, and exhaustion. |
-| `query_generation_items` | Bounded ordered membership rows rather than one unbounded JSON snapshot. |
-| `state_outbox` | Revisioned desired-state targets, delivered revisions, leases, retries, uncertainty obligations, and safe failures. |
-| `schema_migrations` | Applied database migration versions. |
+| Entity                   | Purpose                                                                                                                      |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------- |
+| `users`                  | Sole local user and password hash parameters.                                                                                |
+| `emby_tokens`            | Hashed client access tokens and device metadata.                                                                             |
+| `dashboard_sessions`     | Hashed browser sessions and rolling expiry.                                                                                  |
+| `upstream_servers`       | Immutable catalog namespace, verified upstream identity, connection generations, credentials, UA, enabled, and health state. |
+| `virtual_libraries`      | User-visible library definitions.                                                                                            |
+| `library_sources`        | Virtual-to-upstream library bindings.                                                                                        |
+| `canonical_items`        | Stable virtual item identities, type, and durable identity state.                                                            |
+| `canonical_aliases`      | Permanent aliases from safely consolidated public IDs.                                                                       |
+| `identity_claims`        | Typed external-ID claims, ambiguity, and quarantine state.                                                                   |
+| `source_items`           | Upstream item mappings, source-library membership, and configuration generation.                                             |
+| `source_media_versions`  | Upstream media-source identities and bounded playback capability metadata.                                                   |
+| `user_state`             | Canonical local watched/favorite/resume state.                                                                               |
+| `source_metadata_cache`  | Projection-aware normalized metadata and freshness.                                                                          |
+| `query_generations`      | Query identity, source continuation state, expiry, and exhaustion.                                                           |
+| `query_generation_items` | Bounded ordered membership rows rather than one unbounded JSON snapshot.                                                     |
+| `state_outbox`           | Revisioned desired-state targets, delivered revisions, leases, retries, uncertainty obligations, and safe failures.          |
+| `schema_migrations`      | Applied database migration versions.                                                                                         |
 
 Database adapters own SQL dialect details. Core services operate through repository interfaces and do not branch on D1 versus SQLite. The state-and-outbox write is one repository command: SQL updates state/revision and creates eligible targets atomically without upstream HTTP inside the transaction. D1 uses a transactional prepared-statement batch with SQL-side conditions; SQLite provides equivalent semantics.
 
@@ -431,6 +433,18 @@ It does not duplicate the Emby media-browsing experience.
 Protocol compatibility is accepted from captured behavior, not from Emby documentation alone. Release evidence in `docs/compatibility/senplayer.md` records the tested SenPlayer platform/build and the observed request sequence for login, server identity, views, list/detail fields, pagination, version selection, PlaybackInfo, actual stream requests, redirects, seeking, audio/subtitle selection, playback reports, and any `/emby` path aliases.
 
 The virtual protocol advertises only capabilities demonstrated by the selected media source and implemented by oh-my-emby. A successful upstream connection test proves control-plane reachability only; it does not prove client reachability, redirect authorization, User-Agent compatibility, or SenPlayer version selection.
+
+### Rex compatibility additions
+
+Captured Rex requests require global lists without `ParentId`, `/Users/{id}/Items/Resume`, and `/Studios`. Resume is a dedicated authenticated list route, not an item ID; it uses local unplayed positions and defaults to descending local activity time. Local path/query user IDs must match the authenticated user.
+
+Upstream catalog and studio requests carry the configured upstream account's `UserId`, not the local user ID. This is required by user-dependent sorts such as Rex's `IsFavoriteOrLiked,Random`; omitting it caused a real upstream HTTP 500. Authentication replay rebuilds the query with the refreshed upstream user ID.
+
+Studio discovery is bounded to 2,000 names in total, sharing the request budget across eligible source bindings and supplying each upstream's own `UserId` and `ParentId`. Names are merged case-insensitively and exposed through reversible local `studio:` IDs, never upstream IDs. Item queries translate local `StudioIds` or pipe-delimited `Studios` names into upstream name filters. Truncated or failed sources remain incomplete internally; the response count describes the discovered studio snapshot and terminates there instead of advertising pages that cannot be fetched. Exhaustive studio enumeration beyond that bound is not claimed.
+
+The shared Bun/Workers HTTP acceptance flow covers login, views, global and scoped items, detail, local resume/history, and studio filtering using fixture upstreams. This is separate from real Rex UI, real upstream, and actual playback verification; passing that suite alone does not certify the client.
+
+A real-upstream HTTP replay on 2026-09-23 used an isolated copy of the local database and the production Bun runtime: global pages returned 30 items each without duplicate IDs, scoped items/detail/PlaybackInfo returned 200, and video/image entries returned 302. Resume/history returned empty local-state lists; studio discovery returned 1,999 distinct names and a studio-filtered query returned three items. The probe blocked upstream state writes and did not follow the video redirect or download media bytes. Native Rex UI rendering and actual playback remain unverified.
 
 ## Failure behavior
 

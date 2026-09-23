@@ -1,14 +1,14 @@
-import { Schema } from "effect"
+import { Schema } from "effect";
 
-const StringList = Schema.Array(Schema.NonEmptyString)
+const StringList = Schema.Array(Schema.NonEmptyString);
 
 export const EmbyUserDataDto = Schema.Struct({
   ItemId: Schema.NonEmptyString,
   Played: Schema.Boolean,
   IsFavorite: Schema.Boolean,
   PlayCount: Schema.Natural,
-  PlaybackPositionTicks: Schema.Natural
-})
+  PlaybackPositionTicks: Schema.Natural,
+});
 
 export const EmbyMediaStreamDto = Schema.Struct({
   Index: Schema.optionalKey(Schema.Natural),
@@ -39,8 +39,8 @@ export const EmbyMediaStreamDto = Schema.Struct({
   IsInterlaced: Schema.optionalKey(Schema.Boolean),
   IsAVC: Schema.optionalKey(Schema.Boolean),
   IsAnamorphic: Schema.optionalKey(Schema.Boolean),
-  SupportsExternalStream: Schema.optionalKey(Schema.Boolean)
-})
+  SupportsExternalStream: Schema.optionalKey(Schema.Boolean),
+});
 
 export const EmbyMediaSourceDto = Schema.Struct({
   Id: Schema.NonEmptyString,
@@ -55,8 +55,8 @@ export const EmbyMediaSourceDto = Schema.Struct({
   SupportsDirectStream: Schema.optionalKey(Schema.Boolean),
   SupportsTranscoding: Schema.optionalKey(Schema.Boolean),
   IsRemote: Schema.optionalKey(Schema.Boolean),
-  MediaStreams: Schema.Array(EmbyMediaStreamDto)
-})
+  MediaStreams: Schema.Array(EmbyMediaStreamDto),
+});
 
 export const EmbyItemDto = Schema.Struct({
   Id: Schema.NonEmptyString,
@@ -83,60 +83,59 @@ export const EmbyItemDto = Schema.Struct({
   BackdropImageTags: Schema.optionalKey(StringList),
   Genres: Schema.optionalKey(StringList),
   UserData: EmbyUserDataDto,
-  MediaSources: Schema.Array(EmbyMediaSourceDto)
-})
+  MediaSources: Schema.Array(EmbyMediaSourceDto),
+});
 
 export const EmbyPlaybackInfoDto = Schema.Struct({
   PlaySessionId: Schema.NonEmptyString,
-  MediaSources: Schema.Array(EmbyMediaSourceDto)
-})
+  MediaSources: Schema.Array(EmbyMediaSourceDto),
+});
 
 export const EmbyLoginBody = Schema.Struct({
   Username: Schema.NonEmptyString,
-  Pw: Schema.NonEmptyString
-})
+  Pw: Schema.NonEmptyString,
+});
 
 export const EmbyClient = Schema.Struct({
   Device: Schema.NonEmptyString,
-  DeviceId: Schema.NonEmptyString
-})
+  DeviceId: Schema.NonEmptyString,
+});
 
 export const EmbyItemsQuery = Schema.Struct({
-  ParentId: Schema.NonEmptyString,
+  ParentId: Schema.optionalKey(Schema.NonEmptyString),
   StartIndex: Schema.optionalKey(Schema.Natural),
   Limit: Schema.optionalKey(Schema.Natural),
   SearchTerm: Schema.optionalKey(Schema.NonEmptyString),
   SortBy: Schema.optionalKey(StringList),
   SortOrder: Schema.optionalKey(Schema.Array(Schema.Literals(["Ascending", "Descending"]))),
   Fields: Schema.optionalKey(StringList),
-  Filters: Schema.optionalKey(Schema.Array(Schema.Literals([
-    "IsFavorite",
-    "IsPlayed",
-    "IsUnplayed",
-    "IsResumable"
-  ]))),
-  IncludeItemTypes: Schema.optionalKey(StringList)
-})
+  Studios: Schema.optionalKey(StringList),
+  StudioIds: Schema.optionalKey(StringList),
+  Filters: Schema.optionalKey(
+    Schema.Array(Schema.Literals(["IsFavorite", "IsPlayed", "IsUnplayed", "IsResumable"])),
+  ),
+  IncludeItemTypes: Schema.optionalKey(StringList),
+});
 
 export const EmbyUserDataPatch = Schema.Struct({
   Played: Schema.optionalKey(Schema.Boolean),
   IsFavorite: Schema.optionalKey(Schema.Boolean),
   PlayCount: Schema.optionalKey(Schema.Natural),
   PlaybackPositionTicks: Schema.optionalKey(Schema.Natural),
-  LastPlayedVersionId: Schema.optionalKey(Schema.NullOr(Schema.NonEmptyString))
-})
+  LastPlayedVersionId: Schema.optionalKey(Schema.NullOr(Schema.NonEmptyString)),
+});
 
 export const EmbyPlaybackEvent = Schema.Struct({
   ItemId: Schema.NonEmptyString,
   MediaSourceId: Schema.NonEmptyString,
   PlaySessionId: Schema.NonEmptyString,
-  PositionTicks: Schema.optionalKey(Schema.Natural)
-})
+  PositionTicks: Schema.optionalKey(Schema.Natural),
+});
 
-export type EmbyItemsQuery = typeof EmbyItemsQuery.Type
-export type EmbyUserDataPatch = typeof EmbyUserDataPatch.Type
-export type EmbyPlaybackEvent = typeof EmbyPlaybackEvent.Type
-export type EmbyItemDto = typeof EmbyItemDto.Type
-export type EmbyMediaSourceDto = typeof EmbyMediaSourceDto.Type
-export type EmbyMediaStreamDto = typeof EmbyMediaStreamDto.Type
-export type EmbyPlaybackInfoDto = typeof EmbyPlaybackInfoDto.Type
+export type EmbyItemsQuery = typeof EmbyItemsQuery.Type;
+export type EmbyUserDataPatch = typeof EmbyUserDataPatch.Type;
+export type EmbyPlaybackEvent = typeof EmbyPlaybackEvent.Type;
+export type EmbyItemDto = typeof EmbyItemDto.Type;
+export type EmbyMediaSourceDto = typeof EmbyMediaSourceDto.Type;
+export type EmbyMediaStreamDto = typeof EmbyMediaStreamDto.Type;
+export type EmbyPlaybackInfoDto = typeof EmbyPlaybackInfoDto.Type;

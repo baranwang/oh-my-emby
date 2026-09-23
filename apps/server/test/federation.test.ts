@@ -14,10 +14,7 @@ import {
   type UpstreamFailure,
 } from "../src/core/errors.js";
 import { makeIdentityLayer } from "../src/core/identity.js";
-import {
-  MetadataProviders,
-  type MetadataProvidersApi,
-} from "../src/core/metadata-providers.js";
+import { MetadataProviders, type MetadataProvidersApi } from "../src/core/metadata-providers.js";
 import {
   MAX_FANOUT_CONCURRENCY,
   METADATA_FRESH_MS,
@@ -30,8 +27,8 @@ import { makeSqliteRepositoriesLayer } from "../src/platform/bun/sqlite-reposito
 
 const migration = [
   await Bun.file(new URL("../migrations/0001_initial.sql", import.meta.url)).text(),
-  await Bun.file(new URL("../migrations/0002_dashboard_alignment.sql", import.meta.url)).text()
-].join("\n")
+  await Bun.file(new URL("../migrations/0002_dashboard_alignment.sql", import.meta.url)).text(),
+].join("\n");
 
 const server = (index: number): UpstreamServer => ({
   id: `server-${index}` as any,
@@ -53,8 +50,8 @@ const server = (index: number): UpstreamServer => ({
       lastSuccessAtMs: 1_000,
       order: 0,
       createdAtMs: 1_000,
-      updatedAtMs: 1_000
-    }
+      updatedAtMs: 1_000,
+    },
   ],
   baseUrl: `https://server-${index}.example.com` as any,
   username: "upstream-user",
@@ -97,7 +94,11 @@ const typedQuery = (
   overrides: Partial<FederatedQuery> = {},
 ): FederatedQuery => ({ ...query(overrides), itemTypes });
 
-type RequestHandler = (serverId: string, path: string) => Effect.Effect<unknown, UpstreamFailure>;
+type RequestHandler = (
+  serverId: string,
+  path: string,
+  replayPath?: (userId: string) => string,
+) => Effect.Effect<unknown, UpstreamFailure>;
 
 describe("Federation", () => {
   let directory: string;
@@ -159,7 +160,7 @@ describe("Federation", () => {
     const upstream = Layer.succeed(
       UpstreamClient,
       UpstreamClient.of({
-        request: ({ serverId, path }) => handle(serverId, path) as any,
+        request: ({ serverId, path, replayPath }) => handle(serverId, path, replayPath) as any,
         authenticate: () => Effect.die("unused") as any,
         getServerIdentity: () => Effect.die("unused") as any,
         listSourceLibraries: () => Effect.die("unused") as any,
@@ -169,96 +170,500 @@ describe("Federation", () => {
     const identity = makeIdentityLayer.pipe(Layer.provide(repositories));
     const metadataProviders = Layer.succeed(
       MetadataProviders,
-      MetadataProviders.of(options.metadataProviders ?? {
-        refresh: (record) => Effect.succeed(record),
-        overlayCached: (record) => Effect.succeed(record),
-        resolveCachedImage: () => Effect.succeed(null),
-      }),
+      MetadataProviders.of(
+        options.metadataProviders ?? {
+          refresh: (record) => Effect.succeed(record),
+          overlayCached: (record) => Effect.succeed(record),
+          resolveCachedImage: () => Effect.succeed(null),
+        },
+      ),
     );
     const dependencies = Layer.mergeAll(repositories, identity, upstream, metadataProviders);
     return makeFederationLayer(options).pipe(Layer.provide(dependencies));
   };
 
+  it("merges enabled libraries without duplicate items across page boundaries", async () => {
+    const layer = await setup(3, (serverId) =>
+      Effect.succeed({
+        Items:
+          serverId === "server-0"
+            ? [item("10", "Alpha"), item("20", "Shared")]
+            : serverId === "server-1"
+              ? [item("20", "Shared"), item("30", "Zulu")]
+              : [item("40", "Hidden")],
+        TotalRecordCount: serverId === "server-2" ? 1 : 2,
+      }),
+    );
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const repo = yield* Repositories;
+        const library = (yield* repo.listVirtualLibraries())[0]!;
+        for (let index = 0; index < 3; index++) {
+          yield* repo.saveVirtualLibrary(
+            {
+              ...library,
+              id: `library-${index + 1}` as any,
+              enabled: index !== 2,
+              sources: [library.sources[index]!],
+            },
+            [{ serverId: `server-${index}`, generation: 1 }],
+          );
+        }
+      }).pipe(Effect.provide(repositories)),
+    );
+
+    const pages = await Effect.runPromise(
+      Effect.gen(function* () {
+        const federation = yield* Federation;
+        const first = yield* federation.list(query({ virtualLibraryId: null, limit: 2 }));
+        const second = yield* federation.list(
+          query({ virtualLibraryId: null, startIndex: 2, limit: 2 }),
+        );
+        return [first, second];
+      }).pipe(Effect.provide(layer)),
+    );
+    expect(pages[0]!.items.map((entry) => (entry.displayMetadata as any).Name)).toEqual([
+      "Alpha",
+      "Shared",
+    ]);
+    expect(pages[1]!.items.map((entry) => (entry.displayMetadata as any).Name)).toEqual(["Zulu"]);
+    expect(pages[1]!.totalRecordCount).toBe(3);
+    expect(new Set(pages.flatMap((page) => page.items.map(({ id }) => id))).size).toBe(3);
+  });
+
+  it("orders cross-library resume results by local activity without upstream reads", async () => {
+    let calls = 0;
+    const layer = await setup(1, () => {
+      calls++;
+      return Effect.succeed({
+        Items: [item("10", "Older"), item("20", "Recent"), item("30", "Finished")],
+        TotalRecordCount: 3,
+      });
+    });
+    const discovered = await Effect.runPromise(
+      Effect.gen(function* () {
+        return yield* (yield* Federation).list(query());
+      }).pipe(Effect.provide(layer)),
+    );
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const repo = yield* Repositories;
+        for (const entry of discovered.items) {
+          const name = (entry.displayMetadata as any).Name;
+          yield* repo.writeUserStateAndTargets({
+            canonicalId: entry.id,
+            patch: { positionTicks: 100, played: name === "Finished" },
+            updatedAtMs: name === "Recent" ? 3_000 : 2_000,
+          });
+        }
+      }).pipe(Effect.provide(repositories)),
+    );
+    const resumed = await Effect.runPromise(
+      Effect.gen(function* () {
+        return yield* (yield* Federation).list(
+          query({
+            virtualLibraryId: null,
+            filters: [{ field: "resume", value: true }],
+            sort: [{ field: "DatePlayed", direction: "Descending" }],
+          }),
+        );
+      }).pipe(Effect.provide(layer)),
+    );
+    expect(resumed.items.map((entry) => (entry.displayMetadata as any).Name)).toEqual([
+      "Recent",
+      "Older",
+    ]);
+    expect(calls).toBe(1);
+  });
+
+  it("keeps global page membership stable when published metadata changes", async () => {
+    const layer = await setup(1, () =>
+      Effect.succeed({
+        Items: [item("10", "Alpha"), item("20", "Beta"), item("30", "Gamma")],
+        TotalRecordCount: 3,
+      }),
+    );
+    const first = await Effect.runPromise(
+      Effect.gen(function* () {
+        return yield* (yield* Federation).list(query({ virtualLibraryId: null, limit: 2 }));
+      }).pipe(Effect.provide(layer)),
+    );
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const repo = yield* Repositories;
+        const [record] = yield* repo.readCatalogItems([first.items[0]!.id]);
+        yield* repo.mergeCanonicalMetadata(
+          record!.canonical.id,
+          record!.sourceItems[0]!.id,
+          { ...(record!.canonical.displayMetadata as object), Name: "Zulu" },
+          3_000,
+        );
+      }).pipe(Effect.provide(repositories)),
+    );
+    const second = await Effect.runPromise(
+      Effect.gen(function* () {
+        return yield* (yield* Federation).list(
+          query({ virtualLibraryId: null, startIndex: 2, limit: 2 }),
+        );
+      }).pipe(Effect.provide(layer)),
+    );
+    expect(second.items.map((entry) => (entry.displayMetadata as any).Name)).toEqual(["Gamma"]);
+    expect(new Set([...first.items, ...second.items].map(({ id }) => id)).size).toBe(3);
+  });
+
+  it("scopes Rex favorites-first lists to the upstream user and refreshes that scope on auth replay", async () => {
+    const layer = await setup(1, (_serverId, path, replayPath) => {
+      const parameters = new URL(path, "https://local").searchParams;
+      expect(parameters.get("UserId")).toBe("user-0");
+      expect(parameters.get("SortBy")).toBe("IsFavoriteOrLiked,Random");
+      const refreshed = new URL(replayPath!("refreshed-user"), "https://local").searchParams;
+      expect(refreshed.get("UserId")).toBe("refreshed-user");
+      expect(refreshed.get("ParentId")).toBe("movies-0");
+      expect(refreshed.get("SortBy")).toBe("IsFavoriteOrLiked,Random");
+      return Effect.succeed({ Items: [item("10")], TotalRecordCount: 1 });
+    });
+    const page = await Effect.runPromise(
+      Effect.gen(function* () {
+        return yield* (yield* Federation).list(
+          query({
+            virtualLibraryId: null,
+            sort: [
+              { field: "IsFavoriteOrLiked", direction: "Descending" },
+              { field: "Random", direction: "Descending" },
+            ],
+          }),
+        );
+      }).pipe(Effect.provide(layer)),
+    );
+    expect(page.items).toHaveLength(1);
+  });
+
+  it("keeps local resume entries visible when no source is currently healthy", async () => {
+    const layer = await setup(1, () =>
+      Effect.succeed({ Items: [item("10", "Offline")], TotalRecordCount: 1 }),
+    );
+    const first = await Effect.runPromise(
+      Effect.gen(function* () {
+        return yield* (yield* Federation).list(query());
+      }).pipe(Effect.provide(layer)),
+    );
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const repo = yield* Repositories;
+        yield* repo.writeUserStateAndTargets({
+          canonicalId: first.items[0]!.id,
+          patch: { positionTicks: 100 },
+          updatedAtMs: 2_000,
+        });
+        yield* repo.saveServer({ ...server(0), health: "unknown" });
+      }).pipe(Effect.provide(repositories)),
+    );
+    const resume = await Effect.runPromise(
+      Effect.gen(function* () {
+        return yield* (yield* Federation).list(
+          query({ virtualLibraryId: null, filters: [{ field: "resume", value: true }] }),
+        );
+      }).pipe(Effect.provide(layer)),
+    );
+    expect(resume.items.map(({ id }) => id)).toEqual([first.items[0]!.id]);
+  });
+
+  it("discovers and deduplicates studios from eligible sources without exposing upstream IDs", async () => {
+    const paths: string[] = [];
+    const layer = await setup(2, (serverId, path) => {
+      paths.push(path);
+      return Effect.succeed({
+        Items: [
+          { Id: `private-${serverId}`, Type: "Studio", Name: "Warner" },
+          {
+            Id: `other-${serverId}`,
+            Type: "Studio",
+            Name: serverId === "server-0" ? "A24" : "Universal",
+          },
+        ],
+        TotalRecordCount: 2,
+      });
+    });
+    const studios = await Effect.runPromise(
+      Effect.gen(function* () {
+        return yield* (yield* Federation).studios(query({ virtualLibraryId: null, limit: 10_000 }));
+      }).pipe(Effect.provide(layer)),
+    );
+    expect(studios.items.map((entry) => (entry.displayMetadata as any).Name)).toEqual([
+      "A24",
+      "Universal",
+      "Warner",
+    ]);
+    expect(studios.totalRecordCount).toBe(3);
+    expect(studios.items.map(({ id }) => id)).toEqual([
+      "studio:a24",
+      "studio:universal",
+      "studio:warner",
+    ]);
+    expect(paths).toHaveLength(2);
+    for (const path of paths) {
+      const url = new URL(path, "https://local");
+      expect(url.pathname).toBe("/Studios");
+      expect(url.searchParams.get("ParentId")).toMatch(/^movies-[01]$/);
+    }
+  });
+
+  it("invalidates offline local membership when a server is disabled and enabled", async () => {
+    const layer = await setup(1, () =>
+      Effect.succeed({ Items: [item("10")], TotalRecordCount: 1 }),
+    );
+    const run = (filters: FederatedQuery["filters"] = []) =>
+      Effect.runPromise(
+        Effect.gen(function* () {
+          return yield* (yield* Federation).list(query({ virtualLibraryId: null, filters }));
+        }).pipe(Effect.provide(layer)),
+      );
+    const discovered = await run();
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const repo = yield* Repositories;
+        yield* repo.writeUserStateAndTargets({
+          canonicalId: discovered.items[0]!.id,
+          patch: { played: true },
+          updatedAtMs: 2_000,
+        });
+        yield* repo.saveServer({ ...server(0), health: "unknown", enabled: false });
+      }).pipe(Effect.provide(repositories)),
+    );
+    expect((await run([{ field: "played", value: true }])).items).toEqual([]);
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* (yield* Repositories).saveServer({ ...server(0), health: "unknown", enabled: true });
+      }).pipe(Effect.provide(repositories)),
+    );
+    expect((await run([{ field: "played", value: true }])).items.map(({ id }) => id)).toEqual([
+      discovered.items[0]!.id,
+    ]);
+  });
+
+  it("invalidates favorites-first sorting after local state changes", async () => {
+    const layer = await setup(1, () =>
+      Effect.succeed({ Items: [item("10", "Alpha"), item("20", "Beta")], TotalRecordCount: 2 }),
+    );
+    const run = () =>
+      Effect.runPromise(
+        Effect.gen(function* () {
+          return yield* (yield* Federation).list(
+            query({
+              virtualLibraryId: null,
+              sort: [
+                { field: "IsFavoriteOrLiked", direction: "Descending" },
+                { field: "Name", direction: "Ascending" },
+              ],
+            }),
+          );
+        }).pipe(Effect.provide(layer)),
+      );
+    const first = await run();
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const repo = yield* Repositories;
+        yield* repo.writeUserStateAndTargets({
+          canonicalId: first.items[1]!.id,
+          patch: { favorite: true },
+          updatedAtMs: 2_000,
+        });
+        yield* repo.invalidateStateDependentQueryGenerations();
+      }).pipe(Effect.provide(repositories)),
+    );
+    expect((await run()).items.map((entry) => (entry.displayMetadata as any).Name)).toEqual([
+      "Beta",
+      "Alpha",
+    ]);
+  });
+
+  it("filters studio names and preserves user scoping on upstream studio requests", async () => {
+    const paths: string[] = [];
+    const layer = await setup(1, (_serverId, path) => {
+      paths.push(path);
+      return Effect.succeed(
+        path.startsWith("/Studios?")
+          ? { Items: [{ Name: "Warner" }], TotalRecordCount: 1 }
+          : {
+              Items: [
+                item("10", "Included", { Studios: [{ Name: "Warner", Id: "upstream-studio" }] }),
+                item("20", "Excluded", { Studios: [{ Name: "Other" }] }),
+              ],
+              TotalRecordCount: 2,
+            },
+      );
+    });
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const federation = yield* Federation;
+        const page = yield* federation.list(
+          query({ filters: [{ field: "Studios", value: ["warner"] }] }),
+        );
+        expect(page.items.map((entry) => (entry.displayMetadata as any).Name)).toEqual([
+          "Included",
+        ]);
+        yield* federation.studios(query());
+      }).pipe(Effect.provide(layer)),
+    );
+    expect(new URL(paths[0]!, "https://local").searchParams.get("Studios")).toBe("warner");
+    expect(new URL(paths[0]!, "https://local").searchParams.get("Fields")).toContain("Studios");
+    expect(new URL(paths[1]!, "https://local").searchParams.get("UserId")).toBe("user-0");
+  });
+
+  it("terminates bounded studio discovery without advertising unreachable pages", async () => {
+    let requested = 0;
+    const layer = await setup(2, (serverId, path) => {
+      const parameters = new URL(path, "https://local").searchParams;
+      expect(parameters.get("SortOrder")).toBe("Descending");
+      const limit = Number(parameters.get("Limit"));
+      requested += limit;
+      return Effect.succeed({
+        Items: Array.from({ length: limit }, (_, index) => ({
+          Name: `${serverId}-${String(10_000 - index).padStart(5, "0")}`,
+        })),
+        TotalRecordCount: 10_000,
+      });
+    });
+    const page = await Effect.runPromise(
+      Effect.gen(function* () {
+        return yield* (yield* Federation).studios(
+          query({
+            virtualLibraryId: null,
+            limit: 10_000,
+            sort: [{ field: "SortName", direction: "Descending" }],
+          }),
+        );
+      }).pipe(Effect.provide(layer)),
+    );
+    expect(requested).toBeLessThanOrEqual(2_000);
+    expect(page.items).toHaveLength(2_000);
+    expect(page.totalRecordCount).toBe(2_000);
+    expect(page.exhausted).toBe(true);
+    expect(page.incompleteSourceIds).toEqual(["server-0", "server-1"]);
+  });
+
+  it("hydrates played history from local state without scanning upstream libraries", async () => {
+    let calls = 0;
+    const layer = await setup(1, () => {
+      calls++;
+      return Effect.succeed({ Items: [item("10", "Watched")], TotalRecordCount: 1 });
+    });
+    const discovered = await Effect.runPromise(
+      Effect.gen(function* () {
+        return yield* (yield* Federation).list(query());
+      }).pipe(Effect.provide(layer)),
+    );
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* (yield* Repositories).writeUserStateAndTargets({
+          canonicalId: discovered.items[0]!.id,
+          patch: { played: true },
+          updatedAtMs: 2_000,
+        });
+      }).pipe(Effect.provide(repositories)),
+    );
+    const history = await Effect.runPromise(
+      Effect.gen(function* () {
+        return yield* (yield* Federation).list(
+          query({ virtualLibraryId: null, filters: [{ field: "played", value: true }] }),
+        );
+      }).pipe(Effect.provide(layer)),
+    );
+    expect(history.items.map(({ id }) => id)).toEqual([discovered.items[0]!.id]);
+    expect(calls).toBe(1);
+  });
+
   it("uses cache-only overlays for list rows and refreshes external metadata only for detail", async () => {
     let cached = 0;
     let refreshed = 0;
-    const overlay = (name: string) => (catalog: CatalogItemRecord) => Effect.sync(() => ({
-      ...catalog,
-      canonical: {
-        ...catalog.canonical,
-        displayMetadata: { ...catalog.canonical.displayMetadata as object, Name: name },
-      },
-    }));
-    const layer = await setup(1, () => Effect.succeed({
-      Items: [item("movie-10", "Upstream", { ProviderIds: { Tmdb: "10", Imdb: "tt10" } })],
-      TotalRecordCount: 1,
-    }), {
-      metadataProviders: {
-        overlayCached: (catalog) => {
-          cached++;
-          return overlay("Cached title")(catalog);
+    const overlay = (name: string) => (catalog: CatalogItemRecord) =>
+      Effect.sync(() => ({
+        ...catalog,
+        canonical: {
+          ...catalog.canonical,
+          displayMetadata: { ...(catalog.canonical.displayMetadata as object), Name: name },
         },
-        refresh: (catalog) => {
-          refreshed++;
-          return overlay("Fresh title")(catalog);
-        },
-        resolveCachedImage: () => Effect.succeed(null),
-      },
-    });
-
-    await Effect.runPromise(Effect.gen(function*() {
-      const federation = yield* Federation;
-      const page = yield* federation.list(query());
-      expect(page.items[0]?.displayMetadata).toMatchObject({ Name: "Cached title" });
-      expect(cached).toBe(1);
-      expect(refreshed).toBe(0);
-
-      const detailed = yield* federation.detail(page.items[0]!.id);
-      expect(detailed?.displayMetadata).toMatchObject({ Name: "Fresh title" });
-      expect(refreshed).toBe(1);
-    }).pipe(Effect.provide(layer)));
-  });
-
-  it("caps ten-source fan-out at four, cancels deadlines, and keeps partial successes", async () => {
-    let active = 0;
-    let peak = 0;
-    let cancelled = false;
+      }));
     const layer = await setup(
-      10,
-      (serverId) => {
-        if (serverId === "server-8") return Effect.fail(new UpstreamUnavailable({ serverId }));
-        return Effect.callback<unknown, UpstreamFailure>((resume) => {
-          active++;
-          peak = Math.max(peak, active);
-          const timer = setTimeout(
-            () => {
-              active--;
-              resume(Effect.succeed({ Items: [item(`${serverId}-1`)], TotalRecordCount: 1 }));
-            },
-            serverId === "server-9" ? 100 : 5,
-          );
-          return Effect.sync(() => {
-            clearTimeout(timer);
-            active--;
-            if (serverId === "server-9") cancelled = true;
-          });
-        });
+      1,
+      () =>
+        Effect.succeed({
+          Items: [item("movie-10", "Upstream", { ProviderIds: { Tmdb: "10", Imdb: "tt10" } })],
+          TotalRecordCount: 1,
+        }),
+      {
+        metadataProviders: {
+          overlayCached: (catalog) => {
+            cached++;
+            return overlay("Cached title")(catalog);
+          },
+          refresh: (catalog) => {
+            refreshed++;
+            return overlay("Fresh title")(catalog);
+          },
+          resolveCachedImage: () => Effect.succeed(null),
+        },
       },
-      { listDeadlineMs: 25 },
     );
 
-    const page = await Effect.runPromise(
+    await Effect.runPromise(
       Effect.gen(function* () {
         const federation = yield* Federation;
-        return yield* federation.list(query());
+        const page = yield* federation.list(query());
+        expect(page.items[0]?.displayMetadata).toMatchObject({ Name: "Cached title" });
+        expect(cached).toBe(1);
+        expect(refreshed).toBe(0);
+
+        const detailed = yield* federation.detail(page.items[0]!.id);
+        expect(detailed?.displayMetadata).toMatchObject({ Name: "Fresh title" });
+        expect(refreshed).toBe(1);
       }).pipe(Effect.provide(layer)),
     );
-
-    expect(peak).toBe(4);
-    expect(cancelled).toBe(true);
-    expect(page.items).toHaveLength(8);
-    expect(page.incompleteSourceIds).toEqual(["server-8", "server-9"]);
   });
+
+  it.each(["library-1", null])(
+    "caps ten-source fan-out at four and keeps partial successes for scope %s",
+    async (virtualLibraryId) => {
+      let active = 0;
+      let peak = 0;
+      let cancelled = false;
+      const layer = await setup(
+        10,
+        (serverId) => {
+          if (serverId === "server-8") return Effect.fail(new UpstreamUnavailable({ serverId }));
+          return Effect.callback<unknown, UpstreamFailure>((resume) => {
+            active++;
+            peak = Math.max(peak, active);
+            const timer = setTimeout(
+              () => {
+                active--;
+                resume(Effect.succeed({ Items: [item(`${serverId}-1`)], TotalRecordCount: 1 }));
+              },
+              serverId === "server-9" ? 100 : 5,
+            );
+            return Effect.sync(() => {
+              clearTimeout(timer);
+              active--;
+              if (serverId === "server-9") cancelled = true;
+            });
+          });
+        },
+        { listDeadlineMs: 25 },
+      );
+
+      const page = await Effect.runPromise(
+        Effect.gen(function* () {
+          const federation = yield* Federation;
+          return yield* federation.list(query({ virtualLibraryId }));
+        }).pipe(Effect.provide(layer)),
+      );
+
+      expect(peak).toBe(4);
+      expect(cancelled).toBe(true);
+      expect(page.items).toHaveLength(8);
+      expect(page.incompleteSourceIds).toEqual(["server-8", "server-9"]);
+    },
+  );
 
   it("fails a total miss when every source is unavailable", async () => {
     const layer = await setup(2, (serverId) => Effect.fail(new UpstreamUnavailable({ serverId })));
@@ -641,31 +1046,57 @@ describe("Federation", () => {
     expect(calls).toBe(1);
   });
 
-  it("caps duplicate and locally filtered source scans at 2,000 rows", async () => {
-    let scanned = 0;
-    const layer = await setup(10, (_serverId, path) => {
-      const limit = Number(new URL(path, "https://local").searchParams.get("Limit"));
-      const count = Math.min(95, limit);
-      scanned += count;
-      return Effect.succeed({
-        Items: Array.from({ length: count }, (_, index) => ({
-          Id: `unsupported-${index}`,
-          Type: "BoxSet",
-          Name: "Filtered",
-        })),
-        TotalRecordCount: 10_000,
+  it.each(["library-1", null])(
+    "caps duplicate and filtered source scans at 2,000 rows for scope %s",
+    async (virtualLibraryId) => {
+      let scanned = 0;
+      const layer = await setup(10, (_serverId, path) => {
+        const limit = Number(new URL(path, "https://local").searchParams.get("Limit"));
+        const count = Math.min(95, limit);
+        scanned += count;
+        return Effect.succeed({
+          Items: Array.from({ length: count }, (_, index) => ({
+            Id: `unsupported-${index}`,
+            Type: "BoxSet",
+            Name: "Filtered",
+          })),
+          TotalRecordCount: 10_000,
+        });
       });
-    });
-    const page = await Effect.runPromise(
-      Effect.gen(function* () {
-        const federation = yield* Federation;
-        return yield* federation.list(query({ filters: [{ field: "played", value: true }] }));
-      }).pipe(Effect.provide(layer)),
-    );
-    expect(scanned).toBe(2_000);
-    expect(page.items).toEqual([]);
-    expect(page.exhausted).toBe(true);
-  });
+      if (virtualLibraryId === null) {
+        await Effect.runPromise(
+          Effect.gen(function* () {
+            const repo = yield* Repositories;
+            const library = (yield* repo.listVirtualLibraries())[0]!;
+            for (let index = 0; index < 2; index++) {
+              yield* repo.saveVirtualLibrary(
+                {
+                  ...library,
+                  id: `library-${index + 1}` as any,
+                  sources: library.sources.slice(index * 5, index * 5 + 5),
+                },
+                Array.from({ length: 5 }, (_, offset) => ({
+                  serverId: `server-${index * 5 + offset}`,
+                  generation: 1,
+                })),
+              );
+            }
+          }).pipe(Effect.provide(repositories)),
+        );
+      }
+      const page = await Effect.runPromise(
+        Effect.gen(function* () {
+          const federation = yield* Federation;
+          return yield* federation.list(
+            query({ virtualLibraryId, filters: [{ field: "favorite", value: false }] }),
+          );
+        }).pipe(Effect.provide(layer)),
+      );
+      expect(scanned).toBe(2_000);
+      expect(page.items).toEqual([]);
+      expect(page.exhausted).toBe(true);
+    },
+  );
 
   it("enriches versions with typed provider IDs and never fuzzy search", async () => {
     const paths: Array<string> = [];
@@ -707,6 +1138,12 @@ describe("Federation", () => {
       "[Server 1] B",
     ]);
     expect(paths.filter((path) => path.includes("AnyProviderIdEquals=tmdb.10"))).toHaveLength(2);
+    for (const path of paths.filter((entry) => entry.includes("AnyProviderIdEquals=tmdb.10"))) {
+      const parameters = new URL(path, "https://local").searchParams;
+      expect(parameters.get("UserId")).toBe(
+        parameters.get("ParentId") === "movies-0" ? "user-0" : "user-1",
+      );
+    }
     expect(paths.every((path) => !path.includes("SearchTerm="))).toBe(true);
   });
 
