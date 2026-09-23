@@ -3,11 +3,6 @@ services:
     image: ${IMAGE_REPOSITORY:-ghcr.io/baranwang/oh-my-emby}:${IMAGE_TAG:-latest}
     pull_policy: ${PULL_POLICY:-missing}
     restart: unless-stopped
-    environment:
-      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?PUBLIC_ORIGIN is required}
-      TRUSTED_PROXIES: ${TRUSTED_PROXIES?TRUSTED_PROXIES is required, use an empty value for none}
-      PRIVATE_UPSTREAM_HOSTS: ${PRIVATE_UPSTREAM_HOSTS:-}
-      REGISTERED_RESOURCE_ORIGINS: ${REGISTERED_RESOURCE_ORIGINS:-}
     ports:
       - "127.0.0.1:3000:3000"
     volumes:

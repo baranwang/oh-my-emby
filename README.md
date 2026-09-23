@@ -33,8 +33,6 @@ The Workers smoke defaults to local workerd and local D1. Remote staging require
 The Compose file pulls `ghcr.io/baranwang/oh-my-emby:latest` by default:
 
 ```sh
-export PUBLIC_ORIGIN=https://emby.example.com
-export TRUSTED_PROXIES=172.18.0.2
 docker compose pull
 docker compose up -d
 ```

@@ -18,7 +18,7 @@
 - One deployment has one local user and one virtual Emby server. Additional groups use additional deployments.
 - Merge only exact, cluster-compatible typed external IDs. Never add title/year/runtime heuristics or a full-library scan.
 - Video delivery returns one authenticated, private, non-cacheable HTTP 302 and never proxies video bytes.
-- Browser production access requires the configured HTTPS public origin; HTTP is localhost-development-only.
+- Browser production access requires HTTPS; HTTP is localhost-development-only. No deployment variable supplies a public origin or trusted-proxy allowlist.
 - Secrets are write-only, redacted, and excluded from DTOs, errors, logs, cache metadata, and ordinary response bodies.
 - Workers use D1, Cron Triggers, and Static Assets with Worker-first routing and `html_handling: "none"`; do not add Queues or Durable Objects.
 - Docker uses one Bun process, one SQLite file, and prebuilt Dashboard assets; do not add a second web server.
@@ -35,6 +35,8 @@
 - Identity conflict inputs: sparse bridges, contradictory provider IDs, combined episodes, child-before-parent discovery, and late aliases must preserve existing canonical IDs and user state; Task 6 pins this.
 - Outbox timing inputs: expired leases, owner loss, timeout after dispatch, late unobserved writes, and newer acknowledgements must still converge to the latest desired state; Task 8 pins this.
 - Pagination inputs: duplicate-heavy pages, partial source failure, count increase/decrease, deep offsets, and terminal empty pages must remain bounded and SenPlayer-compatible; Task 7 and Task 15 pin this.
+- Zero-config request inputs: missing/mismatched `Origin`, malformed `Host`, forged `X-Forwarded-*`, localhost HTTP, and a preserved public `Host` behind TLS termination must retain Dashboard authentication and rate limits; Task 16 pins these.
+- Zero-config upstream inputs: an administrator-saved private endpoint must work on Docker without an environment allowlist, while any cross-origin control redirect must stop before a second fetch; Task 17 pins these.
 
 ---
 
@@ -89,7 +91,7 @@ compose.yaml                         # one service and one persistent volume
 .github/workflows/ci.yml             # static, unit, integration, and build gates
 ```
 
-The execution order is intentional: Tasks 1–5 establish compile-time and persistence contracts; Tasks 6–10 implement the core behavior; Tasks 11–12 consume the finished Dashboard API; Tasks 13–14 add platform adapters; Task 15 records real-runtime acceptance. Do not parallelize tasks that consume interfaces from an unfinished earlier task.
+The execution order is intentional: Tasks 1–5 establish compile-time and persistence contracts; Tasks 6–10 implement the core behavior; Tasks 11–12 consume the finished Dashboard API; Tasks 13–14 add platform adapters; Task 15 records real-runtime acceptance. Tasks 16–17 remove deployment-variable gates on the existing PR after those adapters were built. Do not parallelize tasks that consume interfaces from an unfinished earlier task.
 
 ### Task 1: Bootstrap the Monorepo and Bounded Core
 
@@ -494,7 +496,7 @@ git commit -S -m "feat: add shared data model and repositories"
 - Create: `apps/server/test/dashboard-auth.test.ts`
 
 **Interfaces:**
-- Consumes: `Repositories`, `DashboardApi`, Web Crypto, configured public origin, and trusted-proxy policy.
+- Consumes: `Repositories`, `DashboardApi`, Web Crypto, and browser-supplied `Host`/`Origin` headers.
 - Produces: `Auth` service methods `claim`, `loginDashboard`, `loginEmby`, `authenticateDashboard`, `authenticateEmby`, `logoutDashboard`, `changePassword`; guarded Dashboard HttpApi handlers.
 
 - [ ] **Step 1: Write the authentication race and boundary tests**
@@ -548,7 +550,7 @@ Generate 16-byte salts and 32-byte random tokens with `crypto.getRandomValues`; 
 
 - [ ] **Step 4: Build guarded HttpApi handlers and rerun tests**
 
-Map tagged domain failures to the Task 2 public errors. Require exact configured `Origin` for mutations; derive secure-request status only from the public origin and an explicit allowlist of trusted proxy addresses. Return no password hash, salt, token hash, raw token after issuance, or stack trace.
+Map tagged domain failures to the Task 2 public errors. Require an `Origin` matching request `Host` for mutations, accept HTTPS except localhost HTTP, and never use `X-Forwarded-*` to determine the origin or rate-limit key. Return no password hash, salt, token hash, raw token after issuance, or stack trace.
 
 Run: `bun --filter @oh-my-emby/server test -- auth.test.ts dashboard-auth.test.ts`
 
@@ -581,15 +583,13 @@ git commit -S -m "feat: add single-user authentication"
 - [ ] **Step 1: Write URL-policy, header, and generation-race tests**
 
 ```ts
-it("drops credentials and identity headers on a cross-origin redirect", async () => {
+it("rejects a cross-origin control redirect before a second request", async () => {
   await Effect.runPromise(Effect.gen(function*() {
     const calls = yield* Ref.make<ReadonlyArray<Request>>([])
     const client = yield* UpstreamClient
-    yield* client.request(serverFixture, "/System/Info", mockRedirectFetch(calls))
-    const [, redirected] = yield* Ref.get(calls)
-    expect(redirected.headers.has("X-Emby-Token")).toBe(false)
-    expect(redirected.headers.has("Authorization")).toBe(false)
-    expect(redirected.headers.has("X-Emby-Authorization")).toBe(false)
+    const failure = yield* Effect.flip(client.request(serverFixture, "/System/Info", mockRedirectFetch(calls)))
+    expect(failure._tag).toBe("DestinationRejected")
+    expect((yield* Ref.get(calls))).toHaveLength(1)
   }))
 })
 
@@ -1247,10 +1247,6 @@ Use the exact config shape supported by Wrangler's schema:
   "main": "src/platform/workers/index.ts",
   "compatibility_date": "2026-09-20",
   "compatibility_flags": ["nodejs_compat"],
-  "vars": {
-    "PUBLIC_ORIGIN": "http://localhost:8787",
-    "TRUSTED_PROXIES": ""
-  },
   "assets": {
     "directory": "../dashboard/dist",
     "binding": "ASSETS",
@@ -1333,7 +1329,7 @@ git commit -S -m "feat: add workers and d1 runtime"
 - Modify: `apps/server/package.json`
 
 **Interfaces:**
-- Consumes: application/core services, Bun HTTP and SQLite, dashboard `dist`, public-origin/trusted-proxy/data-dir configuration.
+- Consumes: application/core services, Bun HTTP and SQLite, dashboard `dist`, and data-dir configuration.
 - Produces: one Bun listener and process-owned maintenance timer; traversal-safe static assets; Bun-only production container and health check.
 
 - [ ] **Step 1: Write Bun routing and restart tests**
@@ -1348,7 +1344,7 @@ it("never turns a missing hashed asset into index.html", async () => {
 })
 ```
 
-Add cases for deep links, HEAD navigation, POST deep link, path traversal, unknown API/Emby paths, migrations before listen, failed migration preventing listen, maintenance timer overlap, SQLite persistence across process restart, public-origin cookie behavior, trusted proxy allowlist, and localhost-only HTTP development.
+Add cases for deep links, HEAD navigation, POST deep link, path traversal, unknown API/Emby paths, migrations before listen, failed migration preventing listen, maintenance timer overlap, SQLite persistence across process restart, secure cookie behavior, forged forwarded headers, and localhost-only HTTP development.
 
 - [ ] **Step 2: Run the Bun tests to verify they fail**
 
@@ -1373,7 +1369,7 @@ Resolve assets under the built Dashboard root using a normalized relative path a
 
 - [ ] **Step 4: Build and exercise the production image**
 
-Use a multi-stage Dockerfile: tooling stage installs with the lockfile and builds Dashboard/server; final stage starts from an official pinned Bun image, copies only Bun runtime output, Dashboard assets, and migrations, runs as a non-root user, exposes one port, declares `/data`, and has no Node binary or proxy. `compose.yaml` mounts one named volume and requires `PUBLIC_ORIGIN` plus explicit trusted-proxy configuration.
+Use a multi-stage Dockerfile: tooling stage installs with the lockfile and builds Dashboard/server; final stage starts from an official pinned Bun image, copies only Bun runtime output, Dashboard assets, and migrations, runs as a non-root user, exposes one port, declares `/data`, and has no Node binary or proxy. `compose.yaml` mounts one named volume and requires none of the removed deployment variables.
 
 Run:
 
@@ -1468,9 +1464,9 @@ jobs:
       - run: ./scripts/smoke-docker.sh
 ```
 
-Keep Workers deployment out of untrusted pull requests. The Workers runbook applies migrations with Wrangler before deploy activation, documents D1/database creation, public HTTPS, supported upstream host rules, Static Assets, Cron, custom ports, and secret commands. The Docker runbook documents TLS termination, `Secure` cookies, public origin, trusted proxies, data backup, LAN-upstream trust, and upgrade migrations.
+Keep Workers deployment out of untrusted pull requests. The Workers runbook applies migrations with Wrangler before deploy activation, documents D1/database creation, public HTTPS, supported upstream host rules, Static Assets, Cron, custom ports, and secret commands. The Docker runbook documents TLS termination, `Secure` cookies, preservation of the public `Host`, data backup, unrestricted administrator-saved LAN upstreams, and upgrade migrations.
 
-For remote staging, `smoke-workers.sh --remote` creates an ephemeral D1 database, writes its returned ID and the explicit HTTPS staging origin into a temporary Wrangler config, runs `wrangler d1 migrations apply --remote`, deploys only after migration success, executes the smoke suite, and deletes the staging Worker/database during cleanup. The committed local config never supplies a production origin or database ID.
+For remote staging, `smoke-workers.sh --remote` creates an ephemeral D1 database, writes its returned ID into a temporary Wrangler config, runs `wrangler d1 migrations apply --remote`, deploys only after migration success, executes the smoke suite, and deletes the staging Worker/database during cleanup. The committed local config never supplies a production database ID.
 
 `scripts/benchmark-pbkdf2.ts` runs the configured 310,000 PBKDF2-SHA-256 iterations ten times, discards the first run, and reports p50/p95. Record Bun and deployed-Worker measurements in `docs/compatibility/runtime.md`. The release gate requires p95 below 250 ms on both; if a target misses, change the single stored iteration constant and rerun authentication tests plus both benchmarks before release.
 
@@ -1496,6 +1492,89 @@ Expected: every automated gate exits 0; a freshly migrated remote staging Worker
 git add .github scripts docs/deployment docs/compatibility README.md apps/server/test/cross-platform.test.ts apps/server/test/ten-source-budget.test.ts
 git commit -S -m "test: add cross-platform acceptance gates"
 ```
+
+### Task 16: Remove Dashboard Deployment-Origin and Proxy Configuration
+
+**Files:**
+- Modify: `apps/server/src/api/dashboard.ts`, `apps/server/src/platform/bun/index.ts`, `apps/server/src/platform/workers/index.ts`
+- Test: `apps/server/test/dashboard-auth.test.ts`, `apps/server/test/bun-runtime.test.ts`, `apps/server/test/workers-routing.test.ts`
+
+**Interfaces:**
+- Consumes: request method, URL, `Host`, `Origin`, and platform-provided remote address.
+- Produces: config-free Dashboard layers; mutations require an exact same-host-and-port `Origin`, HTTPS except loopback-only localhost HTTP; forwarded headers never affect admission or rate-limit keys.
+
+- [ ] **Step 1: Write failing tests for the request boundary**
+
+```ts
+await expect(Effect.runPromise(guardDashboardRequest({
+  method: "POST",
+  requestUrl: "http://internal:3000/api/dashboard/login",
+  remoteAddress: "10.0.0.2",
+  headers: { host: "media.example.com:8443", origin: "https://media.example.com:8443" }
+}))).resolves.toEqual({ clientKey: "10.0.0.2" })
+```
+
+Add missing/malformed/mismatched `Origin` and `Host`, safe reads without `Origin`, public HTTP rejection, loopback-only localhost HTTP, and forged `X-Forwarded-*` cases. Exercise a Bun claim with a preserved public `Host` and a Worker claim without origin bindings.
+
+- [ ] **Step 2: Verify RED**
+
+Run: `bun --filter @oh-my-emby/server test -- dashboard-auth.test.ts bun-runtime.test.ts`
+
+Expected: new cases fail because the current guard requires configured origin and proxy trust.
+
+- [ ] **Step 3: Implement the minimum boundary change**
+
+Delete `DashboardRequestPolicyConfig` and the runtime settings that feed it. Validate the request authority and exact `Origin`; use `Host` when present, otherwise the runtime URL authority. Keep `Secure` host-only cookies. Rate-limit on Bun socket IP or Cloudflare's platform client address; ignore all `X-Forwarded-*`. A reverse proxy must preserve the public `Host` and enforce external HTTPS.
+
+- [ ] **Step 4: Verify GREEN**
+
+Run: `bun --filter @oh-my-emby/server test -- dashboard-auth.test.ts bun-runtime.test.ts && bun --filter @oh-my-emby/server test:workers`
+
+Expected: all selected tests pass.
+
+### Task 17: Remove Upstream Allowlists and Deployment Variables
+
+**Files:**
+- Modify: `apps/server/src/core/upstream-client.ts`, `apps/server/src/platform/bun/index.ts`, `apps/server/src/platform/workers/index.ts`
+- Modify: `apps/server/package.json`, `apps/server/wrangler.jsonc`, `apps/server/vitest.config.workers.ts`, `apps/server/worker-configuration.d.ts`, `compose.yaml`
+- Modify: `scripts/smoke-docker.sh`, `scripts/smoke-workers.sh`, `README.md`, `docs/deployment/docker.md`, `docs/deployment/workers.md`
+- Test: `apps/server/test/upstream-client.test.ts`, `apps/server/test/playback.test.ts`, `apps/server/test/bun-routing.test.ts`, `apps/server/test/cross-platform.test.ts`
+
+**Interfaces:**
+- Consumes: administrator-saved endpoint and `DestinationPolicy.platform`.
+- Produces: Docker access to saved public/private/localhost endpoints without a separate allowlist; authenticated control redirects stay on the saved endpoint's exact origin before a second fetch; video remains client-side redirect-only; Workers retain platform private-network restrictions.
+
+- [ ] **Step 1: Write failing upstream tests**
+
+```ts
+const calls: string[] = []
+await expect(run(async (input, init) => {
+  calls.push(new Request(input, init).url)
+  return new Response(null, { status: 302, headers: { location: "https://other.example/info" } })
+}, Effect.gen(function*() {
+  const client = yield* UpstreamClient
+  return yield* client.request({ serverId: "server-1", generation: 1, path: "/info", method: "GET" }, JsonOk)
+}), { policy: { platform: "docker" } })).rejects.toMatchObject({ _tag: "DestinationRejected" })
+expect(calls).toEqual(["https://example.com/info"])
+```
+
+Also assert a saved private Docker endpoint works without a list, a private-to-other-origin redirect stops at one fetch, and existing video 302 tests still observe zero proxied bytes.
+
+- [ ] **Step 2: Verify RED**
+
+Run: `bun --filter @oh-my-emby/server test -- upstream-client.test.ts playback.test.ts`
+
+Expected: private destination and public cross-origin redirect assertions fail under the current policy.
+
+- [ ] **Step 3: Remove the four variables end to end**
+
+Delete `PUBLIC_ORIGIN`, `TRUSTED_PROXIES`, `PRIVATE_UPSTREAM_HOSTS`, and `REGISTERED_RESOURCE_ORIGINS` from runtime parsers, Compose, Wrangler, generated types, smoke scripts, and deployment instructions. Retain URL scheme/credential validation. Reject any control redirect outside the administrator-saved endpoint origin before the next fetch. Keep server-side image/subtitle delivery fail-closed without a peer-validating transport.
+
+- [ ] **Step 4: Verify GREEN and deployment defaults**
+
+Run: `bun run check && bun --filter @oh-my-emby/server test:workers && docker compose config`
+
+Expected: checks pass and Compose renders without any removed variable.
 
 ## Final Verification Gate
 

@@ -30,8 +30,6 @@ export default defineConfig(async () => ({
           }
         },
         bindings: {
-          PUBLIC_ORIGIN: "http://localhost:8787",
-          TRUSTED_PROXIES: "",
           TEST_MIGRATIONS: await readD1Migrations(`${import.meta.dirname}/migrations`)
         }
       }

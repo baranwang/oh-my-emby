@@ -12,9 +12,9 @@ bun run build
 apps/server/node_modules/.bin/wrangler --cwd apps/server d1 create oh-my-emby --binding DB --update-config
 ```
 
-Set `vars.PUBLIC_ORIGIN` in `apps/server/wrangler.jsonc` to the exact public HTTPS origin. Do not include a path, query, credentials, or trailing slash. `TRUSTED_PROXIES` is a comma-separated allowlist; keep it empty unless a known proxy supplies forwarded headers. Custom upstream and public HTTPS ports are supported when the exact origin includes the port.
+No public-origin or trusted-proxy variable is needed. Dashboard mutations compare the browser's `Origin` with the request `Host`, including its port, and ignore `X-Forwarded-*`. Use public HTTPS for production; loopback HTTP is only for local development. Custom public HTTPS ports work without extra configuration.
 
-The D1 binding must remain `DB`, Static Assets binding `ASSETS`, assets directory `../dashboard/dist`, migrations directory `migrations`, and Cron `*/5 * * * *`. The committed config intentionally contains neither a production origin nor a D1 database ID.
+The D1 binding must remain `DB`, Static Assets binding `ASSETS`, assets directory `../dashboard/dist`, migrations directory `migrations`, and Cron `*/5 * * * *`. The committed config intentionally contains no D1 database ID.
 
 Store future sensitive settings with Wrangler rather than in config:
 
@@ -32,7 +32,7 @@ apps/server/node_modules/.bin/wrangler --cwd apps/server deploy --dry-run --outd
 apps/server/node_modules/.bin/wrangler --cwd apps/server deploy
 ```
 
-A migration failure must stop the release before deploy. The service accepts public upstream HTTPS hosts. Workers rejects private/local/IP-literal upstream destinations; use the Docker target for explicitly trusted LAN upstreams.
+A migration failure must stop the release before deploy. The service accepts public upstream HTTPS hosts. Workers cannot fetch private/local/IP-literal upstream destinations; use Docker for LAN upstreams.
 
 ## Staging smoke
 

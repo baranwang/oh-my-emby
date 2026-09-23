@@ -22,7 +22,6 @@ import {
   dashboardSessionResponse,
   guardDashboardRequest,
   makeDashboardAuthLayers,
-  makeDashboardRequestPolicy,
   makeDashboardSystemLayer,
   publicFailure
 } from "../src/api/dashboard.js"
@@ -87,13 +86,9 @@ describe("Dashboard authentication boundary", () => {
     const repositories = makeSqliteRepositoriesLayer({ filename })
     const auth = makeAuthLayer().pipe(Layer.provide(repositories))
     const metadataSettings = makeMetadataSettingsLayer.pipe(Layer.provide(repositories))
-    const config = {
-      publicOrigin,
-      trustedProxyAddresses: []
-    }
     const handlers = Layer.merge(
-      makeDashboardAuthLayers(config).pipe(Layer.provide(auth)),
-      makeDashboardSystemLayer(config).pipe(
+      makeDashboardAuthLayers().pipe(Layer.provide(auth)),
+      makeDashboardSystemLayer().pipe(
         Layer.provide(Layer.mergeAll(repositories, auth, metadataSettings))
       )
     )
@@ -240,7 +235,7 @@ describe("Dashboard authentication boundary", () => {
     }))
   })
 
-  it("authenticates and origin-checks both metadata settings routes", async () => {
+  it("authenticates metadata settings routes and origin-checks mutations", async () => {
     const requestHeaders: Record<string, string> = { origin: publicOrigin }
     await withClient(() => requestHeaders, (client) => Effect.gen(function*() {
       const unauthenticatedGet = yield* client.system.getMetadataSettings().pipe(Effect.result)
@@ -273,11 +268,8 @@ describe("Dashboard authentication boundary", () => {
     await withClient(
       () => ({ origin: "https://evil.example.com", cookie: requestHeaders.cookie! }),
       (client) => Effect.gen(function*() {
-        const forbiddenGet = yield* client.system.getMetadataSettings().pipe(Effect.result)
-        expect(Result.isFailure(forbiddenGet)).toBe(true)
-        if (Result.isSuccess(forbiddenGet)) return
-        expect((forbiddenGet.failure as any)._tag).toBe("HttpClientError")
-        expect((forbiddenGet.failure as any).reason.response.status).toBe(403)
+        const allowedGet = yield* client.system.getMetadataSettings()
+        expect(allowedGet.providers.map(({ id }) => id)).toEqual(["tmdb", "trakt"])
       }),
       "https://evil.example.com"
     )
@@ -305,12 +297,8 @@ describe("Dashboard authentication boundary", () => {
     }))
   })
 
-  it("rejects a mutation from any origin except the exact configured origin", async () => {
-    const policy = makeDashboardRequestPolicy({
-      publicOrigin: "https://dashboard.example.com",
-      trustedProxyAddresses: []
-    })
-    await expect(Effect.runPromise(guardDashboardRequest(policy, {
+  it("rejects a mutation from another origin", async () => {
+    await expect(Effect.runPromise(guardDashboardRequest({
       method: "POST",
       requestUrl: "https://dashboard.example.com/api/dashboard/login",
       remoteAddress: "198.51.100.7",
@@ -318,12 +306,46 @@ describe("Dashboard authentication boundary", () => {
     }))).rejects.toEqual({ _tag: "ForbiddenOrigin" })
   })
 
+  it("accepts the preserved public Host behind TLS termination without proxy configuration", async () => {
+    await expect(Effect.runPromise(guardDashboardRequest({
+      method: "POST",
+      requestUrl: "http://internal:3000/api/dashboard/login",
+      remoteAddress: "10.0.0.2",
+      headers: {
+        host: "dashboard.example.com:8443",
+        origin: "https://dashboard.example.com:8443"
+      }
+    }))).resolves.toEqual({ clientKey: "10.0.0.2" })
+  })
+
+  it("rejects a mismatched or malformed Host even with a valid Origin", async () => {
+    for (const host of ["other.example.com", "dashboard.example.com/path", "dashboard.example.com@evil.example.com"]) {
+      await expect(Effect.runPromise(guardDashboardRequest({
+        method: "POST",
+        requestUrl: `${publicOrigin}/api/dashboard/login`,
+        remoteAddress: "198.51.100.7",
+        headers: { host, origin: publicOrigin }
+      }))).rejects.toEqual({ _tag: "ForbiddenOrigin" })
+    }
+  })
+
+  it("never uses forwarded IPs for rate limiting", async () => {
+    await expect(Effect.runPromise(guardDashboardRequest({
+      method: "POST",
+      requestUrl: `${publicOrigin}/api/dashboard/login`,
+      remoteAddress: "10.0.0.2",
+      headers: {
+        host: "dashboard.example.com",
+        origin: publicOrigin,
+        "x-forwarded-for": "198.51.100.9",
+        "x-forwarded-host": "evil.example.com",
+        "x-forwarded-proto": "http"
+      }
+    }))).resolves.toEqual({ clientKey: "10.0.0.2" })
+  })
+
   it("allows explicit localhost HTTP development", async () => {
-    const policy = makeDashboardRequestPolicy({
-      publicOrigin: "http://localhost:3000",
-      trustedProxyAddresses: []
-    })
-    await expect(Effect.runPromise(guardDashboardRequest(policy, {
+    await expect(Effect.runPromise(guardDashboardRequest({
       method: "POST",
       requestUrl: "http://localhost:3000/api/dashboard/login",
       remoteAddress: "127.0.0.1",
@@ -332,11 +354,7 @@ describe("Dashboard authentication boundary", () => {
   })
 
   it("rejects localhost HTTP requests arriving from a non-loopback client", async () => {
-    const policy = makeDashboardRequestPolicy({
-      publicOrigin: "http://localhost:3000",
-      trustedProxyAddresses: []
-    })
-    await expect(Effect.runPromise(guardDashboardRequest(policy, {
+    await expect(Effect.runPromise(guardDashboardRequest({
       method: "POST",
       requestUrl: "http://localhost:3000/api/dashboard/login",
       remoteAddress: "198.51.100.7",
@@ -344,30 +362,17 @@ describe("Dashboard authentication boundary", () => {
     }))).rejects.toEqual({ _tag: "ForbiddenOrigin" })
   })
 
-  it("accepts proxy transport headers only from an explicit trusted address", async () => {
-    const policy = makeDashboardRequestPolicy({
-      publicOrigin: "https://dashboard.example.com",
-      trustedProxyAddresses: ["10.0.0.2"]
-    })
-    await expect(Effect.runPromise(guardDashboardRequest(policy, {
-      method: "POST",
-      requestUrl: "http://internal:3000/api/dashboard/login",
-      remoteAddress: "10.0.0.2",
-      headers: {
-        origin: "https://dashboard.example.com",
-        "x-forwarded-for": "198.51.100.9, 10.0.0.2",
-        "x-forwarded-host": "dashboard.example.com",
-        "x-forwarded-proto": "https"
-      }
-    }))).resolves.toEqual({ clientKey: "198.51.100.9" })
+  it("rejects localhost HTTP safe reads from a non-loopback client", async () => {
+    await expect(Effect.runPromise(guardDashboardRequest({
+      method: "GET",
+      requestUrl: "http://localhost:3000/api/dashboard/bootstrap",
+      remoteAddress: "198.51.100.7",
+      headers: { host: "localhost:3000" }
+    }))).rejects.toEqual({ _tag: "ForbiddenOrigin" })
   })
 
-  it("never lets arbitrary forwarded headers grant transport trust", async () => {
-    const policy = makeDashboardRequestPolicy({
-      publicOrigin: "https://dashboard.example.com",
-      trustedProxyAddresses: ["10.0.0.2"]
-    })
-    await expect(Effect.runPromise(guardDashboardRequest(policy, {
+  it("never lets forwarded headers replace a missing public Host", async () => {
+    await expect(Effect.runPromise(guardDashboardRequest({
       method: "POST",
       requestUrl: "http://internal:3000/api/dashboard/login",
       remoteAddress: "198.51.100.7",
@@ -380,10 +385,23 @@ describe("Dashboard authentication boundary", () => {
     }))).rejects.toEqual({ _tag: "ForbiddenOrigin" })
   })
 
-  it("rejects non-localhost HTTP public origins at configuration time", () => {
-    expect(() => makeDashboardRequestPolicy({
-      publicOrigin: "http://dashboard.example.com",
-      trustedProxyAddresses: []
-    })).toThrow("public origin")
+  it("rejects public HTTP mutations and malformed or absent origins", async () => {
+    for (const origin of ["http://dashboard.example.com", "https://dashboard.example.com/path", "null", undefined]) {
+      await expect(Effect.runPromise(guardDashboardRequest({
+        method: "POST",
+        requestUrl: `${publicOrigin}/api/dashboard/login`,
+        remoteAddress: "198.51.100.7",
+        headers: { host: "dashboard.example.com", origin }
+      }))).rejects.toEqual({ _tag: "ForbiddenOrigin" })
+    }
+  })
+
+  it("accepts a safe read without Origin on an arbitrary valid Host", async () => {
+    await expect(Effect.runPromise(guardDashboardRequest({
+      method: "GET",
+      requestUrl: "https://other.example.com/api/dashboard/bootstrap",
+      remoteAddress: "198.51.100.7",
+      headers: { host: "other.example.com" }
+    }))).resolves.toEqual({ clientKey: "198.51.100.7" })
   })
 })

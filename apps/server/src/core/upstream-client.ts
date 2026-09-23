@@ -35,8 +35,6 @@ const utf8Encoder = new TextEncoder();
 
 export interface DestinationPolicy {
   readonly platform: "workers" | "docker";
-  readonly administratorPrivateHosts?: ReadonlyArray<string>;
-  readonly registeredResourceOrigins?: ReadonlyArray<string>;
 }
 
 export interface UpstreamRequest {
@@ -263,20 +261,12 @@ const isPrivateHostname = (hostname: string): boolean => {
 };
 
 const connectedAddressAllowed = (
-  url: URL,
   policy: DestinationPolicy,
 ): ((address: string) => boolean) => {
-  const allowed = new Set(
-    (policy.administratorPrivateHosts ?? []).map((item) =>
-      item.toLowerCase().replace(/^\[/, "").replace(/\]$/, ""),
-    ),
-  );
-  const hostname = url.hostname.toLowerCase().replace(/^\[/, "").replace(/\]$/, "");
   return (address) => {
     const normalized = normalizeIpLiteral(address);
     if (normalized === null) return false;
-    if (!isPrivateIpLiteral(normalized)) return true;
-    return policy.platform === "docker" && (allowed.has(hostname) || allowed.has(normalized));
+    return policy.platform === "docker" || !isPrivateIpLiteral(normalized);
   };
 };
 
@@ -295,36 +285,11 @@ const validateDestination = (
     return Effect.fail(new DestinationRejected({ serverId: server.id }));
   }
   const configuredBase = endpoint === undefined ? undefined : endpointUrl(endpoint);
-  if (
-    policy.platform === "docker" &&
-    resourcePolicy === "control" &&
-    configuredBase !== undefined &&
-    (isPrivateHostname(configuredBase.hostname) || isIpLiteral(configuredBase.hostname)) &&
-    url.origin !== configuredBase.origin
-  ) {
+  if (resourcePolicy === "control" && configuredBase !== undefined && url.origin !== configuredBase.origin) {
     return Effect.fail(new DestinationRejected({ serverId: server.id }));
   }
   if (policy.platform === "workers") {
     if (isIpLiteral(hostname) || isPrivateHostname(hostname)) {
-      return Effect.fail(new DestinationRejected({ serverId: server.id }));
-    }
-  } else if (isPrivateHostname(hostname)) {
-    if (
-      resourcePolicy === "control" &&
-      configuredBase !== undefined &&
-      url.origin !== configuredBase.origin
-    ) {
-      return Effect.fail(new DestinationRejected({ serverId: server.id }));
-    }
-    const allowed = new Set(
-      (policy.administratorPrivateHosts ?? []).map((item) => item.toLowerCase()),
-    );
-    if (!allowed.has(hostname.replace(/^\[/, "").replace(/\]$/, ""))) {
-      return Effect.fail(new DestinationRejected({ serverId: server.id }));
-    }
-  }
-  if (resourcePolicy === "registered-resource" && url.origin !== configuredBase?.origin) {
-    if (!(policy.registeredResourceOrigins ?? []).includes(url.origin)) {
       return Effect.fail(new DestinationRejected({ serverId: server.id }));
     }
   }
@@ -593,6 +558,9 @@ export const makeUpstreamClientLayer = (
               try: () => new URL(location, current),
               catch: () => new InvalidUpstreamUrl(),
             });
+            if (current.protocol === "https:" && next.protocol === "http:") {
+              return yield* Effect.fail(new HttpsDowngrade({ serverId: server.id }));
+            }
             yield* validateDestination(
               next,
               server,
@@ -600,9 +568,6 @@ export const makeUpstreamClientLayer = (
               config.destinationPolicy,
               request.resourcePolicy,
             );
-            if (current.protocol === "https:" && next.protocol === "http:") {
-              return yield* Effect.fail(new HttpsDowngrade({ serverId: server.id }));
-            }
             if (visited.has(next.href))
               return yield* Effect.fail(new RedirectLoop({ serverId: server.id }));
             visited.add(next.href);
@@ -1098,9 +1063,15 @@ export const makeUpstreamClientLayer = (
             try: () => new URL(playback.url),
             catch: () => new InvalidUpstreamUrl(),
           });
+          yield* validateDestination(
+            current,
+            server,
+            endpointForUrl(server, current),
+            config.destinationPolicy,
+            "registered-resource",
+          );
           const attempts = endpointAttemptsForUrl(server, current);
-          if (attempts.length === 0)
-            return yield* Effect.fail(new UpstreamInvalidResponse({ serverId: server.id }));
+          if (attempts.length === 0) return current;
           const headers = new Headers({
             accept: "*/*",
             range: "bytes=0-",
@@ -1205,10 +1176,7 @@ export const makeUpstreamClientLayer = (
                     {
                       server,
                       destinationPolicy: config.destinationPolicy,
-                      isConnectedAddressAllowed: connectedAddressAllowed(
-                        current,
-                        config.destinationPolicy,
-                      ),
+                      isConnectedAddressAllowed: connectedAddressAllowed(config.destinationPolicy),
                     },
                   ),
                 catch: () => new UpstreamUnavailable({ serverId: server.id }),

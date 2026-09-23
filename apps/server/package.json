@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "PUBLIC_ORIGIN=http://localhost:5173 TRUSTED_PROXIES=127.0.0.1,::1,::ffff:127.0.0.1 HOST=127.0.0.1 MIGRATIONS_DIR=migrations bun --watch src/platform/bun/index.ts",
+    "dev": "HOST=127.0.0.1 MIGRATIONS_DIR=migrations bun --watch src/platform/bun/index.ts",
     "build": "tsc -p tsconfig.json && bun build --target=bun --production --outdir=dist/bun src/platform/bun/index.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "bun --bun vitest run --exclude test/d1-repository.test.ts --exclude test/workers-routing.test.ts",

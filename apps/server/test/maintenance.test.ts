@@ -230,10 +230,9 @@ describe("bounded maintenance", () => {
     `))
     const auth = makeAuthLayer({ now: () => nowMs }).pipe(Layer.provide(harness.repositories))
     const metadataSettings = makeMetadataSettingsLayer.pipe(Layer.provide(harness.repositories))
-    const config = { publicOrigin, trustedProxyAddresses: [] }
     const handlers = Layer.merge(
-      makeDashboardAuthLayers(config).pipe(Layer.provide(auth)),
-      makeDashboardSystemLayer(config).pipe(
+      makeDashboardAuthLayers().pipe(Layer.provide(auth)),
+      makeDashboardSystemLayer().pipe(
         Layer.provide(Layer.mergeAll(auth, harness.repositories, metadataSettings))
       )
     )

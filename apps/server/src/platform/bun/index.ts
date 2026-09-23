@@ -48,10 +48,6 @@ const configureLogTape = (): Promise<void> => logTapeConfiguration ??= configure
 export interface BunRuntimeConfig {
   readonly hostname: string
   readonly port: number
-  readonly publicOrigin: string
-  readonly trustedProxyAddresses: ReadonlyArray<string>
-  readonly administratorPrivateHosts: ReadonlyArray<string>
-  readonly registeredResourceOrigins: ReadonlyArray<string>
   readonly sqlitePath: string
   readonly cachePath: string
   readonly assetsDir: string
@@ -98,11 +94,7 @@ const makeBunCoreLayer = (config: BunRuntimeConfig) => {
   const repositories = makeSqliteRepositoriesLayer({ filename: config.sqlitePath })
   const upstream = makeUpstreamClientLayer({
     fetch: config.upstreamFetch ?? fetch,
-    destinationPolicy: {
-      platform: "docker",
-      administratorPrivateHosts: config.administratorPrivateHosts,
-      registeredResourceOrigins: config.registeredResourceOrigins
-    }
+    destinationPolicy: { platform: "docker" }
   }).pipe(Layer.provide(repositories))
   const identity = makeIdentityLayer.pipe(Layer.provide(repositories))
   const metadataProviders = makeMetadataProvidersLayer({
@@ -138,13 +130,9 @@ const makeBunLayer = (config: BunRuntimeConfig) => {
     Effect.sync(() => openBunResourceCache(config.cachePath)),
     (opened) => Effect.sync(opened.close)
   ).pipe(Effect.map((opened) => ResourceCache.of(opened.service))))
-  const dashboardConfig = {
-    publicOrigin: config.publicOrigin,
-    trustedProxyAddresses: config.trustedProxyAddresses
-  }
   const dashboard = Layer.merge(
-    makeDashboardAuthLayers(dashboardConfig),
-    makeDashboardControlPlaneLayers(dashboardConfig)
+    makeDashboardAuthLayers(),
+    makeDashboardControlPlaneLayers()
   ).pipe(Layer.provide(core))
   return Layer.mergeAll(core, cache, dashboard, HttpServer.layerServices)
 }
@@ -233,16 +221,9 @@ export const startBunRuntime = async (config: BunRuntimeConfig): Promise<BunRunt
   }
 }
 
-const commaSeparated = (value: string): ReadonlyArray<string> =>
-  value.split(",").map((item) => item.trim()).filter((item) => item !== "")
-
 export const readBunRuntimeConfig = (
   env: Readonly<Record<string, string | undefined>> = Bun.env
 ): BunRuntimeConfig => {
-  if (env.PUBLIC_ORIGIN === undefined || env.PUBLIC_ORIGIN === "") {
-    throw new TypeError("PUBLIC_ORIGIN is required")
-  }
-  if (env.TRUSTED_PROXIES === undefined) throw new TypeError("TRUSTED_PROXIES is required")
   const rawPort = env.PORT ?? "3000"
   if (!/^\d+$/.test(rawPort)) throw new TypeError("PORT must be an integer")
   const port = Number(rawPort)
@@ -251,10 +232,6 @@ export const readBunRuntimeConfig = (
   return {
     hostname: env.HOST ?? "0.0.0.0",
     port,
-    publicOrigin: env.PUBLIC_ORIGIN,
-    trustedProxyAddresses: commaSeparated(env.TRUSTED_PROXIES),
-    administratorPrivateHosts: commaSeparated(env.PRIVATE_UPSTREAM_HOSTS ?? ""),
-    registeredResourceOrigins: commaSeparated(env.REGISTERED_RESOURCE_ORIGINS ?? ""),
     sqlitePath: join(dataDir, "oh-my-emby.sqlite"),
     cachePath: join(dataDir, "resource-cache.sqlite"),
     assetsDir: resolve(env.ASSETS_DIR ?? "apps/dashboard/dist"),

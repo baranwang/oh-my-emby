@@ -4,10 +4,6 @@
   "main": "src/platform/workers/index.ts",
   "compatibility_date": "2026-09-20",
   "compatibility_flags": ["nodejs_compat"],
-  "vars": {
-    "PUBLIC_ORIGIN": "http://localhost:8787",
-    "TRUSTED_PROXIES": ""
-  },
   "assets": {
     "directory": "../dashboard/dist",
     "binding": "ASSETS",

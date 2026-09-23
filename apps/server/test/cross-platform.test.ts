@@ -19,10 +19,6 @@ crossPlatformAcceptance("docker", {
     const config = {
       hostname: "127.0.0.1",
       port: 0,
-      publicOrigin: "https://dashboard.example.com",
-      trustedProxyAddresses: ["127.0.0.1", "::1", "::ffff:127.0.0.1"],
-      administratorPrivateHosts: [],
-      registeredResourceOrigins: [],
       sqlitePath,
       cachePath: join(directory, "cache.sqlite"),
       assetsDir,
@@ -32,12 +28,11 @@ crossPlatformAcceptance("docker", {
     const runtime = await startBunRuntime(config)
     const repositories = () => makeSqliteRepositoriesLayer({ filename: sqlitePath })
     return {
-      publicOrigin: config.publicOrigin,
+      publicOrigin: "https://dashboard.example.com",
       repositories: repositories(),
       request: (path: string, init: RequestInit = {}) => {
         const headers = new Headers(init.headers)
-        headers.set("x-forwarded-proto", "https")
-        headers.set("x-forwarded-host", "dashboard.example.com")
+        headers.set("host", "dashboard.example.com")
         return fetch(`${runtime.origin}${path}`, { ...init, headers })
       },
       inspectStorage: async () => {

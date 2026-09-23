@@ -14,7 +14,6 @@ import { makeUpstreamClientLayer } from "../src/core/upstream-client.js";
 import { makeSqliteRepositoriesLayer } from "../src/platform/bun/sqlite-repositories.js";
 import {
   authorizeDashboardControlRequest,
-  makeDashboardRequestPolicy,
 } from "../src/api/dashboard.js";
 
 const migration = [
@@ -465,10 +464,6 @@ describe("ServerService", () => {
   });
 
   it("requires both the origin guard and dashboard authentication for control-plane mutations", async () => {
-    const policy = makeDashboardRequestPolicy({
-      publicOrigin: "https://dashboard.example.com",
-      trustedProxyAddresses: [],
-    });
     const authenticate = (token: string) =>
       token === "valid"
         ? Effect.succeed({ username: "owner" })
@@ -482,7 +477,6 @@ describe("ServerService", () => {
     await expect(
       Effect.runPromise(
         authorizeDashboardControlRequest(
-          policy,
           { ...request, headers: { origin: "https://evil.example.com" } },
           "valid",
           authenticate,
@@ -490,10 +484,10 @@ describe("ServerService", () => {
       ),
     ).rejects.toMatchObject({ _tag: "ForbiddenOrigin" });
     await expect(
-      Effect.runPromise(authorizeDashboardControlRequest(policy, request, undefined, authenticate)),
+      Effect.runPromise(authorizeDashboardControlRequest(request, undefined, authenticate)),
     ).rejects.toMatchObject({ _tag: "InvalidCredentials" });
     await expect(
-      Effect.runPromise(authorizeDashboardControlRequest(policy, request, "valid", authenticate)),
+      Effect.runPromise(authorizeDashboardControlRequest(request, "valid", authenticate)),
     ).resolves.toMatchObject({ principal: { username: "owner" } });
   });
 

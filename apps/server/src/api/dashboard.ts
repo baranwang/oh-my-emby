@@ -33,16 +33,6 @@ export const toDashboardWebResponse = <R>(
   Effect.map((response) => HttpServerResponse.toWeb(response, { withoutBody: request.method === "HEAD" }))
 ))
 
-export interface DashboardRequestPolicyConfig {
-  readonly publicOrigin: string
-  readonly trustedProxyAddresses: ReadonlyArray<string>
-}
-
-export interface DashboardRequestPolicy {
-  readonly publicOrigin: URL
-  readonly trustedProxyAddresses: ReadonlySet<string>
-}
-
 export interface DashboardRequest {
   readonly method: string
   readonly requestUrl: string
@@ -70,57 +60,49 @@ const isLocalhost = (hostname: string): boolean =>
 const isLoopbackAddress = (address: string | undefined): boolean =>
   address === "127.0.0.1" || address === "::1" || address === "[::1]" || address === "::ffff:127.0.0.1"
 
-export const makeDashboardRequestPolicy = (
-  config: DashboardRequestPolicyConfig
-): DashboardRequestPolicy => {
-  const publicOrigin = new URL(config.publicOrigin)
-  if (
-    publicOrigin.origin !== config.publicOrigin ||
-    (publicOrigin.protocol !== "https:" && !(publicOrigin.protocol === "http:" && isLocalhost(publicOrigin.hostname)))
-  ) {
-    throw new TypeError("public origin must be an exact HTTPS origin or explicit localhost HTTP origin")
-  }
-  return {
-    publicOrigin,
-    trustedProxyAddresses: new Set(config.trustedProxyAddresses)
-  }
-}
-
 export const guardDashboardRequest = (
-  policy: DashboardRequestPolicy,
   request: DashboardRequest
 ): Effect.Effect<GuardedDashboardRequest, ForbiddenOriginFailure> => Effect.gen(function*() {
-  if (policy.publicOrigin.protocol === "http:" && !isLoopbackAddress(request.remoteAddress)) {
-    return yield* Effect.fail(forbiddenOrigin())
-  }
-  const directOrigin = new URL(request.requestUrl).origin
-  const trustedProxy = request.remoteAddress !== undefined &&
-    policy.trustedProxyAddresses.has(request.remoteAddress)
-  const forwardedOrigin = trustedProxy &&
-      request.headers["x-forwarded-proto"] !== undefined &&
-      request.headers["x-forwarded-host"] !== undefined
-    ? `${request.headers["x-forwarded-proto"]}://${request.headers["x-forwarded-host"]}`
-    : null
-  if (directOrigin !== policy.publicOrigin.origin && forwardedOrigin !== policy.publicOrigin.origin) {
+  let host: string
+  try {
+    const transportUrl = new URL(request.requestUrl)
+    host = request.headers.host ?? transportUrl.host
+    if (host === "" || /[/?#@,\\\s%]/.test(host)) throw new TypeError("invalid Host")
+    const authority = new URL(`https://${host}/`)
+    if (transportUrl.protocol === "http:" && isLocalhost(authority.hostname) && !isLoopbackAddress(request.remoteAddress)) {
+      throw new TypeError("non-loopback localhost HTTP")
+    }
+  } catch {
     return yield* Effect.fail(forbiddenOrigin())
   }
   if (!["GET", "HEAD", "OPTIONS"].includes(request.method.toUpperCase())) {
-    if (request.headers.origin !== policy.publicOrigin.origin) {
+    const rawOrigin = request.headers.origin
+    let origin: URL
+    try {
+      if (rawOrigin === undefined) throw new TypeError("missing Origin")
+      origin = new URL(rawOrigin)
+      if (origin.origin !== rawOrigin || origin.host !== new URL(`${origin.protocol}//${host}`).host) {
+        throw new TypeError("Origin does not match Host")
+      }
+    } catch {
+      return yield* Effect.fail(forbiddenOrigin())
+    }
+    if (origin.protocol !== "https:" && !(
+      origin.protocol === "http:" && isLocalhost(origin.hostname) && isLoopbackAddress(request.remoteAddress)
+    )) {
       return yield* Effect.fail(forbiddenOrigin())
     }
   }
-  const forwardedFor = trustedProxy ? request.headers["x-forwarded-for"]?.split(",")[0]?.trim() : undefined
-  return { clientKey: forwardedFor || request.remoteAddress || "unknown" }
+  return { clientKey: request.remoteAddress || "unknown" }
 })
 
 export const authorizeDashboardControlRequest = <A, E>(
-  policy: DashboardRequestPolicy,
   request: DashboardRequest,
   token: string | undefined,
   authenticate: (token: string) => Effect.Effect<A, E>
 ): Effect.Effect<AuthorizedDashboardRequest<A>, ForbiddenOriginFailure | InvalidCredentials | E> =>
   Effect.gen(function*() {
-    const boundary = yield* guardDashboardRequest(policy, request)
+    const boundary = yield* guardDashboardRequest(request)
     if (token === undefined) return yield* Effect.fail(new InvalidCredentials())
     const principal = yield* authenticate(token)
     return { ...boundary, principal }
@@ -228,12 +210,11 @@ const requestMetadata = (request: HttpServerRequest): DashboardRequest => {
   return remoteAddress === undefined ? metadata : { ...metadata, remoteAddress }
 }
 
-const guarded = (policy: DashboardRequestPolicy, request: HttpServerRequest) =>
-  guardDashboardRequest(policy, requestMetadata(request))
+const guarded = (request: HttpServerRequest) =>
+  guardDashboardRequest(requestMetadata(request))
 
-const authorized = (policy: DashboardRequestPolicy, request: HttpServerRequest, auth: AuthService) =>
+const authorized = (request: HttpServerRequest, auth: AuthService) =>
   authorizeDashboardControlRequest(
-    policy,
     requestMetadata(request),
     request.cookies[DASHBOARD_SESSION_COOKIE],
     auth.authenticateDashboard
@@ -242,14 +223,11 @@ const authorized = (policy: DashboardRequestPolicy, request: HttpServerRequest, 
 const resultOrFailure = <A, E extends { readonly _tag?: string }>(effect: Effect.Effect<A, E, never>) =>
   effect.pipe(Effect.result, Effect.map((result) => Result.isFailure(result) ? publicFailure(result.failure) : result.success))
 
-export const makeDashboardAuthLayers = (
-  config: DashboardRequestPolicyConfig
-) => {
-  const policy = makeDashboardRequestPolicy(config)
+export const makeDashboardAuthLayers = () => {
   const bootstrap = HttpApiBuilder.group(DashboardApi, "bootstrap", (handlers) => Effect.gen(function*() {
     const auth = yield* Auth
     return handlers.handle("getBootstrap", ({ request }) => Effect.gen(function*() {
-      const boundary = yield* guarded(policy, request).pipe(Effect.result)
+      const boundary = yield* guarded(request).pipe(Effect.result)
       if (Result.isFailure(boundary)) return publicFailure(boundary.failure)
       const result = yield* auth.bootstrap().pipe(Effect.result)
       return Result.isFailure(result) ? publicFailure(result.failure) : result.success
@@ -259,7 +237,7 @@ export const makeDashboardAuthLayers = (
     const auth = yield* Auth
     return handlers.handleAll({
       getSession: ({ request }) => Effect.gen(function*() {
-        const boundary = yield* guarded(policy, request).pipe(Effect.result)
+        const boundary = yield* guarded(request).pipe(Effect.result)
         if (Result.isFailure(boundary)) return publicFailure(boundary.failure)
         const token = request.cookies[DASHBOARD_SESSION_COOKIE]
         if (!token) return { authenticated: false, username: null }
@@ -277,7 +255,7 @@ export const makeDashboardAuthLayers = (
         })
       }),
       claim: ({ payload, request }) => Effect.gen(function*() {
-        const boundary = yield* guarded(policy, request).pipe(Effect.result)
+        const boundary = yield* guarded(request).pipe(Effect.result)
         if (Result.isFailure(boundary)) return publicFailure(boundary.failure)
         const session = yield* auth.claim(payload, {
           scopeKey: `claim:${boundary.success.clientKey}`
@@ -285,7 +263,7 @@ export const makeDashboardAuthLayers = (
         return Result.isFailure(session) ? publicFailure(session.failure) : dashboardSessionResponse(session.success)
       }),
       login: ({ payload, request }) => Effect.gen(function*() {
-        const boundary = yield* guarded(policy, request).pipe(Effect.result)
+        const boundary = yield* guarded(request).pipe(Effect.result)
         if (Result.isFailure(boundary)) return publicFailure(boundary.failure)
         const session = yield* auth.loginDashboard(payload, {
           scopeKey: `dashboard:${boundary.success.clientKey}:${payload.username}`
@@ -293,7 +271,7 @@ export const makeDashboardAuthLayers = (
         return Result.isFailure(session) ? publicFailure(session.failure) : dashboardSessionResponse(session.success)
       }),
       logout: ({ request }) => Effect.gen(function*() {
-        const boundary = yield* guarded(policy, request).pipe(Effect.result)
+        const boundary = yield* guarded(request).pipe(Effect.result)
         if (Result.isFailure(boundary)) return publicFailure(boundary.failure)
         const token = request.cookies[DASHBOARD_SESSION_COOKIE]
         if (!token) return publicFailure({ _tag: "InvalidCredentials" })
@@ -304,7 +282,7 @@ export const makeDashboardAuthLayers = (
         return yield* expireDashboardSession(HttpServerResponse.empty())
       }),
       changePassword: ({ payload, request }) => Effect.gen(function*() {
-        const boundary = yield* guarded(policy, request).pipe(Effect.result)
+        const boundary = yield* guarded(request).pipe(Effect.result)
         if (Result.isFailure(boundary)) return publicFailure(boundary.failure)
         const token = request.cookies[DASHBOARD_SESSION_COOKIE]
         if (!token) return publicFailure({ _tag: "InvalidCredentials" })
@@ -320,48 +298,45 @@ export const makeDashboardAuthLayers = (
   return Layer.merge(bootstrap, authentication)
 }
 
-export const makeDashboardControlPlaneLayers = (
-  config: DashboardRequestPolicyConfig
-) => {
-  const policy = makeDashboardRequestPolicy(config)
+export const makeDashboardControlPlaneLayers = () => {
   const servers = HttpApiBuilder.group(DashboardApi, "servers", (handlers) => Effect.gen(function*() {
     const auth = yield* Auth
     const service = yield* ServerService
     return handlers.handleAll({
       listServers: ({ request }) => Effect.gen(function*() {
-        const access = yield* authorized(policy, request, auth).pipe(Effect.result)
+        const access = yield* authorized(request, auth).pipe(Effect.result)
         if (Result.isFailure(access)) return publicFailure(access.failure)
         return yield* resultOrFailure(service.list())
       }),
       createServer: ({ payload, request }) => Effect.gen(function*() {
-        const access = yield* authorized(policy, request, auth).pipe(Effect.result)
+        const access = yield* authorized(request, auth).pipe(Effect.result)
         if (Result.isFailure(access)) return publicFailure(access.failure)
         return yield* resultOrFailure(service.create(payload))
       }),
       getServer: ({ params, request }) => Effect.gen(function*() {
-        const access = yield* authorized(policy, request, auth).pipe(Effect.result)
+        const access = yield* authorized(request, auth).pipe(Effect.result)
         if (Result.isFailure(access)) return publicFailure(access.failure)
         return yield* resultOrFailure(service.get(params.id))
       }),
       updateServer: ({ params, payload, request }) => Effect.gen(function*() {
-        const access = yield* authorized(policy, request, auth).pipe(Effect.result)
+        const access = yield* authorized(request, auth).pipe(Effect.result)
         if (Result.isFailure(access)) return publicFailure(access.failure)
         return yield* resultOrFailure(service.update(params.id, payload))
       }),
       deleteServer: ({ params, request }) => Effect.gen(function*() {
-        const access = yield* authorized(policy, request, auth).pipe(Effect.result)
+        const access = yield* authorized(request, auth).pipe(Effect.result)
         if (Result.isFailure(access)) return publicFailure(access.failure)
         const removed = yield* service.delete(params.id).pipe(Effect.result)
         return Result.isFailure(removed) ? publicFailure(removed.failure) : HttpServerResponse.empty()
       }),
       testServerConnection: ({ params, request }) => Effect.gen(function*() {
-        const access = yield* authorized(policy, request, auth).pipe(Effect.result)
+        const access = yield* authorized(request, auth).pipe(Effect.result)
         if (Result.isFailure(access)) return publicFailure(access.failure)
         const result = yield* service.testConnection(params.id, true).pipe(Effect.result)
         return Result.isFailure(result) ? publicFailure(result.failure, true) : result.success
       }),
       getServerHealth: ({ params, request }) => Effect.gen(function*() {
-        const access = yield* authorized(policy, request, auth).pipe(Effect.result)
+        const access = yield* authorized(request, auth).pipe(Effect.result)
         if (Result.isFailure(access)) return publicFailure(access.failure)
         return yield* resultOrFailure(service.getRecord(params.id).pipe(Effect.map((server) => ({
           serverId: server.id,
@@ -370,7 +345,7 @@ export const makeDashboardControlPlaneLayers = (
         }))))
       }),
       listSourceLibraries: ({ params, request }) => Effect.gen(function*() {
-        const access = yield* authorized(policy, request, auth).pipe(Effect.result)
+        const access = yield* authorized(request, auth).pipe(Effect.result)
         if (Result.isFailure(access)) return publicFailure(access.failure)
         return yield* resultOrFailure(service.listSourceLibraries(params.id))
       })
@@ -381,62 +356,59 @@ export const makeDashboardControlPlaneLayers = (
     const service = yield* LibraryService
     return handlers.handleAll({
       listVirtualLibraries: ({ request }) => Effect.gen(function*() {
-        const access = yield* authorized(policy, request, auth).pipe(Effect.result)
+        const access = yield* authorized(request, auth).pipe(Effect.result)
         if (Result.isFailure(access)) return publicFailure(access.failure)
         return yield* resultOrFailure(service.list())
       }),
       createVirtualLibrary: ({ payload, request }) => Effect.gen(function*() {
-        const access = yield* authorized(policy, request, auth).pipe(Effect.result)
+        const access = yield* authorized(request, auth).pipe(Effect.result)
         if (Result.isFailure(access)) return publicFailure(access.failure)
         return yield* resultOrFailure(service.create(payload))
       }),
       getVirtualLibrary: ({ params, request }) => Effect.gen(function*() {
-        const access = yield* authorized(policy, request, auth).pipe(Effect.result)
+        const access = yield* authorized(request, auth).pipe(Effect.result)
         if (Result.isFailure(access)) return publicFailure(access.failure)
         return yield* resultOrFailure(service.get(params.id))
       }),
       updateVirtualLibrary: ({ params, payload, request }) => Effect.gen(function*() {
-        const access = yield* authorized(policy, request, auth).pipe(Effect.result)
+        const access = yield* authorized(request, auth).pipe(Effect.result)
         if (Result.isFailure(access)) return publicFailure(access.failure)
         return yield* resultOrFailure(service.update(params.id, payload))
       }),
       deleteVirtualLibrary: ({ params, request }) => Effect.gen(function*() {
-        const access = yield* authorized(policy, request, auth).pipe(Effect.result)
+        const access = yield* authorized(request, auth).pipe(Effect.result)
         if (Result.isFailure(access)) return publicFailure(access.failure)
         const removed = yield* service.delete(params.id).pipe(Effect.result)
         return Result.isFailure(removed) ? publicFailure(removed.failure) : HttpServerResponse.empty()
       })
     })
   }))
-  return Layer.mergeAll(servers, libraries, makeDashboardSystemLayer(config))
+  return Layer.mergeAll(servers, libraries, makeDashboardSystemLayer())
 }
 
-export const makeDashboardSystemLayer = (
-  config: DashboardRequestPolicyConfig
-) => {
-  const policy = makeDashboardRequestPolicy(config)
+export const makeDashboardSystemLayer = () => {
   return HttpApiBuilder.group(DashboardApi, "system", (handlers) => Effect.gen(function*() {
     const auth = yield* Auth
     const metadataSettings = yield* MetadataSettings
     const repositories = yield* Repositories
     return handlers.handleAll({
       getSystemStatus: ({ request }) => Effect.gen(function*() {
-        const access = yield* authorized(policy, request, auth).pipe(Effect.result)
+        const access = yield* authorized(request, auth).pipe(Effect.result)
         if (Result.isFailure(access)) return publicFailure(access.failure)
         return yield* resultOrFailure(repositories.readSystemStatus())
       }),
       listOutboxFailures: ({ request }) => Effect.gen(function*() {
-        const access = yield* authorized(policy, request, auth).pipe(Effect.result)
+        const access = yield* authorized(request, auth).pipe(Effect.result)
         if (Result.isFailure(access)) return publicFailure(access.failure)
         return yield* resultOrFailure(repositories.listOutboxFailures())
       }),
       getMetadataSettings: ({ request }) => Effect.gen(function*() {
-        const access = yield* authorized(policy, request, auth).pipe(Effect.result)
+        const access = yield* authorized(request, auth).pipe(Effect.result)
         if (Result.isFailure(access)) return publicFailure(access.failure)
         return yield* resultOrFailure(metadataSettings.get())
       }),
       updateMetadataSettings: ({ payload, request }) => Effect.gen(function*() {
-        const access = yield* authorized(policy, request, auth).pipe(Effect.result)
+        const access = yield* authorized(request, auth).pipe(Effect.result)
         if (Result.isFailure(access)) return publicFailure(access.failure)
         return yield* resultOrFailure(metadataSettings.update(payload))
       })

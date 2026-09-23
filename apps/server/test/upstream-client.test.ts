@@ -133,7 +133,7 @@ describe("UpstreamClient", () => {
     )
   })
 
-  it("drops credentials and identity headers on a cross-origin redirect", async () => {
+  it("rejects a cross-origin control redirect before fetching the next origin", async () => {
     const calls: Array<Request> = []
     const fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
       const request = new Request(input, init)
@@ -142,21 +142,18 @@ describe("UpstreamClient", () => {
         ? new Response(null, { status: 302, headers: { location: "https://cdn.example.net/info" } })
         : Response.json({ ok: true })
     }
-    await run(fetch, Effect.gen(function*() {
+    await expect(run(fetch, Effect.gen(function*() {
       const client = yield* UpstreamClient
-      yield* client.request({
+      return yield* client.request({
         serverId: "server-1",
         generation: 1,
         path: "/System/Info",
         method: "GET"
       }, JsonOk)
-    }))
-    expect(calls).toHaveLength(2)
+    }))).rejects.toMatchObject({ _tag: "DestinationRejected" })
+    expect(calls).toHaveLength(1)
     expect(calls[0]!.headers.get("user-agent")).toBe("Configured-Agent/1")
     expect(calls[0]!.headers.has("x-emby-token")).toBe(true)
-    for (const header of ["x-emby-token", "authorization", "x-emby-authorization"]) {
-      expect(calls[1]!.headers.has(header)).toBe(false)
-    }
   })
 
   it("keeps relative API paths under the configured base path and rejects absolute initial destinations", async () => {
@@ -279,7 +276,7 @@ describe("UpstreamClient", () => {
       server: server({
           endpoints: [endpoint("192.168.1.20", 0, { protocol: "http", port: 8096 })],
           verifiedBaseUrl: "http://192.168.1.20:8096" }),
-      policy: { platform: "docker", administratorPrivateHosts: ["192.168.1.20"] }
+      policy: { platform: "docker" }
     })
     expect(urls).toEqual(["http://192.168.1.20:8096/System/Info"])
 
@@ -289,21 +286,6 @@ describe("UpstreamClient", () => {
         ? new Response(null, { status: 302, headers: { location: "http://192.168.1.20:3000/admin" } })
         : Response.json({ ok: true })
     }, Effect.gen(function*() {
-      const client = yield* UpstreamClient
-      return yield* client.request({
-        serverId: "server-1",
-        generation: 1,
-        path: "/System/Info",
-        method: "GET"
-      }, JsonOk)
-    }), {
-      server: server({
-            endpoints: [endpoint("192.168.1.20", 0, { protocol: "http", port: 8096 })]
-          }),
-      policy: { platform: "docker", administratorPrivateHosts: ["192.168.1.20"] }
-    })).rejects.toMatchObject({ _tag: "DestinationRejected" })
-
-    await expect(run(fetch, Effect.gen(function*() {
       const client = yield* UpstreamClient
       return yield* client.request({
         serverId: "server-1",
@@ -352,7 +334,7 @@ describe("UpstreamClient", () => {
             endpoints: [endpoint("192.168.1.20", 0, { protocol: "http", port: 8096 })],
             verifiedBaseUrl: "http://192.168.1.20:8096"
       }),
-      policy: { platform: "docker", administratorPrivateHosts: ["192.168.1.20"] }
+      policy: { platform: "docker" }
     })).rejects.toMatchObject({ _tag: "DestinationRejected" })
     expect(calls).toEqual(["http://192.168.1.20:8096/System/Info"])
   })
@@ -1048,7 +1030,7 @@ describe("UpstreamClient", () => {
         })).status
       })),
       {
-        policy: { platform: "workers", registeredResourceOrigins: ["https://cdn.example.net"] },
+        policy: { platform: "workers" },
         server: server({ endpoints: [endpoint("one.example.com"), endpoint("two.example.com", 1)] }),
         fetchRegisteredResource: async (request) => {
           calls.push(request.url)
@@ -1238,7 +1220,7 @@ describe("UpstreamClient", () => {
     ])
   })
 
-  it("enforces registered resource origins on Workers", async () => {
+  it("redirects a registered public video URL without fetching CDN bytes", async () => {
     const version = {
       id: "version-1",
       sourceItemId: "source-1",
@@ -1252,16 +1234,17 @@ describe("UpstreamClient", () => {
       streams: [],
       updatedAtMs: 1_000
     }
-    await expect(run(async () => Response.json({ ok: true }), Effect.gen(function*() {
+    let fetched = false
+    const target = await run(async () => {
+      fetched = true
+      return Response.json({ ok: true })
+    }, Effect.gen(function*() {
       const client = yield* UpstreamClient
-      return yield* client.resolvePlayback(version)
-    }))).rejects.toMatchObject({ _tag: "DestinationRejected" })
-    await expect(run(async () => Response.json({ ok: true }), Effect.gen(function*() {
-      const client = yield* UpstreamClient
-      return yield* client.resolvePlayback(version)
-    }), {
-      policy: { platform: "workers", registeredResourceOrigins: ["https://cdn.example.net"] }
-    })).resolves.toMatchObject({ url: "https://cdn.example.net/Videos/item/stream" })
+      const playback = yield* client.resolvePlayback(version)
+      return yield* client.resolvePlaybackRedirect(playback)
+    }))
+    expect(target.href).toBe("https://cdn.example.net/Videos/item/stream")
+    expect(fetched).toBe(false)
   })
 
   it.each([

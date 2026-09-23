@@ -281,24 +281,12 @@ describe("playback decisions", () => {
     await expect(allowedFor({ platform: "workers" }, "203.0.113.9")).resolves.toBe(true)
     await expect(allowedFor({ platform: "workers" }, "127.0.0.1")).resolves.toBe(false)
     await expect(allowedFor({ platform: "workers" }, "not-an-ip")).resolves.toBe(false)
-    await expect(allowedFor({
-      platform: "docker",
-      administratorPrivateHosts: ["example.com"]
-    }, "192.168.1.20")).resolves.toBe(true)
-    await expect(allowedFor({
-      platform: "docker",
-      administratorPrivateHosts: ["192.168.1.20"]
-    }, "192.168.1.20")).resolves.toBe(true)
-    await expect(allowedFor({ platform: "docker" }, "192.168.1.20")).resolves.toBe(false)
+    await expect(allowedFor({ platform: "docker" }, "192.168.1.20")).resolves.toBe(true)
 
     const perHopAllowed: Array<boolean> = []
     const redirectLayer = makeUpstreamClientLayer({
       fetch: () => Promise.reject(new Error("control fetch must not run")),
-      destinationPolicy: {
-        platform: "docker",
-        administratorPrivateHosts: ["example.com"],
-        registeredResourceOrigins: ["https://cdn.example.com"]
-      },
+      destinationPolicy: { platform: "docker" },
       fetchRegisteredResource: async (request, context) => {
         perHopAllowed.push(context.isConnectedAddressAllowed("192.168.1.20"))
         return request.url.startsWith("https://example.com/")
@@ -315,7 +303,7 @@ describe("playback decisions", () => {
         accept: ["image/png"]
       })
     })).pipe(Effect.provide(redirectLayer)))
-    expect(perHopAllowed).toEqual([true, false])
+    expect(perHopAllowed).toEqual([true, true])
   })
 
   it("brokers the selected version without reading video bytes", async () => {

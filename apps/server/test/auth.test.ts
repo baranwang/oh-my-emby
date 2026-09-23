@@ -6,11 +6,7 @@ import { join } from "node:path"
 import { Deferred, Effect, Fiber, Layer } from "effect"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
-import {
-  Auth,
-  makeAuthLayer,
-  type DashboardSession
-} from "../src/core/auth.js"
+import { Auth, makeAuthLayer } from "../src/core/auth.js"
 import { claimAndAttemptFirstServerSetup } from "../src/core/first-server-setup.js"
 import { DASHBOARD_SESSION_IDLE_MS, PBKDF2_ITERATIONS } from "../src/core/limits.js"
 import type { UpstreamEndpoint } from "../src/core/model.js"
@@ -131,7 +127,7 @@ describe("local authentication", () => {
         { scopeKey: "claim:first-server" },
         unreachableServer,
         platformFetch,
-        { platform: "docker", administratorPrivateHosts: [new URL(baseUrl).hostname] }
+        { platform: "docker" }
     ))
     expect(session.view).toEqual({ authenticated: true, username: "owner" })
     expect(new URL(observedRequest?.url ?? "https://invalid").pathname).toBe("/Users/AuthenticateByName")
@@ -182,7 +178,7 @@ describe("local authentication", () => {
         { scopeKey: "claim:rejected-server" },
         server,
         globalThis.fetch,
-        { platform: "docker", administratorPrivateHosts: [new URL(server.baseUrl).hostname] }
+        { platform: "docker" }
       ))
       expect(session.view).toEqual({ authenticated: true, username: "owner" })
     } finally {

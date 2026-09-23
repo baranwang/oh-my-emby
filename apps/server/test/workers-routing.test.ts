@@ -18,7 +18,6 @@ import {
 import { makeD1RepositoriesLayer } from "../src/platform/workers/d1-repositories.js"
 import worker, {
   makeWorkersCoreLayer,
-  parseTrustedProxyAddresses,
   runWorkerRequest
 } from "../src/platform/workers/index.js"
 import { acceptanceUpstreamFetch, crossPlatformAcceptance } from "./cross-platform-contract.js"
@@ -253,13 +252,6 @@ crossPlatformAcceptance("workers", {
 })
 
 describe("Workers production runtime", () => {
-  it("normalizes the trusted-proxy CSV without retaining empty entries", () => {
-    expect(parseTrustedProxyAddresses(" 10.0.0.1, ,2001:db8::1 ,")).toEqual([
-      "10.0.0.1",
-      "2001:db8::1"
-    ])
-  })
-
   it("routes the real Dashboard API and only falls back to HTML for Dashboard navigations", async () => {
     const bootstrap = await runWorkerFetch("/api/dashboard/bootstrap")
     expect(bootstrap.status).toBe(200)

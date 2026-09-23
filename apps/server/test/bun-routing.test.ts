@@ -20,10 +20,6 @@ describe("Bun production routing", () => {
     runtime = await startBunRuntime({
       hostname: "127.0.0.1",
       port: 0,
-      publicOrigin: "https://dashboard.example.com",
-      trustedProxyAddresses: ["127.0.0.1", "::1", "::ffff:127.0.0.1"],
-      administratorPrivateHosts: [],
-      registeredResourceOrigins: [],
       sqlitePath: join(directory, "data.sqlite"),
       cachePath: join(directory, "cache.sqlite"),
       assetsDir,
@@ -89,8 +85,22 @@ describe("Bun production routing", () => {
     expect(response.headers.get("content-type") ?? "").not.toContain("text/html")
   })
 
-  it("uses the exact public origin and trusted socket address for Dashboard cookies", async () => {
+  it("uses the preserved public Host and Origin for Dashboard cookies", async () => {
     const response = await request("/api/dashboard/claim", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        host: "dashboard.example.com",
+        origin: "https://dashboard.example.com",
+      },
+      body: JSON.stringify({ username: "owner", password: "valid password" })
+    })
+    expect(response.status).toBe(200)
+    expect(response.headers.get("set-cookie")).toMatch(/oh_my_emby_session=.*; Path=\/api\/dashboard;.* HttpOnly;.* Secure;.* SameSite=Lax/i)
+  })
+
+  it("ignores forwarded headers when the public Host was not preserved", async () => {
+    const response = await runtime.handle(new Request("http://internal:3000/api/dashboard/claim", {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -99,17 +109,6 @@ describe("Bun production routing", () => {
         "x-forwarded-host": "dashboard.example.com"
       },
       body: JSON.stringify({ username: "owner", password: "valid password" })
-    })
-    expect(response.status).toBe(200)
-    expect(response.headers.get("set-cookie")).toMatch(/oh_my_emby_session=.*; Path=\/api\/dashboard;.* HttpOnly;.* Secure;.* SameSite=Lax/i)
-  })
-
-  it("ignores proxy headers from addresses outside the trusted allowlist", async () => {
-    const response = await runtime.handle(new Request("http://internal:3000/api/dashboard/bootstrap", {
-      headers: {
-        "x-forwarded-proto": "https",
-        "x-forwarded-host": "dashboard.example.com"
-      }
     }), "198.51.100.7")
     expect(response.status).toBe(403)
   })
@@ -121,10 +120,6 @@ describe("Bun production routing", () => {
     const local = await startBunRuntime({
       hostname: "127.0.0.1",
       port: 0,
-      publicOrigin: "http://localhost:3000",
-      trustedProxyAddresses: [],
-      administratorPrivateHosts: [],
-      registeredResourceOrigins: [],
       sqlitePath: join(localDirectory, "data.sqlite"),
       cachePath: join(localDirectory, "cache.sqlite"),
       assetsDir,

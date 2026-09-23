@@ -28,9 +28,7 @@ docker network create "$NETWORK" >/dev/null
 CREATED_NETWORK=1
 docker volume create "$VOLUME" >/dev/null
 CREATED_VOLUME=1
-GATEWAY="$(docker network inspect --format '{{(index .IPAM.Config 0).Gateway}}' "$NETWORK")"
-
-docker run -d --name "$CONTAINER" --network "$NETWORK" -p 127.0.0.1::3000 -e PUBLIC_ORIGIN=https://smoke.example.com -e "TRUSTED_PROXIES=$GATEWAY" -v "$VOLUME:/data" "$IMAGE" >/dev/null
+docker run -d --name "$CONTAINER" --network "$NETWORK" -p 127.0.0.1::3000 -v "$VOLUME:/data" "$IMAGE" >/dev/null
 CREATED_CONTAINER=1
 
 PORT="$(docker port "$CONTAINER" 3000/tcp | sed -n 's/.*://p' | tail -n 1)"
@@ -45,29 +43,26 @@ if ! curl --fail --silent --show-error "$BASE_URL/health" >"$TEMP_DIR/health.jso
 fi
 grep -q '"status":"ok"' "$TEMP_DIR/health.json"
 
-FORWARDED=(
-  -H "X-Forwarded-Proto: https"
-  -H "X-Forwarded-Host: smoke.example.com"
-)
+PUBLIC_HOST=(-H "Host: smoke.example.com")
 
-status="$(curl --silent --show-error -D "$TEMP_DIR/headers" -o "$TEMP_DIR/body" -w '%{http_code}' "${FORWARDED[@]}" -H "Accept: text/html" "$BASE_URL/dashboard/servers")"
+status="$(curl --silent --show-error -D "$TEMP_DIR/headers" -o "$TEMP_DIR/body" -w '%{http_code}' "${PUBLIC_HOST[@]}" -H "Accept: text/html" "$BASE_URL/dashboard/servers")"
 [[ "$status" == 200 ]]
 grep -qi '^content-type:.*text/html' "$TEMP_DIR/headers"
 
 for path in /api/dashboard/not-a-route /dashboard/assets/missing.js; do
-  status="$(curl --silent --show-error -D "$TEMP_DIR/headers" -o "$TEMP_DIR/body" -w '%{http_code}' "${FORWARDED[@]}" -H "Accept: text/html" "$BASE_URL$path")"
+  status="$(curl --silent --show-error -D "$TEMP_DIR/headers" -o "$TEMP_DIR/body" -w '%{http_code}' "${PUBLIC_HOST[@]}" -H "Accept: text/html" "$BASE_URL$path")"
   [[ "$status" == 404 ]]
   if grep -qi '^content-type:.*text/html' "$TEMP_DIR/headers"; then exit 1; fi
 done
 
-status="$(curl --silent --show-error -D "$TEMP_DIR/headers" -o "$TEMP_DIR/body" -w '%{http_code}' "${FORWARDED[@]}" -H "Origin: https://smoke.example.com" -H "Content-Type: application/json" --data '{"username":"owner","password":"valid password"}' "$BASE_URL/api/dashboard/claim")"
+status="$(curl --silent --show-error -D "$TEMP_DIR/headers" -o "$TEMP_DIR/body" -w '%{http_code}' "${PUBLIC_HOST[@]}" -H "Origin: https://smoke.example.com" -H "Content-Type: application/json" --data '{"username":"owner","password":"valid password"}' "$BASE_URL/api/dashboard/claim")"
 [[ "$status" == 200 ]]
 grep -q '"authenticated":true' "$TEMP_DIR/body"
 grep -qi '^set-cookie:.*Secure' "$TEMP_DIR/headers"
 SESSION_COOKIE="$(tr -d '\r' <"$TEMP_DIR/headers" | sed -n 's/^[Ss]et-[Cc]ookie:[[:space:]]*\([^;]*\).*/\1/p' | head -n 1)"
 [[ -n "$SESSION_COOKIE" ]]
 
-status="$(curl --silent --show-error -o "$TEMP_DIR/body" -w '%{http_code}' -H "Cookie: $SESSION_COOKIE" "${FORWARDED[@]}" "$BASE_URL/api/dashboard/session")"
+status="$(curl --silent --show-error -o "$TEMP_DIR/body" -w '%{http_code}' -H "Cookie: $SESSION_COOKIE" "${PUBLIC_HOST[@]}" "$BASE_URL/api/dashboard/session")"
 [[ "$status" == 200 ]]
 grep -q '"authenticated":true' "$TEMP_DIR/body"
 

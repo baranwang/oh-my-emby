@@ -8,6 +8,7 @@ import { Effect } from "effect"
 
 import { openBunResourceCache } from "../src/platform/bun/cache.js"
 import {
+  readBunRuntimeConfig,
   scheduleMaintenance,
   startBunRuntime,
   type BunRuntimeConfig
@@ -22,10 +23,6 @@ const fixture = async () => {
   const config: BunRuntimeConfig = {
     hostname: "127.0.0.1",
     port: 0,
-    publicOrigin: "https://dashboard.example.com",
-    trustedProxyAddresses: ["127.0.0.1", "::1", "::ffff:127.0.0.1"],
-    administratorPrivateHosts: [],
-    registeredResourceOrigins: [],
     sqlitePath: join(directory, "data.sqlite"),
     cachePath: join(directory, "cache.sqlite"),
     assetsDir,
@@ -36,12 +33,27 @@ const fixture = async () => {
 
 const dashboardHeaders = {
   "content-type": "application/json",
+  host: "dashboard.example.com",
   origin: "https://dashboard.example.com",
   "x-forwarded-proto": "https",
   "x-forwarded-host": "dashboard.example.com"
 }
 
 describe("Bun process lifecycle", () => {
+  it("starts from defaults without any origin, proxy, or upstream allowlist variables", () => {
+    const config = readBunRuntimeConfig({ DATA_DIR: "/tmp/oh-my-emby-config-test" })
+    expect(config.hostname).toBe("0.0.0.0")
+    expect(config.port).toBe(3000)
+    expect(config.sqlitePath).toBe("/tmp/oh-my-emby-config-test/oh-my-emby.sqlite")
+    expect(readBunRuntimeConfig({
+      DATA_DIR: "/tmp/oh-my-emby-config-test",
+      PUBLIC_ORIGIN: "ftp://invalid",
+      TRUSTED_PROXIES: "127.0.0.1",
+      PRIVATE_UPSTREAM_HOSTS: "localhost",
+      REGISTERED_RESOURCE_ORIGINS: "https://cdn.example.com"
+    })).toEqual(config)
+  })
+
   it("applies migrations before listening and never listens after a migration failure", async () => {
     const { directory, config } = await fixture()
     await Bun.write(join(config.migrationsDir, "0003_marker.sql"), `
@@ -104,8 +116,7 @@ describe("Bun process lifecycle", () => {
       const session = await fetch(`${second.origin}/api/dashboard/session`, {
         headers: {
           cookie,
-          "x-forwarded-proto": "https",
-          "x-forwarded-host": "dashboard.example.com"
+          host: "dashboard.example.com"
         }
       })
       expect(session.status).toBe(200)

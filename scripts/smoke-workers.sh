@@ -166,17 +166,13 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 write_config() {
-  CONFIG_PATH="$CONFIG" CONFIG_NAME="$1" CONFIG_ORIGIN="$2" CONFIG_LOCAL_D1="$3" ROOT_PATH="$ROOT" bun -e '
+  CONFIG_PATH="$CONFIG" CONFIG_NAME="$1" CONFIG_LOCAL_D1="$2" ROOT_PATH="$ROOT" bun -e '
       const localD1 = process.env.CONFIG_LOCAL_D1 === "1"
       const config = {
         name: process.env.CONFIG_NAME,
         main: `${process.env.ROOT_PATH}/apps/server/src/platform/workers/index.ts`,
         compatibility_date: "2026-09-20",
         compatibility_flags: ["nodejs_compat"],
-        vars: {
-          PUBLIC_ORIGIN: process.env.CONFIG_ORIGIN,
-          TRUSTED_PROXIES: ""
-        },
         assets: {
           directory: `${process.env.ROOT_PATH}/apps/dashboard/dist`,
           binding: "ASSETS",
@@ -238,7 +234,7 @@ smoke_http() {
 if [[ "$MODE" == local ]]; then
   PORT="$(bun -e 'const server=Bun.listen({hostname:"127.0.0.1",port:0,socket:{data(){}}});console.log(server.port);server.stop()')"
   ORIGIN="http://localhost:$PORT"
-  write_config "oh-my-emby-local-smoke" "$ORIGIN" 1
+  write_config "oh-my-emby-local-smoke" 1
   mkdir -p "$STATE_DIR"
   CI=1 "$WRANGLER" --cwd "$SERVER_DIR" d1 migrations apply DB --local --persist-to "$STATE_DIR" --config "$CONFIG"
   "$WRANGLER" --cwd "$SERVER_DIR" dev --local --ip 127.0.0.1 --port "$PORT" --persist-to "$STATE_DIR" --config "$CONFIG" --log-level warn --show-interactive-dev-session=false >"$LOG" 2>&1 &
@@ -260,7 +256,7 @@ if [[ "$MODE" == local ]]; then
   exit 0
 fi
 
-write_config "$REMOTE_WORKER" "https://invalid.example" 0
+write_config "$REMOTE_WORKER" 0
 PREFLIGHT_STATUS="$(curl --silent --show-error --output "$TEMP_DIR/worker-preflight.json" --write-out '%{http_code}' \
   --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
   "$API_BASE_URL/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/$REMOTE_WORKER")" || {
@@ -361,10 +357,10 @@ if ! OWNERSHIP_STATUS="$OWNERSHIP_STATUS" OWNERSHIP_BODY="$TEMP_DIR/ownership.js
 fi
 REMOTE_WORKER_CLEANUP_ELIGIBLE=1
 
-CONFIG_PATH="$CONFIG" REMOTE_ORIGIN="$ORIGIN" ROOT_PATH="$ROOT" bun -e '
+CONFIG_PATH="$CONFIG" ROOT_PATH="$ROOT" bun -e '
   const config = await Bun.file(process.env.CONFIG_PATH).json()
   config.main = `${process.env.ROOT_PATH}/apps/server/src/platform/workers/index.ts`
-  config.vars = { PUBLIC_ORIGIN: process.env.REMOTE_ORIGIN, TRUSTED_PROXIES: "" }
+  delete config.vars
   config.assets = {
     directory: `${process.env.ROOT_PATH}/apps/dashboard/dist`,
     binding: "ASSETS",

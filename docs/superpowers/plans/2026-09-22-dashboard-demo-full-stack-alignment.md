@@ -637,8 +637,7 @@ Use an isolated temporary data directory and the existing Vite proxy:
 
 ```bash
 demo_data_dir="$(mktemp -d)"
-PUBLIC_ORIGIN=http://127.0.0.1:5173 TRUSTED_PROXIES=127.0.0.1 \
-  HOST=127.0.0.1 PORT=3000 DATA_DIR="$demo_data_dir" \
+HOST=127.0.0.1 PORT=3000 DATA_DIR="$demo_data_dir" \
   MIGRATIONS_DIR=apps/server/migrations ASSETS_DIR=apps/dashboard/dist \
   bun apps/server/src/platform/bun/index.ts
 cd apps/dashboard && bun run dev

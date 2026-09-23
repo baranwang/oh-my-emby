@@ -28,15 +28,11 @@ import { serveDashboardAsset } from "./assets.js"
 import { makeWorkersResourceCache, type WorkersCacheBinding } from "./cache.js"
 import { makeD1RepositoriesLayer } from "./d1-repositories.js"
 
-export const parseTrustedProxyAddresses = (value: string): ReadonlyArray<string> =>
-  value.split(",").map((address) => address.trim()).filter((address) => address !== "")
-
 const loopbackHostnames = new Set(["localhost", "127.0.0.1", "[::1]", "::1"])
 const resourceCacheName = "oh-my-emby-resources"
 
-const requestRemoteAddress = (request: Request, publicOrigin: string): Option.Option<string> => {
-  const publicHostname = new URL(publicOrigin).hostname.toLowerCase()
-  if (loopbackHostnames.has(publicHostname)) return Option.some("127.0.0.1")
+const requestRemoteAddress = (request: Request): Option.Option<string> => {
+  if (loopbackHostnames.has(new URL(request.url).hostname.toLowerCase())) return Option.some("127.0.0.1")
   const connectedAddress = request.headers.get("cf-connecting-ip")?.trim()
   return connectedAddress === undefined || connectedAddress === ""
     ? Option.none()
@@ -91,13 +87,9 @@ const makeWorkersRuntimeLayer = (
 ) => {
   const core = makeWorkersCoreLayer(env, dependencies)
   const cache = Layer.succeed(ResourceCache, ResourceCache.of(makeWorkersResourceCache(workersCache)))
-  const dashboardConfig = {
-    publicOrigin: env.PUBLIC_ORIGIN,
-    trustedProxyAddresses: parseTrustedProxyAddresses(env.TRUSTED_PROXIES)
-  }
   const dashboard = Layer.merge(
-    makeDashboardAuthLayers(dashboardConfig),
-    makeDashboardControlPlaneLayers(dashboardConfig)
+    makeDashboardAuthLayers(),
+    makeDashboardControlPlaneLayers()
   ).pipe(Layer.provide(core))
   return Layer.mergeAll(core, cache, dashboard, HttpServer.layerServices)
 }
@@ -126,7 +118,7 @@ export const runWorkerRequest = async (
     const playback = yield* Playback
     const resourceCache = yield* ResourceCache
     const dashboardRequest = HttpServerRequest.fromWeb(request).modify({
-      remoteAddress: requestRemoteAddress(request, env.PUBLIC_ORIGIN)
+      remoteAddress: requestRemoteAddress(request)
     })
     const services = ApplicationServices.of({
       handleDashboard: () => toDashboardWebResponse(dashboardHandler, request, dashboardRequest),
