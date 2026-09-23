@@ -248,7 +248,7 @@ Each upstream request is made through one shared upstream-client service. It own
 
 Headers are allowlisted. Arbitrary inbound client headers are not blindly forwarded to upstream servers.
 
-Authenticated control requests use manual redirect handling with at most three hops. Every hop revalidates `http:`/`https:`, destination policy, and downgrade rules. Credentials and application identity headers are never forwarded across origins. Control requests stay on the configured origin; separately configured or previously validated resource/CDN destinations may receive credential-free media, image, or subtitle requests. Connection tests follow the same policy.
+Authenticated control requests use manual redirect handling with at most three hops. Every hop revalidates `http:`/`https:`, destination policy, and downgrade rules. Requests start at an administrator-saved endpoint and control redirects stay on that endpoint's exact origin; a cross-origin redirect is rejected before another server-side request. Credentials and application identity headers are never forwarded across origins. Client-side video redirects may target a different HTTP or HTTPS media origin because oh-my-emby does not fetch the redirected video. Server-side image and subtitle fetching stays closed until a transport can validate the connected destination on every hop. Connection tests follow the same policy.
 
 Public image and subtitle endpoints accept only registered source/version/resource identifiers, never a caller-provided URL. Docker's intentional ability to contact administrator-configured LAN upstreams does not grant arbitrary URLs returned by those upstreams access to unrelated private destinations.
 
@@ -301,11 +301,11 @@ Images use a conditional strategy:
 - proxy through oh-my-emby when upstream authorization/header requirements or network reachability require it;
 - cache proxied image responses within bounded storage and response-cache policies.
 
-Image requests resolve registered source/resource IDs and authenticate before cache access. Proxy responses allowlist MIME types, count bytes, enforce deadlines, strip unsafe headers, and keep the upstream Effect scope alive until stream completion or cancellation. Cached payloads use a bounded platform cache rather than unbounded D1 blobs. Image proxy failures return an image-route error and do not affect video playback.
+Image requests resolve registered source/resource IDs and authenticate before cache access. The proxy branch is unavailable until a transport can validate the connected destination on every hop; it fails closed rather than accepting a global resource-origin allowlist. When available, proxy responses allowlist MIME types, count bytes, enforce deadlines, strip unsafe headers, and keep the upstream Effect scope alive until stream completion or cancellation. Cached payloads use a bounded platform cache rather than unbounded D1 blobs. Image proxy failures return an image-route error and do not affect video playback.
 
 ### Subtitles
 
-Subtitle payloads may be proxied because they are bounded auxiliary resources and clients often need stable virtual-server URLs. Direct redirect remains allowed when the upstream URL is independently usable; otherwise the conservative default is proxying rather than guessing the client's network reachability. Subtitle identity includes the selected virtual media source and upstream stream index. Proxying applies format/MIME, byte, deadline, and header limits and must not buffer unbounded payloads. The MVP supports pass-through text and supported external subtitle formats only; it does not burn in, extract, or transform embedded/bitmap subtitles.
+Subtitle payloads may be proxied because they are bounded auxiliary resources and clients often need stable virtual-server URLs. Direct redirect remains allowed when the upstream URL is independently usable; otherwise the request fails closed until a peer-validating proxy transport exists. Subtitle identity includes the selected virtual media source and upstream stream index. When available, proxying applies format/MIME, byte, deadline, and header limits and must not buffer unbounded payloads. The MVP supports pass-through text and supported external subtitle formats only; it does not burn in, extract, or transform embedded/bitmap subtitles.
 
 ## Local identity and authentication
 
@@ -323,6 +323,8 @@ The user explicitly accepted first-visitor setup with no setup secret. Therefore
 The database enforces a singleton user and performs first claim atomically. Committing the account marks the instance initialized; failure while configuring the first upstream leaves an authenticated instance with zero upstreams and a resumable setup flow, never a newly claimable instance.
 
 The user row carries an authentication generation. Login verifies and conditionally issues a token/session against that generation, while password change increments it and revokes both token families in the same transaction. This fences a concurrent login that began with the old password. Login and setup attempts are rate-limited, and PBKDF2 parameters are measured for both Workers and Bun before release.
+
+Dashboard writes require a valid `Origin` whose host and port match the request's `Host`; missing, malformed, or mismatched origins are rejected. Public access requires HTTPS, with HTTP allowed only for localhost development. Safe reads need no `Origin`. The browser sends `Host` automatically, so no public-origin deployment setting is needed. Authentication and host-only `HttpOnly`, `Secure`, `SameSite=Lax` session cookies remain mandatory. The application ignores `X-Forwarded-*` headers; login and setup limits use the actual Bun connection address or Cloudflare's platform-provided client address, never a caller-supplied forwarded IP.
 
 ## Data model
 
@@ -403,11 +405,11 @@ The Worker handles application routes before Dashboard fallback so unknown API o
 
 The Docker image contains the Bun server and prebuilt Dashboard assets. It runs one process and persists SQLite in one mounted data directory.
 
-Docker supports the same public HTTPS upstream baseline and additionally permits administrator-configured LAN/private-network upstream hostnames or addresses. This is intentional for self-hosting and means the sole administrator is trusted to configure upstream destinations.
+Docker supports the same public HTTPS upstream baseline and additionally permits any HTTP or HTTPS upstream hostname or address saved by the authenticated administrator, including LAN, IP-literal, and loopback endpoints. Saving that exact endpoint authorizes access to it; no second private-host allowlist is required. Workers retain their public-hostname and IP-literal restrictions and cannot reach the operator's private LAN.
 
 The image includes a health check but no bundled reverse proxy. Production Dashboard access requires an externally reachable HTTPS origin so its mandatory `Secure` cookie works. TLS termination is supplied by the operator's existing Caddy, Traefik, nginx, or platform ingress; plain HTTP is limited to an explicit localhost development mode.
 
-The deployment config declares one public origin and an explicit trusted-proxy policy. Origin validation and secure-request detection never trust arbitrary forwarded headers. A Bun process-owned timer invokes `runMaintenance`; retry correctness remains database-backed and survives process restart.
+Neither deployment requires `PUBLIC_ORIGIN`, `TRUSTED_PROXIES`, `PRIVATE_UPSTREAM_HOSTS`, or `REGISTERED_RESOURCE_ORIGINS`; existing values are ignored after upgrade. The reverse proxy must preserve the public `Host`, and the application does not trust forwarded headers. Client-facing endpoints are derived from the browser's current origin. A Bun process-owned timer invokes `runMaintenance`; retry correctness remains database-backed and survives process restart.
 
 ## Dashboard
 

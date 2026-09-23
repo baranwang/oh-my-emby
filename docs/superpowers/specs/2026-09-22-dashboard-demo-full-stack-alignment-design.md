@@ -248,7 +248,7 @@ System uses lightweight sections separated by shadcn Separator rather than large
 
 Each metadata-provider row shows the provider name with “Configured” / “Not configured” and enabled state beside it, a right-aligned Settings/Edit action, then ordering controls at the far end. TMDB and Trakt open provider-specific drawers. Upstream Server is shown as the fixed final fallback and has no reorder or credential action.
 
-Outbox details remain available but are collapsed behind the synchronization-status row and become prominent only when failed or uncertain entries exist. Runtime counters remain accessible without dominating the page. The client endpoint is copyable and derived from the configured public origin.
+Outbox details remain available but are collapsed behind the synchronization-status row and become prominent only when failed or uncertain entries exist. Runtime counters remain accessible without dominating the page. The client endpoint is copyable and derived from the browser's current origin.
 
 TMDB settings expose Read Access Token and language. Trakt settings expose Client ID. Language and appearance use shadcn Select controls in Preferences.
 
