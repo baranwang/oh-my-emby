@@ -37,12 +37,14 @@
 ### Task 1: Shared contracts for endpoints, UA policy, and metadata settings
 
 **Files:**
+
 - Modify: `packages/contracts/src/schemas.ts`
 - Modify: `packages/contracts/src/dashboard.ts`
 - Modify: `packages/contracts/src/index.ts`
 - Modify: `packages/contracts/test/dashboard.test.ts`
 
 **Interfaces:**
+
 - Produces: `ServerEndpointInput`, `ServerEndpointView`, `UserAgentPolicy`, revised `ServerInput`, revised `ServerView`, revised `ConnectionTestView`, `MetadataProviderSettingsInput`, and `MetadataProviderSettingsView`.
 - Produces: Dashboard API methods `getMetadataSettings` and `updateMetadataSettings` under the `system` group.
 
@@ -51,19 +53,29 @@
 Add table-driven tests proving HTTP/HTTPS-only endpoints, port range `1..65535`, normalized path requirements, non-empty endpoint arrays, and these UA invariants:
 
 ```ts
-const fixed = { userAgentPolicy: "fixed", userAgent: "SenPlayer/3.2.1" }
-const preferred = { userAgentPolicy: "client-preferred", userAgent: null }
-const passthrough = { userAgentPolicy: "passthrough", userAgent: null }
+const fixed = { userAgentPolicy: "fixed", userAgent: "SenPlayer/3.2.1" };
+const preferred = { userAgentPolicy: "client-preferred", userAgent: null };
+const passthrough = { userAgentPolicy: "passthrough", userAgent: null };
 
-await expect(Schema.decodeUnknownPromise(ServerInput)({ ...base, endpoints: [] })).rejects.toBeDefined()
-await expect(Schema.decodeUnknownPromise(ServerInput)({ ...base, ...fixed })).resolves.toBeDefined()
-await expect(Schema.decodeUnknownPromise(ServerInput)({ ...base, ...preferred })).resolves.toBeDefined()
-await expect(Schema.decodeUnknownPromise(ServerInput)({ ...base, ...passthrough })).resolves.toBeDefined()
-await expect(Schema.decodeUnknownPromise(ServerInput)({
-  ...base,
-  userAgentPolicy: "fixed",
-  userAgent: null
-})).rejects.toBeDefined()
+await expect(
+  Schema.decodeUnknownPromise(ServerInput)({ ...base, endpoints: [] }),
+).rejects.toBeDefined();
+await expect(
+  Schema.decodeUnknownPromise(ServerInput)({ ...base, ...fixed }),
+).resolves.toBeDefined();
+await expect(
+  Schema.decodeUnknownPromise(ServerInput)({ ...base, ...preferred }),
+).resolves.toBeDefined();
+await expect(
+  Schema.decodeUnknownPromise(ServerInput)({ ...base, ...passthrough }),
+).resolves.toBeDefined();
+await expect(
+  Schema.decodeUnknownPromise(ServerInput)({
+    ...base,
+    userAgentPolicy: "fixed",
+    userAgent: null,
+  }),
+).rejects.toBeDefined();
 ```
 
 Test provider ordering with exactly one `tmdb` and one `trakt`, and assert encoded views contain `hasCredential` but no credential value.
@@ -79,17 +91,17 @@ Expected: FAIL because the new schemas and API methods do not exist.
 Use these exact discriminants and fields:
 
 ```ts
-export const UserAgentPolicy = Schema.Literals(["fixed", "client-preferred", "passthrough"])
-export const MetadataProviderId = Schema.Literals(["tmdb", "trakt"])
-export const MetadataProviderStatus = Schema.Literals(["unconfigured", "ready", "degraded"])
+export const UserAgentPolicy = Schema.Literals(["fixed", "client-preferred", "passthrough"]);
+export const MetadataProviderId = Schema.Literals(["tmdb", "trakt"]);
+export const MetadataProviderStatus = Schema.Literals(["unconfigured", "ready", "degraded"]);
 
 export const ServerEndpointInput = Schema.Struct({
   id: Schema.optional(Schema.NonEmptyString),
   protocol: Schema.Literals(["http", "https"]),
   host: Schema.NonEmptyString,
   port: Schema.NullOr(Schema.Int),
-  path: Schema.String
-})
+  path: Schema.String,
+});
 ```
 
 Implement the UA cross-field rule with one schema filter/refinement. `MetadataProviderSettingsInput` is an ordered two-element array of provider entries with `credential: SecretPatch`; the view uses `hasCredential` and `status` instead. Extend `ConnectionTestView` with ordered per-endpoint `{ endpointId, reachable, catalogId, health }` results and one aggregate `catalogId`.
@@ -110,6 +122,7 @@ git commit -m "feat: define endpoint and metadata contracts"
 ### Task 2: Cross-platform endpoint and metadata persistence
 
 **Files:**
+
 - Modify: `apps/server/migrations/0001_initial.sql`
 - Create: `apps/server/migrations/0002_dashboard_alignment.sql`
 - Modify: `apps/server/src/core/model.ts`
@@ -122,6 +135,7 @@ git commit -m "feat: define endpoint and metadata contracts"
 - Modify: `apps/server/test/cross-platform-contract.ts`
 
 **Interfaces:**
+
 - Consumes: Task 1 contract types.
 - Produces: `UpstreamEndpoint`, endpoint-bearing `UpstreamServer`/`EligibleSource`, `MetadataProviderSetting`, and `ExternalMetadataCacheEntry`.
 - Produces repository methods `readMetadataSettings`, `writeMetadataSettings`, `readExternalMetadata`, and `writeExternalMetadata` plus transactional endpoint-aware server writes.
@@ -131,10 +145,12 @@ git commit -m "feat: define endpoint and metadata contracts"
 Add a legacy-schema fixture with one `upstream_servers.base_url`, apply `0002_dashboard_alignment.sql`, then assert one order-zero endpoint with the same server ID and URL parts. Extend the shared repository contract to create, read, reorder, and delete endpoints atomically and round-trip provider settings without returning credentials through views.
 
 ```ts
-expect(server.endpoints.map(({ protocol, host, port, path }) => ({ protocol, host, port, path }))).toEqual([
+expect(
+  server.endpoints.map(({ protocol, host, port, path }) => ({ protocol, host, port, path })),
+).toEqual([
   { protocol: "https", host: "emby.example.com", port: 8443, path: "/emby" },
-  { protocol: "http", host: "192.168.1.10", port: 8096, path: "" }
-])
+  { protocol: "http", host: "192.168.1.10", port: 8096, path: "" },
+]);
 ```
 
 - [ ] **Step 2: Run focused repository tests and verify failure**
@@ -212,6 +228,7 @@ git commit -m "feat: persist ordered endpoints and metadata settings"
 ### Task 3: Centralized endpoint failover and User-Agent resolution
 
 **Files:**
+
 - Modify: `apps/server/src/core/upstream-client.ts`
 - Modify: `apps/server/src/core/server-service.ts`
 - Modify: `apps/server/src/core/federation.ts`
@@ -224,6 +241,7 @@ git commit -m "feat: persist ordered endpoints and metadata settings"
 - Modify: `apps/server/test/playback.test.ts`
 
 **Interfaces:**
+
 - Consumes: endpoint-bearing server records from Task 2.
 - Produces: `effectiveUserAgent(server, clientUserAgent)` and `endpointUrl(endpoint)` pure helpers.
 - Produces: `UpstreamRequest.clientUserAgent?: string`; request callers pass the inbound Emby UA, while maintenance/outbox omit it.
@@ -233,11 +251,11 @@ git commit -m "feat: persist ordered endpoints and metadata settings"
 Cover the exact policy matrix:
 
 ```ts
-expect(effectiveUserAgent(fixedServer, "Client/1")).toBe("Configured/1")
-expect(effectiveUserAgent(preferredServer, "Client/1")).toBe("Client/1")
-expect(effectiveUserAgent(preferredServer, undefined)).toBe("Fallback/1")
-expect(effectiveUserAgent(passthroughServer, "Client/1")).toBe("Client/1")
-expect(effectiveUserAgent(passthroughServer, undefined)).toBe("oh-my-emby/0.0.0")
+expect(effectiveUserAgent(fixedServer, "Client/1")).toBe("Configured/1");
+expect(effectiveUserAgent(preferredServer, "Client/1")).toBe("Client/1");
+expect(effectiveUserAgent(preferredServer, undefined)).toBe("Fallback/1");
+expect(effectiveUserAgent(passthroughServer, "Client/1")).toBe("Client/1");
+expect(effectiveUserAgent(passthroughServer, undefined)).toBe("oh-my-emby/0.0.0");
 ```
 
 Use a deterministic fake fetch to prove GET failover order on transport failure and 503, no failover on 401/404/catalog mismatch, and no second endpoint call after a POST timeout. Assert connection testing marks only same-catalog endpoints eligible and returns ordered endpoint results.
@@ -274,6 +292,7 @@ git commit -m "feat: add endpoint failover and UA policies"
 ### Task 4: Metadata settings service and Dashboard API
 
 **Files:**
+
 - Create: `apps/server/src/core/metadata-settings.ts`
 - Modify: `apps/server/src/api/dashboard.ts`
 - Modify: `apps/server/src/platform/bun/index.ts`
@@ -282,6 +301,7 @@ git commit -m "feat: add endpoint failover and UA policies"
 - Modify: `apps/server/test/dashboard-auth.test.ts`
 
 **Interfaces:**
+
 - Consumes: Task 1 metadata contracts and Task 2 repository methods.
 - Produces: `MetadataSettings` Effect service with `get()` and `update(input)`.
 
@@ -302,11 +322,14 @@ Use one update transaction for both providers. Reject duplicate/missing provider
 ```ts
 const applySecret = (current: string | null, patch: SecretPatch): string | null => {
   switch (patch._tag) {
-    case "Preserve": return current
-    case "Set": return patch.value
-    case "Clear": return null
+    case "Preserve":
+      return current;
+    case "Set":
+      return patch.value;
+    case "Clear":
+      return null;
   }
-}
+};
 ```
 
 Status is `unconfigured` when enabled without a credential, `ready` after a valid saved credential until a provider failure is recorded, and `degraded` after a typed provider failure.
@@ -331,6 +354,7 @@ git commit -m "feat: expose metadata provider settings"
 ### Task 5: TMDB/Trakt enrichment and external artwork delivery
 
 **Files:**
+
 - Create: `apps/server/src/core/metadata-providers.ts`
 - Modify: `apps/server/src/core/federation.ts`
 - Modify: `apps/server/src/core/playback.ts`
@@ -341,6 +365,7 @@ git commit -m "feat: expose metadata provider settings"
 - Modify: `apps/server/test/resources.test.ts`
 
 **Interfaces:**
+
 - Consumes: provider settings/cache from Tasks 2 and 4.
 - Produces: `MetadataProviders` service with `refresh(record)`, `overlayCached(record)`, and `resolveCachedImage(record, imageType, imageIndex)`.
 - Produces normalized payload `{ Name?, Overview?, ExternalImages?: { Primary?: string; Backdrop?: string[] } }`.
@@ -387,6 +412,7 @@ git commit -m "feat: enrich metadata with TMDB and Trakt"
 ### Task 6: Production shadcn foundation, shell, and actionable Overview
 
 **Files:**
+
 - Modify through CLI: `apps/dashboard/src/components/ui/*`
 - Modify: `apps/dashboard/src/components/app-shell/app-shell.tsx`
 - Create: `apps/dashboard/src/modules/overview/overview-page.tsx`
@@ -397,6 +423,7 @@ git commit -m "feat: enrich metadata with TMDB and Trakt"
 - Modify: `apps/dashboard/test/i18n.test.ts`
 
 **Interfaces:**
+
 - Consumes: existing servers, libraries, system, outbox Query options.
 - Produces: shared generated primitives and `OverviewPage` derived only from Query data.
 
@@ -441,6 +468,7 @@ git commit -m "feat: align dashboard shell and overview"
 ### Task 7: Server cards and route-controlled editor Drawer
 
 **Files:**
+
 - Modify: `apps/dashboard/src/modules/servers/components/server-list.tsx`
 - Modify: `apps/dashboard/src/modules/servers/components/server-form.tsx`
 - Modify: `apps/dashboard/src/modules/servers/components/server-detail.tsx`
@@ -456,6 +484,7 @@ git commit -m "feat: align dashboard shell and overview"
 - Create: `apps/dashboard/test/server-drawer.test.tsx`
 
 **Interfaces:**
+
 - Consumes: Task 1 server contracts and Task 6 generated primitives.
 - Produces: one list page that owns create/edit Drawer state through route search and `$id`.
 
@@ -475,7 +504,7 @@ Expected: FAIL against the old single-URL form and detail page.
 
 Use generated `Card` without restyling its structural border, and keep the add-server control the same card height as server cards. Use right-side inset `DrawerContent` with no swipe handle. The page heading is “Servers” / “服务器”.
 
-Render each endpoint as a readable Input Group with Select protocol, host input, optional port input, and path input; wrap into labeled controls on narrow screens. Use `Field` choice cards plus `RadioGroup` for UA policy. Keep connection test separate from save and render ordered per-endpoint results.
+Render each endpoint as a readable Input Group with Select protocol, host input, optional port input, and path input; wrap into labeled controls on narrow screens. Use `Field` choice cards plus `RadioGroup` for UA policy. Keep the manual connection test as a separate diagnostic action and render ordered per-endpoint results. Saving an enabled server also automatically tests its connections and fetches source libraries; retain saved configuration and show a footer error if discovery fails, with retries updating the saved server rather than creating a duplicate.
 
 - [ ] **Step 4: Update Query mutations and narrow invalidation**
 
@@ -499,6 +528,7 @@ git commit -m "feat: add server drawer and multi-line editor"
 ### Task 8: Virtual-library Drawer and lightweight System settings
 
 **Files:**
+
 - Modify: `apps/dashboard/src/modules/libraries/components/library-list.tsx`
 - Modify: `apps/dashboard/src/modules/libraries/components/library-form.tsx`
 - Modify: `apps/dashboard/src/modules/libraries/components/library-detail.tsx`
@@ -518,6 +548,7 @@ git commit -m "feat: add server drawer and multi-line editor"
 - Create: `apps/dashboard/test/system-settings.test.tsx`
 
 **Interfaces:**
+
 - Consumes: metadata Dashboard API from Task 4 and primitives from Task 6.
 - Produces: `metadataSettingsQueryOptions`, update mutation, provider editor drawers, preferences section, and list-backed library editor Drawer.
 
@@ -559,6 +590,7 @@ git commit -m "feat: align library and system interactions"
 ### Task 9: Cross-platform acceptance and bounded visual QA
 
 **Files:**
+
 - Modify: `apps/server/test/cross-platform-contract.ts`
 - Modify: `apps/server/test/cross-platform.test.ts`
 - Modify: `apps/server/test/workers-routing.test.ts`
@@ -566,6 +598,7 @@ git commit -m "feat: align library and system interactions"
 - Modify if defects are found: files touched by Tasks 1–8 only
 
 **Interfaces:**
+
 - Consumes: all prior task interfaces.
 - Produces: one cross-runtime acceptance scenario and final browser evidence for the approved desktop/mobile surfaces.
 

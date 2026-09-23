@@ -107,7 +107,7 @@ const ServerEndpointsInput = Schema.Array(ServerEndpointInput).check(
 );
 
 export const ServerInput = Schema.Struct({
-  name: Schema.NonEmptyString,
+  name: Schema.optional(Schema.String),
   endpoints: ServerEndpointsInput,
   username: Schema.NonEmptyString,
   password: SecretPatch,

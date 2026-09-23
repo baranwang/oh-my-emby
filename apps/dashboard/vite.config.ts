@@ -1,8 +1,8 @@
-import tailwindcss from "@tailwindcss/vite"
-import react from "@vitejs/plugin-react"
-import { paraglideVitePlugin } from "@inlang/paraglide-js"
-import { tanstackRouter } from "@tanstack/router-plugin/vite"
-import { defineConfig } from "vitest/config"
+import tailwindcss from "@tailwindcss/vite";
+import react from "@vitejs/plugin-react";
+import { paraglideVitePlugin } from "@inlang/paraglide-js";
+import { tanstackRouter } from "@tanstack/router-plugin/vite";
+import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   base: "/dashboard/",
@@ -12,9 +12,9 @@ export default defineConfig({
     proxy: {
       "/api": {
         target: "http://127.0.0.1:3000",
-        xfwd: true
-      }
-    }
+        xfwd: true,
+      },
+    },
   },
   plugins: [
     tanstackRouter({ target: "react", autoCodeSplitting: true }),
@@ -22,17 +22,15 @@ export default defineConfig({
       project: "./project.inlang",
       outdir: "./src/paraglide",
       emitTsDeclarations: true,
-      strategy: ["localStorage", "preferredLanguage", "baseLocale"]
+      strategy: ["localStorage", "preferredLanguage", "baseLocale"],
     }),
     react(),
-    tailwindcss()
+    tailwindcss(),
   ],
   resolve: {
-    alias: {
-      "@": new URL("./src", import.meta.url).pathname
-    }
+    tsconfigPaths: true,
   },
   test: {
-    environment: "jsdom"
-  }
-})
+    environment: "jsdom",
+  },
+});

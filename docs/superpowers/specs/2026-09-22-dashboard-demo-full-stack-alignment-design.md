@@ -58,24 +58,24 @@ No generic plugin system is introduced. TMDB and Trakt are the only external pro
 
 ```ts
 type ServerEndpointInput = {
-  id?: string
-  protocol: "http" | "https"
-  host: string
-  port: number | null
-  path: string
-}
+  id?: string;
+  protocol: "http" | "https";
+  host: string;
+  port: number | null;
+  path: string;
+};
 
-type UserAgentPolicy = "fixed" | "client-preferred" | "passthrough"
+type UserAgentPolicy = "fixed" | "client-preferred" | "passthrough";
 
 type ServerInput = {
-  name: string
-  endpoints: ServerEndpointInput[]
-  username: string
-  password: SecretPatch
-  userAgentPolicy: UserAgentPolicy
-  userAgent: string | null
-  enabled: boolean
-}
+  name: string;
+  endpoints: ServerEndpointInput[];
+  username: string;
+  password: SecretPatch;
+  userAgentPolicy: UserAgentPolicy;
+  userAgent: string | null;
+  enabled: boolean;
+};
 ```
 
 `ServerView` returns ordered endpoints with stable IDs, normalized display URLs, endpoint health, and last-success timestamps. It continues to expose only `hasPassword`; credentials and access tokens never appear in a response.
@@ -132,11 +132,11 @@ One shared upstream-client function resolves the effective User-Agent for every 
 
 The three policies are:
 
-| Policy | Request with inbound client UA | Background request |
-| --- | --- | --- |
-| `fixed` | configured `userAgent` | configured `userAgent` |
-| `client-preferred` | inbound client UA | configured fallback `userAgent`, or product default when empty |
-| `passthrough` | inbound client UA | `oh-my-emby/<version>` |
+| Policy             | Request with inbound client UA | Background request                                             |
+| ------------------ | ------------------------------ | -------------------------------------------------------------- |
+| `fixed`            | configured `userAgent`         | configured `userAgent`                                         |
+| `client-preferred` | inbound client UA              | configured fallback `userAgent`, or product default when empty |
+| `passthrough`      | inbound client UA              | `oh-my-emby/<version>`                                         |
 
 `fixed` requires a non-empty configured value. `client-preferred` accepts an optional fallback. `passthrough` stores no custom value. The server validates these invariants; the form conditionally exposes the value field without weakening server validation.
 
@@ -276,11 +276,13 @@ No optimistic configuration writes are introduced.
 
 ## Error handling
 
-Server forms preserve unsaved values when a connection test, save, or provider call fails. Field validation errors attach to their controls; identity mismatch and endpoint-specific failures identify the affected endpoint row. Saving an intentionally offline endpoint remains allowed, but unverified endpoints are clearly ineligible.
+Saving an enabled server through the Dashboard persists its configuration, automatically tests its connections and catalog identity, then fetches its source-library list through the existing server query. Disabled servers are saved without contacting the upstream. Discovery does not create virtual libraries. The manual connection-test action remains available for diagnostics.
+
+Server forms preserve unsaved values when a connection test, save, or provider call fails. Field validation errors attach to their controls; identity mismatch and endpoint-specific failures identify the affected endpoint row. Saving an intentionally offline endpoint remains allowed, but unverified endpoints are clearly ineligible. If automatic connection testing or source-library discovery fails after a successful save, the configuration remains saved, the Drawer stays open with an explicit saved-but-discovery-failed message in its footer, and retrying updates the saved server instead of creating a duplicate.
 
 Provider settings distinguish missing credentials, disabled state, rejected credentials, timeout/rate limit, and provider outage. The client sees typed, secret-safe errors. External-provider failure never suppresses usable upstream metadata.
 
-Drawer close after a successful save returns to the collection URL. Failed saves keep the drawer and focus the error summary or first invalid control. Direct navigation to a missing server or library ID shows the existing typed not-found state and offers a return to the collection.
+Drawer close after a successful save and automatic discovery returns to the collection URL. Failed saves or discovery attempts keep the drawer and focus the error summary or first invalid control. Direct navigation to a missing server or library ID shows the existing typed not-found state and offers a return to the collection.
 
 ## Deployment parity
 

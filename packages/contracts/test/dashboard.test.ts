@@ -18,6 +18,28 @@ const baseServer = {
 };
 
 describe("Dashboard contracts", () => {
+  it.each([undefined, "", "   "])("accepts an optional server name: %j", async (name) => {
+    await expect(
+      Schema.decodeUnknownPromise(ServerInput)({
+        ...baseServer,
+        name,
+        userAgentPolicy: "client-preferred",
+        userAgent: null,
+      }),
+    ).resolves.toBeDefined();
+  });
+
+  it.each([null, 123])("rejects a non-string server name: %j", async (name) => {
+    await expect(
+      Schema.decodeUnknownPromise(ServerInput)({
+        ...baseServer,
+        name,
+        userAgentPolicy: "client-preferred",
+        userAgent: null,
+      }),
+    ).rejects.toBeDefined();
+  });
+
   it("registers metadata settings under the system API group", () => {
     const endpoints = DashboardApi.groups.system.endpoints;
     expect(endpoints.getMetadataSettings.path).toBe("/api/dashboard/metadata-settings");
