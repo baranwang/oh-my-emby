@@ -1,0 +1,771 @@
+import { Effect } from "effect";
+import { describe, expect, it } from "vitest";
+
+import { makeEmbyHandler, type EmbyServices } from "../src/api/emby.js";
+import type { CanonicalItemView, FederatedQuery } from "../src/core/federation.js";
+
+const principal = {
+  id: "token-id",
+  username: "owner",
+  authGeneration: 1,
+  deviceId: "sen-device",
+  deviceName: "SenPlayer",
+};
+
+const item = (
+  id: string,
+  type = "Movie",
+  extra: Partial<CanonicalItemView> = {},
+): CanonicalItemView => ({
+  id,
+  itemType: type,
+  displayMetadata: {
+    Name: `${type} ${id}`,
+    Path: "file:///srv/private/private-token/movie.mkv",
+    SeriesId: "upstream-series-id",
+    SeasonId: "upstream-season-id",
+    SecretEnvelope: {
+      ServerId: "upstream-server-id",
+      Path: "/srv/private/private-token/movie.mkv",
+      Token: "private-token",
+    },
+    UserData: { IsFavorite: false, Played: true },
+    MediaSources: [{ Id: "untrusted-upstream-version" }],
+  },
+  mediaVersions: [
+    {
+      id: `version-${id}`,
+      sourceItemId: `source-${id}`,
+      serverGeneration: 1,
+      upstreamMediaSourceId: `upstream-${id}`,
+      label: "Server A · 1080p",
+      capabilities: {
+        Id: "upstream-id",
+        Container: "mkv",
+        RunTimeTicks: 10_000,
+        Path: "https://upstream.example/video?api_key=private-token",
+        DirectStreamUrl: "/Videos/upstream-id/stream?api_key=private-token",
+      },
+      streams: [
+        {
+          Index: 0,
+          Type: "Video",
+          Codec: "h264",
+          Path: "/srv/private/private-token/movie.mkv",
+          Url: "https://upstream.example/stream?token=private-token",
+          Token: "private-token",
+          Server: { Id: "upstream-server-id", Token: "private-token" },
+        },
+      ],
+      updatedAtMs: 1_000,
+    },
+  ],
+  userState: {
+    canonicalId: id,
+    revision: 3,
+    played: false,
+    favorite: true,
+    playCount: 2,
+    positionTicks: 42,
+    lastPlayedVersionId: `version-${id}`,
+    updatedAtMs: 1_000,
+  },
+  incompleteSourceIds: [],
+  ...extra,
+});
+
+const services = (overrides: Partial<EmbyServices> = {}): EmbyServices => ({
+  config: { serverId: "virtual-server", serverName: "Oh My Emby", version: "0.0.0" },
+  now: () => 1_234,
+  auth: {
+    loginEmby: () => Effect.die("unused"),
+    authenticateEmby: () => Effect.succeed(principal),
+  },
+  federation: {
+    list: () =>
+      Effect.succeed({
+        items: [item("movie-1")],
+        totalRecordCount: 1,
+        exhausted: true,
+        incompleteSourceIds: [],
+      }),
+    search: () =>
+      Effect.succeed({ items: [], totalRecordCount: 0, exhausted: true, incompleteSourceIds: [] }),
+    studios: () =>
+      Effect.succeed({ items: [], totalRecordCount: 0, exhausted: true, incompleteSourceIds: [] }),
+    detail: (id) => Effect.succeed(item(id)),
+    lookupMembership: (id, versionId) => {
+      const value = item(id);
+      const version =
+        versionId === undefined
+          ? null
+          : (value.mediaVersions.find(({ id }) => id === versionId) ?? null);
+      return Effect.succeed(
+        versionId !== undefined && version === null ? null : { item: value, version },
+      );
+    },
+  },
+  userState: {
+    write: () => Effect.die("unused"),
+    recordPlaybackEvent: () => Effect.die("unused"),
+  },
+  libraries: {
+    list: () =>
+      Effect.succeed([
+        {
+          id: "library-1" as any,
+          name: "Movies",
+          mediaType: "movies",
+          enabled: true,
+          sources: [],
+        },
+      ]),
+  },
+  playback: {
+    getInfo: () =>
+      Effect.succeed({ playSessionId: "play-session", mediaSources: [{ Id: "version-movie-1" }] }),
+  },
+  ...overrides,
+});
+
+const get = (path: string, token = "token") =>
+  new Request(`https://local${path}`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+
+describe("Emby catalog routes", () => {
+  it.each(["/emby/Users/owner/Items", "/emby/Items", "/emby/Users/owner/Items/Latest"])(
+    "accepts Rex requests without ParentId at %s",
+    async (path) => {
+      let observed: FederatedQuery | undefined;
+      const base = services();
+      const app = makeEmbyHandler({
+        ...base,
+        federation: {
+          ...base.federation,
+          list: (input) => {
+            observed = input;
+            return base.federation.list(input);
+          },
+        },
+      });
+      const response = await Effect.runPromise(
+        app(
+          get(
+            `${path}?IncludeItemTypes=Series,Movie,Video,MusicVideo&Limit=30&Recursive=true` +
+              "&SortBy=IsFavoriteOrLiked,Random&SortOrder=Descending&StartIndex=0",
+          ),
+        ),
+      );
+      expect(response.status).toBe(200);
+      expect(observed).toMatchObject({ virtualLibraryId: null, limit: 30 });
+    },
+  );
+
+  it("routes Rex continue-watching to local resume membership instead of item detail", async () => {
+    let observed: FederatedQuery | undefined;
+    const base = services();
+    const app = makeEmbyHandler({
+      ...base,
+      federation: {
+        ...base.federation,
+        list: (input) => {
+          observed = input;
+          return base.federation.list(input);
+        },
+        detail: () => Effect.die("Resume must not be treated as an item ID"),
+      },
+    });
+    const response = await Effect.runPromise(
+      app(
+        get(
+          "/emby/Users/owner/Items/Resume?Limit=99&MediaTypes=Video&Recursive=true&ImageTypeLimit=1",
+        ),
+      ),
+    );
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      Items: [{ Id: "movie-1" }],
+      StartIndex: 0,
+    });
+    expect(observed).toMatchObject({
+      virtualLibraryId: null,
+      limit: 99,
+      filters: [{ field: "resume", value: true }],
+      sort: [{ field: "DatePlayed", direction: "Descending" }],
+    });
+    const forbidden = await Effect.runPromise(app(get("/emby/Users/not-owner/Items/Resume")));
+    expect(forbidden.status).toBe(403);
+  });
+
+  it("returns studios as named local items and requires authentication", async () => {
+    const base = services();
+    const app = makeEmbyHandler({
+      ...base,
+      federation: {
+        ...base.federation,
+        studios: () =>
+          Effect.succeed({
+            items: [
+              {
+                ...item("studio:warner"),
+                itemType: "Studio",
+                displayMetadata: { Name: "Warner" },
+                mediaVersions: [],
+              },
+            ],
+            totalRecordCount: 1,
+            exhausted: true,
+            incompleteSourceIds: [],
+          }),
+      },
+    });
+    const response = await Effect.runPromise(app(get("/emby/Studios?Limit=10000")));
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      Items: [{ Id: "studio:warner", Name: "Warner", Type: "Studio" }],
+      TotalRecordCount: 1,
+    });
+    const unauthorized = await Effect.runPromise(app(new Request("https://local/emby/Studios")));
+    expect(unauthorized.status).toBe(401);
+  });
+
+  it("resolves local studio filters without forwarding local IDs upstream", async () => {
+    let observed: FederatedQuery | undefined;
+    const base = services();
+    const app = makeEmbyHandler({
+      ...base,
+      federation: {
+        ...base.federation,
+        list: (input) => {
+          observed = input;
+          return base.federation.list(input);
+        },
+      },
+    });
+    const response = await Effect.runPromise(
+      app(get("/emby/Items?StudioIds=studio%3Awarner&IncludeItemTypes=Movie")),
+    );
+    expect(response.status).toBe(200);
+    expect(observed?.filters).toEqual([{ field: "Studios", value: ["warner"] }]);
+    const invalid = await Effect.runPromise(app(get("/emby/Items?StudioIds=upstream-id")));
+    expect(invalid.status).toBe(400);
+  });
+
+  it.each(["", "/emby"])("returns views with the %s alias prefix", async (prefix) => {
+    const response = await Effect.runPromise(
+      makeEmbyHandler(services())(get(`${prefix}/Users/owner/Views`)),
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      Items: [
+        {
+          Id: "library-1",
+          ServerId: "virtual-server",
+          Name: "Movies",
+          Type: "CollectionFolder",
+          CollectionType: "movies",
+        },
+      ],
+      TotalRecordCount: 1,
+      StartIndex: 0,
+    });
+  });
+
+  it("returns a virtual library as a collection detail for Infuse", async () => {
+    const base = services();
+    const response = await Effect.runPromise(
+      makeEmbyHandler({
+        ...base,
+        federation: { ...base.federation, detail: () => Effect.succeed(null) },
+      })(
+        get(
+          "/Users/owner/Items/library-1?Fields=DateCreated,Genres,MediaSources,ParentId,ChildCount",
+        ),
+      ),
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      Id: "library-1",
+      ServerId: "virtual-server",
+      Name: "Movies",
+      Type: "CollectionFolder",
+      CollectionType: "movies",
+      IsFolder: true,
+    });
+  });
+
+  it.each(["", "/emby"])(
+    "returns virtual folders for %s so Emby clients can validate libraries",
+    async (prefix) => {
+      const response = await Effect.runPromise(
+        makeEmbyHandler(services())(get(`${prefix}/Library/VirtualFolders`)),
+      );
+
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual([
+        {
+          Name: "Movies",
+          Locations: [],
+          CollectionType: "movies",
+          ItemId: "library-1",
+        },
+      ]);
+    },
+  );
+
+  it("serves a latest-media request as a list rather than an item detail", async () => {
+    let detailCalls = 0;
+    let observed: FederatedQuery | undefined;
+    const app = makeEmbyHandler(
+      services({
+        federation: {
+          list: (query) => {
+            observed = query;
+            return Effect.succeed({
+              items: [item("movie-1")],
+              totalRecordCount: 1,
+              exhausted: true,
+              incompleteSourceIds: [],
+            });
+          },
+          search: () => Effect.die("unused"),
+          detail: () => {
+            detailCalls++;
+            return Effect.succeed(null);
+          },
+          lookupMembership: () => Effect.succeed(null),
+        },
+      }),
+    );
+
+    const response = await Effect.runPromise(
+      app(get("/Users/owner/Items/Latest?ParentId=library-1&Limit=20&IncludeItemTypes=Movie")),
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject([{ Id: "movie-1", Type: "Movie" }]);
+    expect(observed).toMatchObject({
+      virtualLibraryId: "library-1",
+      limit: 20,
+      itemTypes: ["Movie"],
+      sort: [{ field: "DateCreated", direction: "Descending" }],
+    });
+    expect(detailCalls).toBe(0);
+  });
+
+  it.each(["", "/emby"])(
+    "overlays canonical state and versions for %s list routes",
+    async (prefix) => {
+      const response = await Effect.runPromise(
+        makeEmbyHandler(services())(
+          get(`${prefix}/Users/owner/Items?ParentId=library-1&StartIndex=0&Limit=20`),
+        ),
+      );
+
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as any;
+      expect(body).toMatchObject({
+        Items: [
+          {
+            Id: "movie-1",
+            ServerId: "virtual-server",
+            Type: "Movie",
+            UserData: {
+              ItemId: "movie-1",
+              IsFavorite: true,
+              Played: false,
+              PlayCount: 2,
+              PlaybackPositionTicks: 42,
+            },
+            MediaSources: [
+              {
+                Id: "version-movie-1",
+                Name: "Server A · 1080p",
+                Container: "mkv",
+                MediaStreams: [{ Index: 0, Type: "Video" }],
+              },
+            ],
+          },
+        ],
+        StartIndex: 0,
+        TotalRecordCount: 1,
+      });
+      expect(body.Items[0].MediaSources[0]).toMatchObject({
+        Path: "/Videos/movie-1/stream?MediaSourceId=version-movie-1",
+        DirectStreamUrl: "/Videos/movie-1/stream?MediaSourceId=version-movie-1",
+      });
+      expect(body.Items[0]).not.toHaveProperty("Path");
+      expect(body.Items[0]).not.toHaveProperty("SeriesId");
+      expect(body.Items[0]).not.toHaveProperty("SeasonId");
+      expect(body.Items[0]).not.toHaveProperty("SecretEnvelope");
+      expect(body.Items[0].MediaSources[0].MediaStreams[0]).toEqual({
+        Index: 0,
+        Type: "Video",
+        Codec: "h264",
+      });
+      expect(JSON.stringify(body)).not.toContain("private-token");
+    },
+  );
+
+  it("advertises canonical image routes without exposing upstream image tags", async () => {
+    const imageItem = item("movie-1", "Movie", {
+      displayMetadata: {
+        Name: "Movie movie-1",
+        ImageTags: {
+          Primary: "upstream-primary-tag",
+          Logo: "upstream-logo-tag",
+          Thumb: "upstream-thumb-tag",
+        },
+        BackdropImageTags: ["upstream-backdrop-tag", "upstream-backdrop-tag-2"],
+      },
+    });
+    const app = makeEmbyHandler(
+      services({
+        federation: {
+          list: () =>
+            Effect.succeed({
+              items: [imageItem],
+              totalRecordCount: 1,
+              exhausted: true,
+              incompleteSourceIds: [],
+            }),
+          search: () => Effect.die("unused"),
+          detail: () => Effect.die("unused"),
+          lookupMembership: () => Effect.die("unused"),
+        },
+      }),
+    );
+
+    const response = await Effect.runPromise(
+      app(get("/Users/owner/Items?ParentId=library-1&Limit=20")),
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      Items: [
+        {
+          Id: "movie-1",
+          ImageTags: { Primary: "local", Logo: "local", Thumb: "local" },
+          BackdropImageTags: ["local", "local"],
+        },
+      ],
+    });
+  });
+
+  it.each([
+    ["list", ""],
+    ["search", "&SearchTerm=needle"],
+  ] as const)("preserves plural item types as OR input for %s", async (_kind, suffix) => {
+    let observed: FederatedQuery | undefined;
+    const page = { items: [], totalRecordCount: 0, exhausted: true, incompleteSourceIds: [] };
+    const app = makeEmbyHandler(
+      services({
+        federation: {
+          list: (input) => {
+            observed = input;
+            return Effect.succeed(page);
+          },
+          search: (input) => {
+            observed = input;
+            return Effect.succeed(page);
+          },
+          detail: () => Effect.succeed(null),
+          lookupMembership: () => Effect.succeed(null),
+        },
+      }),
+    );
+
+    const response = await Effect.runPromise(
+      app(get(`/Users/owner/Items?ParentId=library-1&IncludeItemTypes=Movie,Series${suffix}`)),
+    );
+
+    expect(response.status).toBe(200);
+    expect(observed).toMatchObject({ itemTypes: ["Movie", "Series"] });
+  });
+
+  it("accepts collection types in an Emby movie browse request", async () => {
+    let observed: FederatedQuery | undefined;
+    const app = makeEmbyHandler(
+      services({
+        federation: {
+          list: (query) => {
+            observed = query;
+            return Effect.succeed({
+              items: [],
+              totalRecordCount: 0,
+              exhausted: true,
+              incompleteSourceIds: [],
+            });
+          },
+          search: () => Effect.die("unused"),
+          detail: () => Effect.succeed(null),
+          lookupMembership: () => Effect.succeed(null),
+        },
+      }),
+    );
+
+    const response = await Effect.runPromise(
+      app(
+        get(
+          "/emby/Users/owner/Items?ParentId=library-1&IncludeItemTypes=Movie,BoxSet" +
+            "&SortBy=SortName&SortOrder=Ascending&StartIndex=0&Limit=50" +
+            "&Fields=PrimaryImageAspectRatio,MediaSources&EnableImageTypes=Primary,Backdrop&Recursive=true",
+        ),
+      ),
+    );
+
+    expect(response.status).toBe(200);
+    expect(observed).toMatchObject({ itemTypes: ["Movie", "BoxSet"] });
+  });
+
+  it("decodes search, sort, fields, and local filters before Federation", async () => {
+    let observed: (FederatedQuery & { readonly searchTerm?: string }) | undefined;
+    const app = makeEmbyHandler(
+      services({
+        federation: {
+          list: () => Effect.die("unused"),
+          search: (query) => {
+            observed = query;
+            return Effect.succeed({
+              items: [],
+              totalRecordCount: 0,
+              exhausted: true,
+              incompleteSourceIds: [],
+            });
+          },
+          detail: () => Effect.succeed(null),
+        },
+      }),
+    );
+    const response = await Effect.runPromise(
+      app(
+        get(
+          "/Users/owner/Items?ParentId=library-1&StartIndex=2&Limit=10" +
+            "&SearchTerm=needle&SortBy=SortName,ProductionYear&SortOrder=Ascending,Descending" +
+            "&Fields=Overview,MediaSources&Filters=IsFavorite,IsResumable&IncludeItemTypes=Movie",
+        ),
+      ),
+    );
+
+    expect(response.status).toBe(200);
+    expect(observed).toEqual({
+      userId: "owner",
+      deviceId: "sen-device",
+      virtualLibraryId: "library-1",
+      startIndex: 2,
+      limit: 10,
+      searchTerm: "needle",
+      sort: [
+        { field: "SortName", direction: "Ascending" },
+        { field: "ProductionYear", direction: "Descending" },
+      ],
+      fields: ["Overview", "MediaSources"],
+      itemTypes: ["Movie"],
+      filters: [
+        { field: "favorite", value: true },
+        { field: "resume", value: true },
+      ],
+    });
+  });
+
+  it.each(["Movie", "Series", "Season", "Episode"])(
+    "returns %s details with canonical local state",
+    async (type) => {
+      const id = type.toLowerCase();
+      const app = makeEmbyHandler(
+        services({
+          federation: {
+            list: () => Effect.die("unused"),
+            search: () => Effect.die("unused"),
+            detail: () => Effect.succeed(item(id, type)),
+            lookupMembership: () => Effect.die("unused"),
+          },
+        }),
+      );
+      const response = await Effect.runPromise(app(get(`/Users/owner/Items/${id}`)));
+
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toMatchObject({
+        Id: id,
+        Type: type,
+        UserData: { ItemId: id, IsFavorite: true },
+      });
+    },
+  );
+
+  it("returns an empty query result for a known item's Similar endpoint", async () => {
+    const response = await Effect.runPromise(
+      makeEmbyHandler(services())(
+        get(
+          "/emby/Items/movie-1/Similar?UserId=owner&Limit=20&IncludeItemTypes=Movie&Recursive=true",
+        ),
+      ),
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      Items: [],
+      TotalRecordCount: 0,
+      StartIndex: 0,
+    });
+  });
+
+  it("preserves provisional count corrections exactly", async () => {
+    let total = 21;
+    const app = makeEmbyHandler(
+      services({
+        federation: {
+          list: () =>
+            Effect.succeed({
+              items: [item("movie-1")],
+              totalRecordCount: total,
+              exhausted: total === 1,
+              incompleteSourceIds: [],
+            }),
+          search: () => Effect.die("unused"),
+          detail: () => Effect.succeed(null),
+          lookupMembership: () => Effect.succeed(null),
+        },
+      }),
+    );
+    const first = await Effect.runPromise(
+      app(get("/Users/owner/Items?ParentId=library-1&StartIndex=0&Limit=20")),
+    );
+    total = 1;
+    const corrected = await Effect.runPromise(
+      app(get("/Users/owner/Items?ParentId=library-1&StartIndex=0&Limit=20")),
+    );
+
+    expect(((await first.json()) as any).TotalRecordCount).toBe(21);
+    expect(((await corrected.json()) as any).TotalRecordCount).toBe(1);
+  });
+
+  it("returns JSON 404 for unknown IDs and rejects malformed query values before core calls", async () => {
+    let calls = 0;
+    const app = makeEmbyHandler(
+      services({
+        federation: {
+          list: () => {
+            calls++;
+            return Effect.die("not reached");
+          },
+          search: () => Effect.die("unused"),
+          detail: () => Effect.succeed(null),
+          lookupMembership: () => Effect.die("unused"),
+        },
+      }),
+    );
+
+    const missing = await Effect.runPromise(app(get("/Users/owner/Items/missing")));
+    const invalid = await Effect.runPromise(
+      app(get("/Users/owner/Items?ParentId=library-1&StartIndex=-1&Limit=nope")),
+    );
+
+    expect(missing.status).toBe(404);
+    expect(missing.headers.get("content-type")).toContain("application/json");
+    expect(invalid.status).toBe(400);
+    expect(calls).toBe(0);
+  });
+
+  it("rejects a token user path mismatch", async () => {
+    const response = await Effect.runPromise(
+      makeEmbyHandler(services())(get("/Users/not-owner/Views")),
+    );
+    expect(response.status).toBe(403);
+  });
+
+  it("delegates PlaybackInfo without implementing media resolution in the protocol layer", async () => {
+    let canonicalId = "";
+    const app = makeEmbyHandler(
+      services({
+        playback: {
+          getInfo: (id) => {
+            canonicalId = id;
+            return Effect.succeed({
+              playSessionId: "play-session",
+              mediaSources: [
+                {
+                  Id: "stable-version",
+                  Name: "Server A · 1080p",
+                  Container: "mkv",
+                  Path: "/srv/private/private-token/movie.mkv",
+                  DirectStreamUrl: "/Videos/private-token/stream",
+                  Token: "private-token",
+                  Server: { Id: "upstream-server-id", Token: "private-token" },
+                  MediaStreams: [
+                    {
+                      Index: 1,
+                      Type: "Audio",
+                      Codec: "aac",
+                      Path: "/srv/private/private-token/audio.aac",
+                      Token: "private-token",
+                    },
+                  ],
+                },
+              ],
+            });
+          },
+        },
+      }),
+    );
+    const response = await Effect.runPromise(
+      app(
+        new Request("https://local/Items/movie-1/PlaybackInfo", {
+          method: "POST",
+          headers: { authorization: "Bearer token" },
+        }),
+      ),
+    );
+
+    expect(response.status).toBe(200);
+    expect(canonicalId).toBe("movie-1");
+    await expect(response.json()).resolves.toEqual({
+      PlaySessionId: "play-session",
+      MediaSources: [
+        {
+          Id: "stable-version",
+          Name: "Server A · 1080p",
+          Container: "mkv",
+          MediaStreams: [{ Index: 1, Type: "Audio", Codec: "aac" }],
+        },
+      ],
+    });
+  });
+
+  it("returns JSON 404 before PlaybackInfo work for an unknown canonical item", async () => {
+    let playbackCalls = 0;
+    const base = services();
+    const app = makeEmbyHandler({
+      ...base,
+      federation: {
+        ...base.federation,
+        lookupMembership: () => Effect.succeed(null),
+      },
+      playback: {
+        getInfo: () => {
+          playbackCalls++;
+          return Effect.succeed({ playSessionId: "unused", mediaSources: [] });
+        },
+      },
+    });
+
+    const response = await Effect.runPromise(
+      app(
+        new Request("https://local/Items/missing/PlaybackInfo", {
+          method: "POST",
+          headers: { authorization: "Bearer token" },
+        }),
+      ),
+    );
+
+    expect(response.status).toBe(404);
+    expect(response.headers.get("content-type")).toContain("application/json");
+    await expect(response.json()).resolves.toEqual({
+      error: { code: "NotFound", message: "Resource not found" },
+    });
+    expect(playbackCalls).toBe(0);
+  });
+});

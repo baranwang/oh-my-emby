@@ -1,0 +1,12 @@
+services:
+  oh-my-emby:
+    image: ${IMAGE_REPOSITORY:-ghcr.io/baranwang/oh-my-emby}:${IMAGE_TAG:-latest}
+    pull_policy: ${PULL_POLICY:-missing}
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - oh-my-emby-data:/data
+
+volumes:
+  oh-my-emby-data:

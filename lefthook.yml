@@ -1,0 +1,19 @@
+# EXAMPLE USAGE:
+#
+#   Refer for explanation to following link:
+#   https://lefthook.dev/configuration/
+
+pre-commit:
+  jobs:
+    - name: oxlint
+      run: bunx oxlint --fix --no-error-on-unmatched-pattern {staged_files}
+      glob: "*.{js,ts,cjs,mjs,d.cts,d.mts,jsx,tsx}"
+
+    - name: oxfmt
+      run: bunx oxfmt --no-error-on-unmatched-pattern {staged_files}
+      glob: "*.{js,ts,cjs,mjs,d.cts,d.mts,jsx,tsx,json,jsonc,css,md}"
+
+commit-msg:
+  commands:
+    "lint commit message":
+      run: bunx commitlint --extends @commitlint/config-conventional --edit {1}

@@ -1,0 +1,42 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": [
+    "typescript",
+    "unicorn",
+    "oxc"
+  ],
+  "categories": {
+    "correctness": "error"
+  },
+  "overrides": [
+    {
+      "files": [
+        "apps/dashboard/**/*.{tsx,ts}"
+      ],
+      "jsPlugins": [
+        "@shadcn/lint"
+      ],
+      "rules": {
+        "shadcn/no-restyle": [
+          "error",
+          {
+            "allow": [
+              "layout"
+            ]
+          }
+        ]
+      },
+    },
+    {
+      "files": [
+        "apps/dashboard/src/components/ui/**/*.{tsx,ts}"
+      ],
+      "rules": {
+        "shadcn/no-restyle": "off"
+      }
+    }
+  ],
+  "env": {
+    "builtin": true
+  }
+}

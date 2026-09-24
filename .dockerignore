@@ -1,0 +1,12 @@
+.git
+.github
+.superpowers
+node_modules
+**/node_modules
+**/dist
+**/coverage
+**/test
+.turbo
+out
+*.log
+.DS_Store

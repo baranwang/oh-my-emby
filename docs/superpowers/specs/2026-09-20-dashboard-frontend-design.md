@@ -185,7 +185,7 @@ The one local username and password are shared product identity. An Emby client 
 
 The session cookie is `HttpOnly`, `Secure`, and `SameSite=Lax`. The database stores only a hash of the random session token. Sessions expire after seven days of inactivity and roll forward while active. Logout revokes the current session; changing the password revokes all sessions. Mutating Dashboard requests also require a valid same-origin `Origin` check.
 
-Production Dashboard access requires the configured public HTTPS origin on both Workers and Docker. Plain HTTP is limited to explicit localhost development. Origin checks and secure-request detection use that configured origin and an explicit trusted-proxy policy, never arbitrary forwarded headers.
+Production Dashboard access requires HTTPS on both Workers and Docker. Plain HTTP is limited to localhost development. The browser supplies `Host` and `Origin` automatically; mutating requests require matching hosts and ports, while safe reads do not require `Origin`. No public-origin or trusted-proxy deployment setting is needed, and arbitrary `X-Forwarded-*` headers are ignored. A reverse proxy must preserve the public `Host`.
 
 The user explicitly accepted unauthenticated first-visitor ownership: while the instance is uninitialized, the first public visitor may create the sole account. This permits hostile takeover of a newly deployed public instance. The setup screen and deployment documentation must state this risk plainly. The implementation must not imply that the flow is protected by a setup secret.
 

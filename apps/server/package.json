@@ -1,0 +1,28 @@
+{
+  "name": "@oh-my-emby/server",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "HOST=127.0.0.1 MIGRATIONS_DIR=migrations bun --watch src/platform/bun/index.ts",
+    "build": "tsc -p tsconfig.json && bun build --target=bun --production --outdir=dist/bun src/platform/bun/index.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "bun --bun vitest run --exclude test/d1-repository.test.ts --exclude test/workers-routing.test.ts",
+    "test:bun": "bun --bun vitest run test/bun-*.test.ts test/cross-platform.test.ts test/ten-source-budget.test.ts",
+    "test:workers": "vitest run --config vitest.config.workers.ts"
+  },
+  "dependencies": {
+    "@effect/platform-bun": "4.0.0-rc.112",
+    "@effect/sql-d1": "4.0.0-rc.112",
+    "@effect/sql-sqlite-bun": "4.0.0-rc.112",
+    "@logtape/logtape": "2.3.6",
+    "@oh-my-emby/contracts": "workspace:*",
+    "effect": "4.0.0-rc.112"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "0.22.0",
+    "@types/bun": "1.4.2",
+    "vitest": "4.1.0",
+    "wrangler": "4.135.0"
+  }
+}
