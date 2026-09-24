@@ -1,14 +1,10 @@
 {
   "name": "oh-my-emby",
   "private": true,
-  "packageManager": "bun@1.4.2",
-  "engines": {
-    "bun": ">=1.4.2"
-  },
-  "workspaces": ["apps/*", "packages/*"],
-  "overrides": {
-    "@effect/platform-node-shared": "4.0.0-rc.112"
-  },
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
   "scripts": {
     "dev": "turbo run dev",
     "build": "turbo run build",
@@ -27,5 +23,12 @@
     "oxlint": "^1.83.0",
     "turbo": "^2.11.2",
     "typescript": "^7.0.2"
-  }
+  },
+  "overrides": {
+    "@effect/platform-node-shared": "4.0.0-rc.112"
+  },
+  "engines": {
+    "bun": ">=1.4.2"
+  },
+  "packageManager": "bun@1.4.2"
 }
