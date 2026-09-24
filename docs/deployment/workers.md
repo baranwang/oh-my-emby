@@ -8,7 +8,7 @@ On the setup page, keep the root directory at the repository root. Accept these 
 
 ```sh
 bun install --frozen-lockfile
-bun --filter @oh-my-emby/server deploy
+bun run build && bun --filter @oh-my-emby/server deploy
 ```
 
 The deploy script applies D1 migrations and then deploys. If migrations fail, the new version is not deployed. Do not create the database yourself or write its ID into the repository. The binding name must stay `DB`.
@@ -22,5 +22,5 @@ Maintainers can still validate a build without publishing it:
 ```sh
 bun ci
 bun run build
-apps/server/node_modules/.bin/wrangler --cwd apps/server deploy --dry-run --outdir ../../.wrangler-dry-run
+apps/server/node_modules/.bin/wrangler deploy --dry-run --outdir .wrangler-dry-run
 ```
