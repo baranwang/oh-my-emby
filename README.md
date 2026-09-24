@@ -2,6 +2,8 @@
   <img src="assets/brand/logo.svg" alt="OhMyEmby logo" width="96" height="96">
 </p>
 
+<p align="right"><a href="README.zh-Hans.md">简体中文</a></p>
+
 # OhMyEmby
 
 OhMyEmby is a self-hosted, Emby-compatible virtual server. Connect up to ten Emby servers, select their libraries, and browse matching titles as one item with multiple selectable media versions.
