@@ -52,7 +52,9 @@ Video redirects can expose an upstream URL to the client. If that URL is private
 
 ## Cloudflare Workers
 
-The alternative deployment uses Workers, D1, Static Assets, and a five-minute Cron trigger. Follow the [Workers deployment guide](docs/deployment/workers.md) to create the D1 binding, apply migrations, and deploy. Workers cannot connect to private, localhost, or IP-literal upstream addresses; use Docker for those servers.
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/baranwang/oh-my-emby)
+
+The button deploys to your own Cloudflare account. Details and the required build commands are in the [Workers deployment guide](docs/deployment/workers.md). Workers cannot connect to private, localhost, or IP-literal upstream addresses; use Docker for those servers.
 
 ## Development and verification
 

@@ -52,7 +52,9 @@ IMAGE_REPOSITORY=oh-my-emby IMAGE_TAG=local docker compose up -d
 
 ## Cloudflare Workers
 
-另一种部署方式使用 Workers、D1、Static Assets 和五分钟一次的 Cron 触发器。按照 [Workers 部署指南](docs/deployment/workers.md) 创建 D1 绑定、应用迁移并部署。Workers 不能连接私有地址、localhost 或 IP 字面量形式的上游地址；这些服务器请使用 Docker。
+[![部署到 Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/baranwang/oh-my-emby)
+
+按钮会部署到你自己的 Cloudflare 账号。构建命令和限制见 [Workers 部署指南](docs/deployment/workers.md)。Workers 不能连接私有地址、localhost 或 IP 字面量形式的上游地址；这些服务器请使用 Docker。
 
 ## 开发与验证
 
