@@ -102,7 +102,7 @@ export const makeOutboxLayer = (
           PlayCount: claim.payload.playCount,
           PlaybackPositionTicks: claim.payload.positionTicks
         }))
-      }, Schema.Void).pipe(Effect.result)
+      }, Schema.Unknown).pipe(Effect.result)
       const completedAtMs = now()
 
       if (Result.isSuccess(result)) {

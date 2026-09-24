@@ -1,4 +1,4 @@
-import { Effect, Layer } from "effect"
+import { Effect, Layer, Schema } from "effect"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import { UpstreamInvalidResponse, UpstreamRejected, UpstreamTimeout } from "../src/core/errors.js"
@@ -6,9 +6,9 @@ import { UNCERTAINTY_REAPPLY_MS } from "../src/core/limits.js"
 import { ResourceCache, runMaintenance } from "../src/core/maintenance.js"
 import { Outbox, makeOutboxLayer } from "../src/core/outbox.js"
 import { Repositories } from "../src/core/repositories.js"
-import type { UpstreamRequest } from "../src/core/upstream-client.js"
+import { UpstreamClient, type UpstreamClientService, type UpstreamRequest } from "../src/core/upstream-client.js"
 import { UserState, makeUserStateLayer } from "../src/core/user-state.js"
-import { makeStateHarness, makeUpstreamLayer, type StateHarness } from "./state-test-harness.js"
+import { makeStateHarness, type StateHarness } from "./state-test-harness.js"
 
 describe("revisioned outbox", () => {
   let harness: StateHarness
@@ -24,11 +24,28 @@ describe("revisioned outbox", () => {
     nowMs = 2_000
     owner = "worker-1"
     requests = []
-    requestEffect = () => Effect.succeed({})
-    const upstream = makeUpstreamLayer((request) => {
-      requests.push(request)
-      return requestEffect()
+    requestEffect = () => Effect.succeed({
+      ItemId: "upstream-1",
+      Played: false,
+      IsFavorite: true,
+      PlayCount: 0,
+      PlaybackPositionTicks: 20
     })
+    const unavailable = () => Effect.die(new Error("not used by state tests"))
+    const upstream = Layer.succeed(UpstreamClient, UpstreamClient.of({
+      request: ((input, schema) => {
+        requests.push(input)
+        return requestEffect().pipe(Effect.flatMap((value) =>
+          Schema.decodeUnknownEffect(schema)(value).pipe(
+            Effect.mapError(() => new UpstreamInvalidResponse({ serverId: input.serverId }))
+          )
+        ))
+      }) as UpstreamClientService["request"],
+      authenticate: unavailable,
+      getServerIdentity: unavailable,
+      listSourceLibraries: unavailable,
+      resolvePlayback: unavailable
+    }))
     const state = makeUserStateLayer({ now: () => nowMs }).pipe(Layer.provide(harness.repositories))
     const outboxDependencies = Layer.merge(harness.repositories, upstream)
     const outbox = makeOutboxLayer({ now: () => nowMs, owner: () => owner }).pipe(
