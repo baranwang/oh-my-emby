@@ -361,6 +361,40 @@ describe("Emby authentication and application routing", () => {
     expect(JSON.stringify(healthBody)).not.toMatch(/database|upstream|user|token|config/i)
   })
 
+  it("redirects GET / to the dashboard without detecting setup", async () => {
+    const calls: Array<string> = []
+    const layer = Layer.succeed(ApplicationServices, ApplicationServices.of({
+      handleDashboard: () => {
+        calls.push("dashboard")
+        return Effect.succeed(new Response(null, { status: 500 }))
+      },
+      handleEmby: () => {
+        calls.push("emby")
+        return Effect.succeed(new Response(null, { status: 500 }))
+      },
+      handleDashboardAsset: () => {
+        calls.push("asset")
+        return Effect.succeed(new Response(null, { status: 500 }))
+      }
+    }))
+    const run = (init?: RequestInit) => Effect.runPromise(routeApplication(
+      new Request("https://local/", init)
+    ).pipe(Effect.provide(layer)))
+
+    const response = await run({ headers: { accept: "text/html" } })
+    expect(response.status).toBe(302)
+    expect(response.headers.get("location")).toBe("/dashboard")
+    expect(calls).toEqual([])
+
+    const head = await run({ method: "HEAD", headers: { accept: "text/html" } })
+    expect(head.status).toBe(302)
+    expect(head.headers.get("location")).toBe("/dashboard")
+
+    const otherMethod = await run({ method: "POST", headers: { accept: "text/html" } })
+    expect(otherMethod.status).toBe(404)
+    expect(calls).toEqual([])
+  })
+
   it("recognizes only safe Dashboard navigation fallbacks", () => {
     expect(isDashboardNavigationRequest(new Request("https://local/dashboard/servers", {
       headers: { accept: "text/html" }

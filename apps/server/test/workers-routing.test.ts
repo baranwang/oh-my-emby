@@ -253,6 +253,10 @@ crossPlatformAcceptance("workers", {
 
 describe("Workers production runtime", () => {
   it("routes the real Dashboard API and only falls back to HTML for Dashboard navigations", async () => {
+    const root = await runWorkerFetch("/", { headers: { accept: "text/html" } })
+    expect(root.status).toBe(302)
+    expect(root.headers.get("location")).toBe("/dashboard")
+
     const bootstrap = await runWorkerFetch("/api/dashboard/bootstrap")
     expect(bootstrap.status).toBe(200)
     expect(bootstrap.headers.get("content-type")).toContain("application/json")
