@@ -706,7 +706,7 @@ export const crossPlatformAcceptance = (name: "workers" | "docker", harness: Acc
         }),
       );
       await expect(app.inspectStorage()).resolves.toEqual({
-        migrationNames: ["initial", "dashboard_alignment"],
+        migrationNames: ["initial", "dashboard_alignment", "drivemby_compat"],
         enabledEncoding: 1,
       });
     });
@@ -863,11 +863,14 @@ export const crossPlatformAcceptance = (name: "workers" | "docker", harness: Acc
       const subtitleUrl = info.MediaSources[0]?.MediaStreams?.find(
         ({ DeliveryUrl }) => DeliveryUrl,
       )?.DeliveryUrl;
-      expect(directStreamUrl).toMatch(/^\/Videos\//);
+      const direct = new URL(directStreamUrl ?? "", "https://dashboard.example.com");
+      expect(direct.pathname).toMatch(/^\/Videos\//);
+      expect(directStreamUrl).toMatch(/^https?:\/\//);
       expect(subtitleUrl).toMatch(/^\/Videos\//);
+      const videoPath = `${direct.pathname}${direct.search}`;
 
       for (const prefix of ["", "/emby"]) {
-        const video = await app.request(`${prefix}${directStreamUrl}`, {
+        const video = await app.request(`${prefix}${videoPath}`, {
           headers: { authorization: `Bearer ${accessToken}` },
           redirect: "manual",
         });

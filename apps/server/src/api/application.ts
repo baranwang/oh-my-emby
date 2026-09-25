@@ -48,7 +48,12 @@ const isEmbyPath = (pathname: string): boolean => pathname === "/emby" || pathna
   "/DisplayPreferences/",
   "/Videos/",
   "/Sessions/"
-].some((prefix) => pathname.startsWith(prefix))
+].some((prefix) => pathname.startsWith(prefix)) || [
+  "/Shows",
+  "/Genres",
+  "/me",
+  "/watch"
+].some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`))
 
 export const routeApplication = (
   request: Request
@@ -67,6 +72,12 @@ export const routeApplication = (
   }
   if (pathname === "/api/dashboard" || pathname.startsWith("/api/dashboard/")) {
     return yield* services.handleDashboard(request)
+  }
+  if (
+    pathname === "/api/me" || pathname.startsWith("/api/me/") ||
+    pathname === "/api/watch" || pathname.startsWith("/api/watch/")
+  ) {
+    return yield* services.handleEmby(request)
   }
   if (isEmbyPath(pathname)) return yield* services.handleEmby(request)
   if (pathname === "/dashboard" || pathname.startsWith("/dashboard/")) {

@@ -52,6 +52,7 @@ import type {
   UserStateRecord,
   VirtualLibrary
 } from "../../core/model.js"
+import { makeSqlDrivembyCompat } from "../../core/drivemby-compat.js"
 import {
   Repositories,
   type CatalogItemRecord,
@@ -534,6 +535,12 @@ const makeRepositories = Effect.gen(function*() {
   if (pragma[0]?.foreign_keys !== 1) {
     return yield* Effect.die("SQLite foreign key enforcement is unavailable")
   }
+  const drivemby = yield* makeSqlDrivembyCompat({
+    unsafe: <A extends object>(statement: string, params?: ReadonlyArray<unknown>) =>
+      (params === undefined
+        ? sql.unsafe<A>(statement)
+        : sql.unsafe<A>(statement, params as never)) as Effect.Effect<ReadonlyArray<A>, unknown>
+  }).pipe(Effect.orDie)
 
   const claimUser: RepositoriesService["claimUser"] = (input) => Effect.suspend(() => {
     const nowMs = input.nowMs ?? Date.now()
@@ -3640,7 +3647,8 @@ const makeRepositories = Effect.gen(function*() {
     recordOutboxFailure,
     runMaintenanceBatch,
     readSystemStatus,
-    listOutboxFailures
+    listOutboxFailures,
+    drivemby
   })
 })
 

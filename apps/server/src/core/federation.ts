@@ -75,6 +75,16 @@ export interface CanonicalItemView {
   readonly incompleteSourceIds: ReadonlyArray<string>;
 }
 
+export interface ShowChildrenQuery {
+  readonly seriesId: string;
+  readonly kind: "Season" | "Episode";
+  readonly seasonId?: string;
+  readonly seasonNumber?: number;
+  readonly startIndex: number;
+  readonly limit: number;
+  readonly clientUserAgent?: string;
+}
+
 export interface FederatedPage {
   readonly items: ReadonlyArray<CanonicalItemView>;
   readonly totalRecordCount: number;
@@ -119,6 +129,9 @@ export interface FederationService {
     canonicalId: string,
     clientUserAgent?: string,
   ) => Effect.Effect<CanonicalItemView | null, FederationFailure>;
+  readonly showChildren: (
+    query: ShowChildrenQuery,
+  ) => Effect.Effect<FederatedPage | null, FederationFailure>;
   readonly invalidateStateDependentGenerations: () => Effect.Effect<void, RepositoryError>;
 }
 
@@ -1318,6 +1331,139 @@ export const makeFederationLayer = (
           return { item: view(yield* metadataProviders.overlayCached(record), []), version };
         });
 
+      const metadataNumber = (item: CanonicalItemView, key: string): number | null => {
+        if (!jsonObject(item.displayMetadata)) return null;
+        const value = item.displayMetadata[key];
+        return typeof value === "number" && Number.isSafeInteger(value) ? value : null;
+      };
+
+      const showChildren = (
+        query: ShowChildrenQuery,
+      ): Effect.Effect<FederatedPage | null, FederationFailure> =>
+        Effect.gen(function* () {
+          const activeId = yield* identity.lookupCanonicalId(query.seriesId);
+          if (activeId === null) return null;
+          const series = (yield* repositories.readCatalogItems([activeId], now()))[0];
+          if (!series || series.canonical.itemType !== "Series") return null;
+          let seasonUpstreamIds: ReadonlySet<string> | null = null;
+          let seasonSources: ReadonlyArray<{
+            readonly serverId: string;
+            readonly sourceLibraryId: string;
+            readonly upstreamItemId: string;
+          }> = [];
+          if (query.seasonId !== undefined) {
+            const seasonActive = yield* identity.lookupCanonicalId(query.seasonId);
+            const season =
+              seasonActive === null
+                ? undefined
+                : (yield* repositories.readCatalogItems([seasonActive], now()))[0];
+            if (!season || season.canonical.itemType !== "Season") {
+              return { items: [], totalRecordCount: 0, exhausted: true, incompleteSourceIds: [] };
+            }
+            seasonSources = season.sourceItems;
+            seasonUpstreamIds = new Set(season.sourceItems.map((item) => item.upstreamItemId));
+          }
+          const sources = yield* repositories.resolveEligibleSourcesForCanonical(activeId);
+          const collected: Array<CanonicalItemView> = [];
+          const seen = new Set<string>();
+          for (const sourceItem of series.sourceItems) {
+            const source = sources.find(
+              (candidateSource) =>
+                candidateSource.serverId === sourceItem.serverId &&
+                candidateSource.serverGeneration === sourceItem.serverGeneration &&
+                candidateSource.sourceLibraryId === sourceItem.sourceLibraryId,
+            );
+            if (source === undefined) continue;
+            const parameters = new URLSearchParams({ Fields: "ProviderIds,MediaSources" });
+            if (query.kind === "Episode" && query.seasonNumber !== undefined) {
+              parameters.set("Season", String(query.seasonNumber));
+            }
+            const upstreamSeasonId =
+              query.kind === "Episode"
+                ? seasonSources.find(
+                    (item) =>
+                      item.serverId === source.serverId &&
+                      item.sourceLibraryId === source.sourceLibraryId,
+                  )?.upstreamItemId ??
+                  seasonSources.find((item) => item.serverId === source.serverId)?.upstreamItemId
+                : undefined;
+            if (query.seasonId !== undefined && upstreamSeasonId === undefined) continue;
+            if (upstreamSeasonId !== undefined) parameters.set("SeasonId", upstreamSeasonId);
+            const path =
+              query.kind === "Season"
+                ? `/Shows/${encodeURIComponent(sourceItem.upstreamItemId)}/Seasons?${parameters}`
+                : `/Shows/${encodeURIComponent(sourceItem.upstreamItemId)}/Episodes?${parameters}`;
+            const attempted = yield* deadline(
+              requestForUser(source, path, Schema.Unknown, query.clientUserAgent),
+              source.serverId,
+              detailDeadlineMs,
+            ).pipe(Effect.result);
+            if (Result.isFailure(attempted)) continue;
+            let parsed: ReturnType<typeof parsePage> | null = null;
+            try {
+              parsed = parsePage(attempted.success);
+            } catch {
+              continue;
+            }
+            const observedAtMs = now();
+            for (const raw of parsed.items) {
+              if (raw.Type !== query.kind) continue;
+              const seasonNumber = raw.Type === "Season" ? raw.IndexNumber : raw.ParentIndexNumber;
+              const episodeNumber = raw.Type === "Episode" ? raw.IndexNumber : null;
+              const resolved = yield* identity
+                .resolve({
+                  ...candidate(source, raw, observedAtMs),
+                  canonicalSeriesId: activeId,
+                  ...(typeof seasonNumber === "number" ? { seasonNumber } : {}),
+                  ...(typeof episodeNumber === "number" ? { episodeNumber } : {}),
+                })
+                .pipe(Effect.result);
+              if (Result.isFailure(resolved)) continue;
+              const childId = yield* identity.lookupCanonicalId(resolved.success.canonical.id);
+              if (childId === null || seen.has(childId)) continue;
+              const current = (yield* repositories.readCatalogItems([childId], now()))[0];
+              if (!current) continue;
+              seen.add(childId);
+              collected.push(view(current, []));
+            }
+          }
+          let items = collected;
+          if (query.kind === "Episode" && query.seasonNumber !== undefined) {
+            items = items.filter(
+              (item) => metadataNumber(item, "ParentIndexNumber") === query.seasonNumber,
+            );
+          }
+          if (seasonUpstreamIds !== null) {
+            items = items.filter((item) => {
+              if (!jsonObject(item.displayMetadata)) return false;
+              const seasonId = item.displayMetadata.SeasonId;
+              const parentId = item.displayMetadata.ParentId;
+              return (
+                (typeof seasonId === "string" && seasonUpstreamIds.has(seasonId)) ||
+                (typeof parentId === "string" && seasonUpstreamIds.has(parentId))
+              );
+            });
+          }
+          items.sort(
+            (left, right) =>
+              (metadataNumber(left, "ParentIndexNumber") ?? metadataNumber(left, "IndexNumber") ?? 0) -
+                (metadataNumber(right, "ParentIndexNumber") ??
+                  metadataNumber(right, "IndexNumber") ??
+                  0) ||
+              (metadataNumber(left, "IndexNumber") ?? 0) -
+                (metadataNumber(right, "IndexNumber") ?? 0) ||
+              left.id.localeCompare(right.id),
+          );
+          const startIndex = Math.max(0, query.startIndex);
+          const limit = Math.max(0, query.limit);
+          return {
+            items: items.slice(startIndex, startIndex + limit),
+            totalRecordCount: items.length,
+            exhausted: true,
+            incompleteSourceIds: [],
+          };
+        });
+
       return Federation.of({
         list: (query) => list(query),
         search: (query) => list(query, query.searchTerm),
@@ -1325,6 +1471,7 @@ export const makeFederationLayer = (
         detail: enrichVersions,
         lookupMembership,
         enrichVersions,
+        showChildren,
         invalidateStateDependentGenerations: repositories.invalidateStateDependentQueryGenerations,
       });
     }),

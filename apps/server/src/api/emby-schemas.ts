@@ -93,7 +93,14 @@ export const EmbyPlaybackInfoDto = Schema.Struct({
 
 export const EmbyLoginBody = Schema.Struct({
   Username: Schema.NonEmptyString,
-  Pw: Schema.NonEmptyString,
+  Pw: Schema.optionalKey(Schema.NonEmptyString),
+  Password: Schema.optionalKey(Schema.NonEmptyString),
+});
+
+export const EmbyPlaybackRequest = Schema.Struct({
+  UserId: Schema.optionalKey(Schema.NonEmptyString),
+  MediaSourceId: Schema.optionalKey(Schema.NonEmptyString),
+  PlaybackUserAgent: Schema.optionalKey(Schema.NonEmptyString),
 });
 
 export const EmbyClient = Schema.Struct({
@@ -115,6 +122,7 @@ export const EmbyItemsQuery = Schema.Struct({
     Schema.Array(Schema.Literals(["IsFavorite", "IsPlayed", "IsUnplayed", "IsResumable"])),
   ),
   IncludeItemTypes: Schema.optionalKey(StringList),
+  IsWatchlisted: Schema.optionalKey(Schema.Boolean),
 });
 
 export const EmbyUserDataPatch = Schema.Struct({

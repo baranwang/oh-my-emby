@@ -1,4 +1,4 @@
-import { Effect, Schema } from "effect";
+import { Effect, Result, Schema } from "effect";
 import { getLogger } from "@logtape/logtape";
 
 import type { AuthService } from "../core/auth.js";
@@ -11,6 +11,8 @@ import type {
   SortTerm,
 } from "../core/federation.js";
 import type { LibraryServiceApi } from "../core/library-service.js";
+import type { DrivembyCompat, ItemFlags } from "../core/drivemby-compat.js";
+import { decodeHistoryCursor } from "../core/drivemby-compat.js";
 import type { JsonValue, PlaybackEvent, UserStatePatch, UserStateRecord } from "../core/model.js";
 import {
   serveRegisteredResource,
@@ -30,6 +32,7 @@ import {
   type EmbyMediaSourceDto as EmbyMediaSourceDtoValue,
   type EmbyMediaStreamDto as EmbyMediaStreamDtoValue,
   EmbyPlaybackEvent,
+  EmbyPlaybackRequest,
   type EmbyPlaybackInfoDto as EmbyPlaybackInfoDtoValue,
   EmbyUserDataPatch,
   type EmbyItemsQuery as EmbyItemsQueryValue,
@@ -60,11 +63,14 @@ export interface EmbyServices {
     readonly version: string;
   };
   readonly now: () => number;
-  readonly auth: Pick<AuthService, "loginEmby" | "authenticateEmby">;
+  readonly auth: Pick<AuthService, "loginEmby" | "authenticateEmby"> &
+    Partial<Pick<AuthService, "authenticateDashboard" | "issueEmbySession">>;
   readonly federation: Pick<
     FederationService,
     "list" | "search" | "studios" | "detail" | "lookupMembership"
-  >;
+  > &
+    Partial<Pick<FederationService, "showChildren">>;
+  readonly compat?: DrivembyCompat;
   readonly userState: Pick<UserStateService, "write" | "recordPlaybackEvent">;
   readonly libraries: Pick<LibraryServiceApi, "list">;
   readonly playback: PlaybackBoundary;
@@ -231,6 +237,13 @@ const logRequest = (
 const number = (value: string | null): number | undefined =>
   value === null ? undefined : value.trim() === "" ? Number.NaN : Number(value);
 
+const booleanQuery = (value: string | null): boolean | undefined => {
+  if (value === null || value.trim() === "") return undefined;
+  if (value.toLowerCase() === "true") return true;
+  if (value.toLowerCase() === "false") return false;
+  return Number.NaN as unknown as boolean;
+};
+
 const compact = <A extends Record<string, unknown>>(value: A): Record<string, unknown> =>
   Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined));
 
@@ -252,6 +265,7 @@ const decodeItemsQuery = (url: URL) =>
       StudioIds: split(url.searchParams.get("StudioIds")),
       Filters: split(url.searchParams.get("Filters")),
       IncludeItemTypes: split(url.searchParams.get("IncludeItemTypes")),
+      IsWatchlisted: booleanQuery(url.searchParams.get("IsWatchlisted")),
     }),
   ).pipe(
     Effect.flatMap((query) => {
@@ -321,11 +335,17 @@ const pathSegment = (value: string): Effect.Effect<string, InvalidEmbyRequest> =
   });
 
 const normalizedPath = (pathname: string): string => {
-  const withoutAlias =
+  let path =
     pathname === "/emby" ? "/" : pathname.startsWith("/emby/") ? pathname.slice(5) : pathname;
-  return withoutAlias.length > 1 && withoutAlias.endsWith("/")
-    ? withoutAlias.slice(0, -1)
-    : withoutAlias;
+  if (
+    path === "/api/me" ||
+    path.startsWith("/api/me/") ||
+    path === "/api/watch" ||
+    path.startsWith("/api/watch/")
+  ) {
+    path = path.slice(4);
+  }
+  return path.length > 1 && path.endsWith("/") ? path.slice(0, -1) : path;
 };
 
 const object = (value: JsonValue): Readonly<Record<string, JsonValue>> =>
@@ -667,6 +687,90 @@ const user = (services: EmbyServices, userId: string) => ({
   Policy: { IsAdministrator: true, IsDisabled: false },
 });
 
+const defaultUserLogo = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><path fill="#00c950" d="M391.915 157.252c10.723-7.791 13.201-22.924 4.134-32.592a192 192 0 0 0-227.215-39.733 192 192 0 0 0-52.883 39.733c-9.067 9.668-6.589 24.801 4.134 32.592s25.611 5.235 35.073-4.047A144 144 0 0 1 256 112a144 144 0 0 1 100.842 41.205c9.462 9.282 24.349 11.838 35.073 4.047"/><path fill="#262626" d="M105.003 182.354c-11.914-5.811-26.439-.894-30.719 11.651a191.995 191.995 0 0 0 71.589 219.272 192 192 0 0 0 59.909 28.039c12.794 3.467 24.992-5.825 26.837-18.951s-7.401-25.07-20.039-29.067a143.987 143.987 0 0 1-83.724-69.694 144 144 0 0 1-10.961-108.383c3.753-12.712-.979-27.057-12.892-32.867"/><path fill="#737373" d="M276.474 422.748c1.615 13.156 13.65 22.66 26.502 19.417a192.02 192.02 0 0 0 120.951-93.082 191.98 191.98 0 0 0 14.843-151.897c-4.06-12.618-18.497-17.788-30.51-12.186s-16.995 19.862-13.464 32.637a144 144 0 0 1-12.851 108.176 144 144 0 0 1-84.928 68.222c-12.705 3.775-22.158 15.557-20.543 28.713"/><path fill="#00c950" d="M328 242.144c10.667 6.158 10.667 21.554 0 27.712l-96 55.426c-10.667 6.158-24-1.54-24-13.856V200.574c0-12.316 13.333-20.014 24-13.856z"/></svg>`;
+const defaultUserLogoBytes = new TextEncoder().encode(defaultUserLogo);
+
+const loadFlags = (services: EmbyServices, ids: ReadonlyArray<string>) =>
+  services.compat === undefined || ids.length === 0
+    ? Effect.succeed(new Map<string, ItemFlags>())
+    : services.compat.flagsFor(ids);
+
+const paintItem = (
+  services: EmbyServices,
+  dto: EmbyItemDtoValue,
+  flags: ReadonlyMap<string, ItemFlags>,
+) =>
+  services.compat === undefined
+    ? dto
+    : {
+        ...dto,
+        UserData: {
+          ...dto.UserData,
+          IsWatchlisted: flags.get(dto.Id)?.watchlisted ?? false,
+        },
+      };
+
+const paintUserData = (
+  services: EmbyServices,
+  state: UserStateRecord | null,
+  itemId: string,
+  flags: ReadonlyMap<string, ItemFlags>,
+) => {
+  const data = userData(state, itemId);
+  return services.compat === undefined
+    ? data
+    : { ...data, IsWatchlisted: flags.get(itemId)?.watchlisted ?? false };
+};
+
+const pageBounds = (url: URL, fallbackLimit = 50) => {
+  const start = number(url.searchParams.get("StartIndex")) ?? 0;
+  const limit = number(url.searchParams.get("Limit")) ?? fallbackLimit;
+  if (!Number.isSafeInteger(start) || start < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 200) {
+    return null;
+  }
+  return { start, limit };
+};
+
+const isoTime = (ms: number) => new Date(ms).toISOString();
+
+const parseTimestamp = (value: unknown): number | null => {
+  if (typeof value !== "string" || value.trim() === "") return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const percentage = (position: number, runtime: number | null) =>
+  runtime !== null && runtime > 0
+    ? Math.min(100, Math.max(0, (position / runtime) * 100))
+    : undefined;
+
+const withoutBody = (response: Response): Response =>
+  new Response(null, { status: response.status, headers: response.headers });
+
+const agree = (left: string | null | undefined, right: string | null | undefined) =>
+  left == null || left === "" || right == null || right === "" || left === right;
+
+const readOptionalJson = (request: Request) =>
+  Effect.tryPromise({
+    try: () => request.text(),
+    catch: () => new InvalidEmbyRequest(),
+  }).pipe(
+    Effect.flatMap((text) =>
+      text.trim() === ""
+        ? Effect.succeed({})
+        : Effect.try({
+            try: () => JSON.parse(text) as unknown,
+            catch: () => new InvalidEmbyRequest(),
+          }),
+    ),
+  );
+
+const isConsolePath = (path: string) =>
+  path === "/me/emby-connections" ||
+  path.startsWith("/me/emby-connections/") ||
+  path === "/watch/history" ||
+  path.startsWith("/watch/history/");
+
 const interruptWhenAborted = (signal: AbortSignal): Effect.Effect<never> =>
   Effect.callback((resume) => {
     const abort = () => resume(Effect.interrupt);
@@ -678,6 +782,157 @@ const interruptWhenAborted = (signal: AbortSignal): Effect.Effect<never> =>
     return Effect.sync(() => signal.removeEventListener("abort", abort));
   });
 
+const consoleBearer = (request: Request): string | null =>
+  request.headers.get("authorization")?.match(/^\s*Bearer\s+(\S+)\s*$/i)?.[1] ?? null;
+
+const connectionJson = (connection: {
+  readonly id: string;
+  readonly name: string;
+  readonly password: string;
+  readonly createdAtMs: number;
+}) => ({
+  id: connection.id,
+  name: connection.name,
+  password: connection.password,
+  createdAt: isoTime(connection.createdAtMs),
+});
+
+const consoleRequest = (
+  services: EmbyServices,
+  request: Request,
+  path: string,
+  url: URL,
+): Effect.Effect<Response, unknown> =>
+  Effect.gen(function* () {
+    const token = consoleBearer(request);
+    if (token === null || services.auth.authenticateDashboard === undefined) {
+      return yield* Effect.fail(new InvalidCredentials());
+    }
+    const principal = yield* services.auth.authenticateDashboard(token);
+    if (services.compat === undefined) return failure(500, "Internal", "Internal server error");
+    const compat = services.compat;
+    if (path === "/me/emby-connections" && methodOf(request) === "POST") {
+      const body = yield* readJson(request);
+      const name = typeof body === "object" && body !== null && "name" in body ? body.name : undefined;
+      const password =
+        typeof body === "object" && body !== null && "password" in body ? body.password : undefined;
+      if (typeof name !== "string" || name.trim().length < 1 || name.length > 80) {
+        return yield* Effect.fail(new InvalidEmbyRequest());
+      }
+      if (
+        password !== undefined &&
+        (typeof password !== "string" || password.length < 6 || password.length > 128)
+      ) {
+        return yield* Effect.fail(new InvalidEmbyRequest());
+      }
+      const created = yield* compat.createConnection({
+        name: name.trim(),
+        password: typeof password === "string" ? password : null,
+        nowMs: services.now(),
+      });
+      if (created === null) return yield* Effect.fail(new InvalidEmbyRequest());
+      return json(connectionJson(created));
+    }
+    if (path === "/me/emby-connections" && methodOf(request) === "GET") {
+      return json({
+        serverUrl: new URL(request.url).origin,
+        username: principal.username,
+        credentials: (yield* compat.listConnections()).map((connection) => ({
+          id: connection.id,
+          name: connection.name,
+          createdAt: isoTime(connection.createdAtMs),
+          devices: connection.devices.map((device) => ({
+            id: device.id,
+            deviceId: device.deviceId,
+            deviceName: device.deviceName,
+            lastUsedAt: isoTime(device.lastUsedAtMs),
+          })),
+        })),
+      });
+    }
+    const connectionId = path.match(/^\/me\/emby-connections\/([^/]+)$/);
+    if (connectionId && methodOf(request) === "PATCH") {
+      const body = yield* readOptionalJson(request);
+      const password =
+        typeof body === "object" && body !== null && "password" in body
+          ? (body as { password?: unknown }).password
+          : undefined;
+      if (
+        password !== undefined &&
+        (typeof password !== "string" || password.length < 6 || password.length > 128)
+      ) {
+        return yield* Effect.fail(new InvalidEmbyRequest());
+      }
+      const updated = yield* compat.updateConnection({
+        id: yield* pathSegment(connectionId[1]!),
+        password: typeof password === "string" ? password : null,
+        nowMs: services.now(),
+      });
+      if (updated === null) return yield* Effect.fail(new EmbyNotFound());
+      return json(connectionJson(updated));
+    }
+    if (connectionId && methodOf(request) === "DELETE") {
+      const removed = yield* compat.deleteConnection(
+        yield* pathSegment(connectionId[1]!),
+        services.now(),
+      );
+      if (!removed) return yield* Effect.fail(new EmbyNotFound());
+      return json({ ok: true });
+    }
+    if (path === "/watch/history" && methodOf(request) === "GET") {
+      const limit = number(url.searchParams.get("limit")) ?? 50;
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) {
+        return yield* Effect.fail(new InvalidEmbyRequest());
+      }
+      const cursorRaw = url.searchParams.get("cursor");
+      const cursor = cursorRaw === null || cursorRaw === "" ? null : decodeHistoryCursor(cursorRaw);
+      if (cursorRaw !== null && cursorRaw !== "" && cursor === null) {
+        return yield* Effect.fail(new InvalidEmbyRequest());
+      }
+      const listed = yield* compat.listHistory({
+        cursor,
+        startIndex: 0,
+        limit,
+        search: url.searchParams.get("search"),
+        itemId: null,
+      });
+      return json({
+        items: listed.items.map((entry) => ({
+          id: entry.id,
+          itemId: entry.canonicalId,
+          itemName: entry.itemName,
+          startedAt: isoTime(entry.startedAtMs),
+          stoppedAt: entry.stoppedAtMs === null ? null : isoTime(entry.stoppedAtMs),
+          positionTicks: entry.positionTicks,
+          durationTicks: entry.runtimeTicks,
+          mediaSourceId: entry.mediaSourceId,
+          completed: entry.completed,
+        })),
+        total: listed.total,
+        nextCursor: listed.nextCursor,
+      });
+    }
+    if (path === "/watch/history/clear" && methodOf(request) === "POST") {
+      const body = yield* readJson(request);
+      const before = parseTimestamp(
+        typeof body === "object" && body !== null && "before" in body
+          ? (body as { before?: unknown }).before
+          : undefined,
+      );
+      if (before === null) return yield* Effect.fail(new InvalidEmbyRequest());
+      return json({ ok: true, deleted: yield* compat.clearHistory(before) });
+    }
+    const historyId = path.match(/^\/watch\/history\/([^/]+)$/);
+    if (historyId && historyId[1] !== "clear" && methodOf(request) === "DELETE") {
+      const removed = yield* compat.deleteHistory(yield* pathSegment(historyId[1]!));
+      if (!removed) return yield* Effect.fail(new EmbyNotFound());
+      return json({ ok: true });
+    }
+    return notFound();
+  });
+
+const methodOf = (request: Request) => request.method.toUpperCase();
+
 const handle = (services: EmbyServices, request: Request): Effect.Effect<Response, unknown> =>
   Effect.gen(function* () {
     const url = new URL(request.url);
@@ -686,33 +941,65 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
     const clientUserAgent = request.headers.get("user-agent") ?? undefined;
 
     if (method === "GET" && path === "/System/Info/Public") return json(serverInfo(services));
+    if (method === "GET" && path === "/Users/Public") return json([]);
 
     if (method === "POST" && path === "/Users/AuthenticateByName") {
       const metadata = yield* client(request);
       const body = yield* readJson(request).pipe(
         Effect.flatMap((value) => decode(EmbyLoginBody, value)),
       );
-      const session = yield* services.auth.loginEmby(
-        {
+      const password = body.Pw ?? body.Password;
+      if (password === undefined) return yield* Effect.fail(new InvalidEmbyRequest());
+      const attempted = yield* services.auth
+        .loginEmby(
+          {
+            username: body.Username,
+            password,
+            deviceId: metadata.DeviceId,
+            deviceName: metadata.Device,
+          },
+          { scopeKey: `emby:${body.Username}` },
+        )
+        .pipe(Effect.result);
+      if (Result.isSuccess(attempted)) {
+        return json({
+          AccessToken: attempted.success.accessToken,
+          ServerId: services.config.serverId,
+          User: user(services, attempted.success.userId),
+        });
+      }
+      if (failureTag(attempted.failure) !== "InvalidCredentials") {
+        return yield* Effect.fail(attempted.failure);
+      }
+      const connectionId =
+        services.compat === undefined ? null : yield* services.compat.verifyConnection(password);
+      if (connectionId !== null && services.auth.issueEmbySession !== undefined) {
+        const session = yield* services.auth.issueEmbySession({
           username: body.Username,
-          password: body.Pw,
+          password,
           deviceId: metadata.DeviceId,
           deviceName: metadata.Device,
-        },
-        { scopeKey: `emby:${body.Username}` },
-      );
-      return json({
-        AccessToken: session.accessToken,
-        ServerId: services.config.serverId,
-        User: user(services, session.userId),
-      });
+        });
+        if (session.tokenId !== undefined && services.compat !== undefined) {
+          yield* services.compat.linkConnectionDevice(connectionId, session.tokenId);
+        }
+        return json({
+          AccessToken: session.accessToken,
+          ServerId: services.config.serverId,
+          User: user(services, session.userId),
+        });
+      }
+      return yield* Effect.fail(attempted.failure);
     }
+
+    if (isConsolePath(path)) return yield* consoleRequest(services, request, path, url);
 
     const system = method === "GET" && path === "/System/Info";
     const virtualFolders = method === "GET" && path === "/Library/VirtualFolders";
     const displayPreferences =
       method === "GET" ? path.match(/^\/DisplayPreferences\/([^/]+)$/) : null;
-    const userProfile = method === "GET" ? path.match(/^\/Users\/([^/]+)$/) : null;
+    const userProfile =
+      method === "GET" && path !== "/Users/Public" ? path.match(/^\/Users\/([^/]+)$/) : null;
     const views = method === "GET" ? path.match(/^\/Users\/([^/]+)\/Views$/) : null;
     const userItems = method === "GET" ? path.match(/^\/Users\/([^/]+)\/Items$/) : null;
     const latestItems = method === "GET" ? path.match(/^\/Users\/([^/]+)\/Items\/Latest$/) : null;
@@ -720,13 +1007,19 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
     const studios = method === "GET" && path === "/Studios";
     const allItems = method === "GET" && path === "/Items";
     const userDetail = method === "GET" ? path.match(/^\/Users\/([^/]+)\/Items\/([^/]+)$/) : null;
-    const itemDetail = method === "GET" ? path.match(/^\/Items\/([^/]+)$/) : null;
+    const itemCounts = method === "GET" && path === "/Items/Counts";
+    const genres = method === "GET" && path === "/Genres";
+    const itemDetail =
+      method === "GET" && path !== "/Items/Counts" ? path.match(/^\/Items\/([^/]+)$/) : null;
     const similar = method === "GET" ? path.match(/^\/Items\/([^/]+)\/Similar$/) : null;
     const userDataRoute =
       method === "POST" ? path.match(/^\/Users\/([^/]+)\/Items\/([^/]+)\/UserData$/) : null;
     const favorite = path.match(/^\/Users\/([^/]+)\/FavoriteItems\/([^/]+)$/);
     const played = path.match(/^\/Users\/([^/]+)\/PlayedItems\/([^/]+)$/);
-    const playbackInfo = method === "POST" ? path.match(/^\/Items\/([^/]+)\/PlaybackInfo$/) : null;
+    const playbackInfo =
+      method === "GET" || method === "POST"
+        ? path.match(/^\/Items\/([^/]+)\/PlaybackInfo$/)
+        : null;
     const videoStream =
       method === "GET" || method === "HEAD"
         ? path.match(/^\/Videos\/([^/]+)\/stream(?:\.[^/]+)?$/)
@@ -734,11 +1027,36 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
     const videoDownload =
       method === "GET" || method === "HEAD" ? path.match(/^\/Items\/([^/]+)\/Download$/) : null;
     const image =
-      method === "GET" ? path.match(/^\/Items\/([^/]+)\/Images\/([^/]+)(?:\/(\d+))?$/) : null;
+      method === "GET" || method === "HEAD"
+        ? path.match(/^\/Items\/([^/]+)\/Images\/([^/]+)(?:\/(\d+))?$/)
+        : null;
+    const userImage =
+      method === "GET" || method === "HEAD"
+        ? path.match(/^\/Users\/([^/]+)\/Images\/([^/]+)(?:\/(\d+))?$/)
+        : null;
     const subtitle =
       method === "GET"
         ? path.match(/^\/Videos\/([^/]+)\/([^/]+)\/Subtitles\/(\d+)\/Stream\.([^/]+)$/)
         : null;
+    const playbackPing = method === "POST" && path === "/Sessions/Playing/Ping";
+    const logout = method === "POST" && path === "/Sessions/Logout";
+    const ping = (method === "GET" || method === "POST") && path === "/System/Ping";
+    const serverDomains = method === "GET" && path === "/System/Ext/ServerDomains";
+    const seasons = method === "GET" ? path.match(/^\/Shows\/([^/]+)\/Seasons$/) : null;
+    const episodes = method === "GET" ? path.match(/^\/Shows\/([^/]+)\/Episodes$/) : null;
+    const nextUp = method === "GET" && path === "/Shows/NextUp";
+    const additionalParts =
+      method === "GET" ? path.match(/^\/Videos\/([^/]+)\/AdditionalParts$/) : null;
+    const hideFromResume =
+      method === "POST" ? path.match(/^\/Users\/([^/]+)\/Items\/([^/]+)\/HideFromResume$/) : null;
+    const watchlistItem = path.match(/^\/Users\/([^/]+)\/WatchlistItems\/([^/]+)$/);
+    const watchlist = method === "GET" ? path.match(/^\/Users\/([^/]+)\/Watchlist$/) : null;
+    const historyClear =
+      method === "POST" ? path.match(/^\/Users\/([^/]+)\/PlaybackHistory\/Clear$/) : null;
+    const historyItem =
+      method === "DELETE" ? path.match(/^\/Users\/([^/]+)\/PlaybackHistory\/([^/]+)$/) : null;
+    const history =
+      method === "GET" ? path.match(/^\/Users\/([^/]+)\/PlaybackHistory$/) : null;
     const playbackKind =
       method === "POST"
         ? path === "/Sessions/Playing"
@@ -771,8 +1089,25 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
       !videoStream &&
       !videoDownload &&
       !image &&
+      !userImage &&
       !subtitle &&
-      !playbackKind
+      !playbackKind &&
+      !playbackPing &&
+      !logout &&
+      !ping &&
+      !serverDomains &&
+      !itemCounts &&
+      !genres &&
+      !seasons &&
+      !episodes &&
+      !nextUp &&
+      !additionalParts &&
+      !hideFromResume &&
+      !watchlistItem &&
+      !watchlist &&
+      !historyClear &&
+      !historyItem &&
+      !history
     )
       return notFound();
 
@@ -782,6 +1117,39 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
       return yield* Effect.fail(new EmbyForbidden());
     }
     if (system) return json(serverInfo(services));
+    if (ping) return json("Emby Server");
+    if (logout) {
+      if (services.compat === undefined) return failure(500, "Internal", "Internal server error");
+      yield* services.compat.deleteEmbyToken(principal.id);
+      return json("");
+    }
+    if (playbackPing) return json({});
+    if (serverDomains) {
+      return json({
+        ok: true,
+        data: [{ name: services.config.serverName, url: new URL(request.url).origin }],
+      });
+    }
+    if (itemCounts) {
+      return json(
+        services.compat === undefined
+          ? { MovieCount: 0, SeriesCount: 0, EpisodeCount: 0, ItemCount: 0 }
+          : yield* services.compat.counts(),
+      );
+    }
+    if (genres) {
+      const bounds = pageBounds(url);
+      if (bounds === null) return yield* Effect.fail(new InvalidEmbyRequest());
+      const page =
+        services.compat === undefined
+          ? { names: [], total: 0 }
+          : yield* services.compat.genres(bounds.start, bounds.limit);
+      return json({
+        Items: page.names.map((name) => ({ Id: `genre:${name}`, Name: name, ImageTags: {} })),
+        TotalRecordCount: page.total,
+        StartIndex: bounds.start,
+      });
+    }
 
     if (userProfile) return json(user(services, yield* requireUser(principal, userProfile[1]!)));
 
@@ -846,7 +1214,16 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
         ...(clientUserAgent === undefined ? {} : { clientUserAgent }),
       };
       const page = yield* services.federation.list(input);
-      return json(page.items.map((item) => itemDto(item, services.config.serverId)));
+      const flags = yield* loadFlags(
+        services,
+        page.items.map((item) => item.id),
+      );
+      const watched = decoded.IsWatchlisted;
+      const items = page.items.filter(
+        (item) =>
+          watched === undefined || (flags.get(item.id)?.watchlisted ?? false) === watched,
+      );
+      return json(items.map((item) => paintItem(services, itemDto(item, services.config.serverId), flags)));
     }
 
     if (userItems || allItems || resumeItems || studios) {
@@ -872,9 +1249,25 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
         : decoded.SearchTerm
           ? yield* services.federation.search({ ...input, searchTerm: decoded.SearchTerm })
           : yield* services.federation.list(input);
+      const hidden = resumeItems && services.compat !== undefined ? yield* services.compat.hiddenIds() : new Set<string>();
+      const visible = page.items.filter((item) => !hidden.has(item.id));
+      const flags = studios
+        ? new Map<string, ItemFlags>()
+        : yield* loadFlags(
+            services,
+            visible.map((item) => item.id),
+          );
+      const watched = decoded.IsWatchlisted;
+      const items = visible.filter(
+        (item) => watched === undefined || (flags.get(item.id)?.watchlisted ?? false) === watched,
+      );
       return json({
-        Items: page.items.map((item) => itemDto(item, services.config.serverId)),
-        TotalRecordCount: page.totalRecordCount,
+        Items: items.map((item) =>
+          studios
+            ? itemDto(item, services.config.serverId)
+            : paintItem(services, itemDto(item, services.config.serverId), flags),
+        ),
+        TotalRecordCount: page.totalRecordCount - (page.items.length - items.length),
         StartIndex: input.startIndex,
       });
     }
@@ -897,7 +1290,8 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
         });
       const item = yield* services.federation.detail(canonicalId, clientUserAgent);
       if (item === null) return yield* Effect.fail(new EmbyNotFound());
-      return json(itemDto(item, services.config.serverId));
+      const flags = yield* loadFlags(services, [item.id]);
+      return json(paintItem(services, itemDto(item, services.config.serverId), flags));
     }
 
     if (similar) {
@@ -920,9 +1314,9 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
         body.LastPlayedVersionId ?? undefined,
       );
       if (membership === null) return yield* Effect.fail(new EmbyNotFound());
-      return json(
-        userData(yield* services.userState.write(membership.item.id, patch), membership.item.id),
-      );
+      const written = yield* services.userState.write(membership.item.id, patch);
+      const flags = yield* loadFlags(services, [membership.item.id]);
+      return json(paintUserData(services, written, membership.item.id, flags));
     }
 
     if (favorite && (method === "POST" || method === "DELETE")) {
@@ -930,14 +1324,11 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
       const canonicalId = yield* pathSegment(favorite[2]!);
       const membership = yield* services.federation.lookupMembership(canonicalId);
       if (membership === null) return yield* Effect.fail(new EmbyNotFound());
-      return json(
-        userData(
-          yield* services.userState.write(membership.item.id, {
-            favorite: method === "POST",
-          }),
-          membership.item.id,
-        ),
-      );
+      const written = yield* services.userState.write(membership.item.id, {
+        favorite: method === "POST",
+      });
+      const flags = yield* loadFlags(services, [membership.item.id]);
+      return json(paintUserData(services, written, membership.item.id, flags));
     }
 
     if (played && (method === "POST" || method === "DELETE")) {
@@ -949,17 +1340,59 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
         method === "POST"
           ? { played: true, positionTicks: 0 }
           : { played: false, playCount: 0, positionTicks: 0 };
-      return json(
-        userData(yield* services.userState.write(membership.item.id, patch), membership.item.id),
-      );
+      const written = yield* services.userState.write(membership.item.id, patch);
+      const flags = yield* loadFlags(services, [membership.item.id]);
+      return json(paintUserData(services, written, membership.item.id, flags));
     }
 
     if (playbackInfo) {
       const canonicalId = yield* pathSegment(playbackInfo[1]!);
+      const body =
+        method === "POST"
+          ? yield* readOptionalJson(request).pipe(
+              Effect.flatMap((value) => decode(EmbyPlaybackRequest, value)),
+            )
+          : {};
+      const queryUserId = url.searchParams.get("UserId");
+      const querySource = url.searchParams.get("MediaSourceId");
+      const queryAgent = url.searchParams.get("PlaybackUserAgent");
+      if (
+        !agree(queryUserId, body.UserId) ||
+        !agree(querySource, body.MediaSourceId) ||
+        !agree(queryAgent, body.PlaybackUserAgent)
+      ) {
+        return yield* Effect.fail(new InvalidEmbyRequest());
+      }
+      const requestedId = body.UserId ?? queryUserId ?? undefined;
+      if (requestedId !== undefined && requestedId !== "" && requestedId !== principal.username) {
+        return yield* Effect.fail(new EmbyForbidden());
+      }
+      const mediaSourceId = (body.MediaSourceId ?? querySource)?.trim() || undefined;
+      const playbackUserAgent = (body.PlaybackUserAgent ?? queryAgent)?.trim() || clientUserAgent;
       const membership = yield* services.federation.lookupMembership(canonicalId);
       if (membership === null) return yield* Effect.fail(new EmbyNotFound());
-      const info = yield* services.playback.getInfo(membership.item.id, clientUserAgent);
-      return json(playbackInfoDto(info));
+      const info = yield* services.playback.getInfo(membership.item.id, playbackUserAgent);
+      const dto = playbackInfoDto(info);
+      const sources = dto.MediaSources.flatMap((source) => {
+        if (mediaSourceId !== undefined && source.Id !== mediaSourceId) return [];
+        const current = source as EmbyMediaSourceDtoValue & { Path?: string; DirectStreamUrl?: string };
+        if (typeof current.Path !== "string" || !current.Path.startsWith("/Videos/")) return [source];
+        const absolute = new URL(current.Path, request.url).href;
+        return [
+          {
+            ...current,
+            Path: absolute,
+            DirectStreamUrl: absolute,
+            ...(playbackUserAgent === undefined
+              ? {}
+              : { RequiredHttpHeaders: { "User-Agent": playbackUserAgent } }),
+          },
+        ];
+      });
+      if (mediaSourceId !== undefined && sources.length === 0) {
+        return yield* Effect.fail(new EmbyNotFound());
+      }
+      return json({ ...dto, MediaSources: sources });
     }
 
     if (videoStream || videoDownload) {
@@ -984,12 +1417,16 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
         ...(image[3] === undefined ? {} : { imageIndex: Number(image[3]) }),
         ...(clientUserAgent === undefined ? {} : { clientUserAgent }),
       });
-      if (decision._tag === "Redirect") return redirect(decision.location);
-      return yield* serveRegisteredResource(decision.request, {
+      if (decision._tag === "Redirect") {
+        const response = redirect(decision.location);
+        return method === "HEAD" ? withoutBody(response) : response;
+      }
+      const response = yield* serveRegisteredResource(decision.request, {
         ...(services.resourceCache === undefined ? {} : { cache: services.resourceCache }),
         now: services.now,
         signal: request.signal,
       });
+      return method === "HEAD" ? withoutBody(response) : response;
     }
 
     if (subtitle) {
@@ -1005,6 +1442,246 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
       return yield* serveRegisteredResource(decision.request, {
         now: services.now,
         signal: request.signal,
+      });
+    }
+
+    if (userImage) {
+      yield* requireUser(principal, userImage[1]!);
+      const imageType = yield* pathSegment(userImage[2]!);
+      const index = userImage[3] === undefined ? 0 : Number(userImage[3]);
+      if (imageType !== "Primary" || index !== 0) return yield* Effect.fail(new EmbyNotFound());
+      return new Response(method === "HEAD" ? null : defaultUserLogoBytes, {
+        status: 200,
+        headers: {
+          "content-type": "image/svg+xml",
+          "content-length": String(defaultUserLogoBytes.byteLength),
+          "cache-control": "private, no-store",
+        },
+      });
+    }
+
+    if (seasons || episodes) {
+      const match = (seasons ?? episodes)!;
+      const seriesId = yield* pathSegment(match[1]!);
+      if (services.federation.showChildren === undefined) return notFound();
+      const bounds = episodes ? pageBounds(url) : pageBounds(url, 200);
+      if (bounds === null) return yield* Effect.fail(new InvalidEmbyRequest());
+      const seasonRaw = episodes ? url.searchParams.get("Season") : null;
+      const seasonNumber = seasonRaw === null ? undefined : Number(seasonRaw);
+      if (
+        seasonNumber !== undefined &&
+        (!Number.isSafeInteger(seasonNumber) || seasonNumber < 0)
+      ) {
+        return yield* Effect.fail(new InvalidEmbyRequest());
+      }
+      const seasonId = episodes ? url.searchParams.get("SeasonId")?.trim() || undefined : undefined;
+      const page = yield* services.federation.showChildren({
+        seriesId,
+        kind: seasons ? "Season" : "Episode",
+        startIndex: bounds.start,
+        limit: bounds.limit,
+        ...(seasonNumber === undefined ? {} : { seasonNumber }),
+        ...(seasonId === undefined ? {} : { seasonId }),
+        ...(clientUserAgent === undefined ? {} : { clientUserAgent }),
+      });
+      if (page === null) return yield* Effect.fail(new EmbyNotFound());
+      const flags = yield* loadFlags(
+        services,
+        page.items.map((item) => item.id),
+      );
+      return json({
+        Items: page.items.map((item) =>
+          paintItem(services, itemDto(item, services.config.serverId), flags),
+        ),
+        TotalRecordCount: page.totalRecordCount,
+        StartIndex: bounds.start,
+      });
+    }
+
+    if (nextUp) {
+      if (services.federation.showChildren === undefined) return notFound();
+      const seriesId = url.searchParams.get("SeriesId")?.trim() || undefined;
+      const seriesIds = seriesId
+        ? [seriesId]
+        : (yield* services.federation.list({
+            userId: principal.username,
+            deviceId: principal.deviceId,
+            virtualLibraryId: null,
+            startIndex: 0,
+            limit: 50,
+            sort: [],
+            filters: [],
+            itemTypes: ["Series"],
+            ...(clientUserAgent === undefined ? {} : { clientUserAgent }),
+          })).items
+            .filter((item) => item.itemType === "Series")
+            .map((item) => item.id);
+      const next: CanonicalItemView[] = [];
+      for (const id of seriesIds) {
+        const page = yield* services.federation.showChildren({
+          seriesId: id,
+          kind: "Episode",
+          startIndex: 0,
+          limit: 200,
+          ...(clientUserAgent === undefined ? {} : { clientUserAgent }),
+        });
+        if (page === null) {
+          if (seriesId) return yield* Effect.fail(new EmbyNotFound());
+          continue;
+        }
+        const regular = [...page.items]
+          .filter((episode) => object(episode.displayMetadata).ParentIndexNumber !== 0)
+          .sort((left, right) => {
+            const leftSeason = Number(object(left.displayMetadata).ParentIndexNumber ?? 0);
+            const rightSeason = Number(object(right.displayMetadata).ParentIndexNumber ?? 0);
+            const leftIndex = Number(object(left.displayMetadata).IndexNumber ?? 0);
+            const rightIndex = Number(object(right.displayMetadata).IndexNumber ?? 0);
+            return leftSeason - rightSeason || leftIndex - rightIndex || left.id.localeCompare(right.id);
+          });
+        const upcoming = regular.find((episode) => !(episode.userState?.played ?? false));
+        if (upcoming === undefined || (upcoming.userState?.positionTicks ?? 0) > 0) continue;
+        next.push(upcoming);
+      }
+      const flags = yield* loadFlags(
+        services,
+        next.map((item) => item.id),
+      );
+      return json({
+        Items: next.map((item) => paintItem(services, itemDto(item, services.config.serverId), flags)),
+        TotalRecordCount: next.length,
+        StartIndex: 0,
+      });
+    }
+
+    if (additionalParts) {
+      const canonicalId = yield* pathSegment(additionalParts[1]!);
+      if ((yield* services.federation.lookupMembership(canonicalId)) === null) {
+        return yield* Effect.fail(new EmbyNotFound());
+      }
+      return json([]);
+    }
+
+    if (hideFromResume) {
+      if (services.compat === undefined) return failure(500, "Internal", "Internal server error");
+      yield* requireUser(principal, hideFromResume[1]!);
+      const canonicalId = yield* pathSegment(hideFromResume[2]!);
+      const hideRaw = url.searchParams.get("Hide");
+      const hide =
+        hideRaw === null || hideRaw.trim() === ""
+          ? true
+          : hideRaw.toLowerCase() === "true"
+            ? true
+            : hideRaw.toLowerCase() === "false"
+              ? false
+              : null;
+      if (hide === null) return yield* Effect.fail(new InvalidEmbyRequest());
+      const membership = yield* services.federation.lookupMembership(canonicalId);
+      if (membership === null) return yield* Effect.fail(new EmbyNotFound());
+      yield* services.compat.setHiddenFromResume(membership.item.id, hide);
+      const flags = yield* loadFlags(services, [membership.item.id]);
+      return json(paintUserData(services, membership.item.userState, membership.item.id, flags));
+    }
+
+    if (watchlistItem && (method === "POST" || method === "DELETE")) {
+      if (services.compat === undefined) return failure(500, "Internal", "Internal server error");
+      yield* requireUser(principal, watchlistItem[1]!);
+      const canonicalId = yield* pathSegment(watchlistItem[2]!);
+      const membership = yield* services.federation.lookupMembership(canonicalId);
+      if (membership === null) return yield* Effect.fail(new EmbyNotFound());
+      yield* services.compat.setWatchlisted(
+        membership.item.id,
+        method === "POST",
+        services.now(),
+      );
+      const flags = yield* loadFlags(services, [membership.item.id]);
+      return json(paintUserData(services, membership.item.userState, membership.item.id, flags));
+    }
+
+    if (watchlist) {
+      if (services.compat === undefined) return failure(500, "Internal", "Internal server error");
+      yield* requireUser(principal, watchlist[1]!);
+      const bounds = pageBounds(url);
+      if (bounds === null) return yield* Effect.fail(new InvalidEmbyRequest());
+      const saved = yield* services.compat.listWatchlist();
+      const hydrated: CanonicalItemView[] = [];
+      for (const entry of saved) {
+        const item = yield* services.federation.detail(entry.canonicalId, clientUserAgent);
+        if (item !== null) hydrated.push(item);
+      }
+      const term = url.searchParams.get("SearchTerm")?.trim().toLowerCase() ?? "";
+      const types = split(url.searchParams.get("IncludeItemTypes"))?.filter(Boolean) ?? [];
+      const filtered = hydrated.filter((item) => {
+        const name = String(object(item.displayMetadata).Name ?? "").toLowerCase();
+        return (term === "" || name.includes(term)) && (types.length === 0 || types.includes(item.itemType));
+      });
+      const page = filtered.slice(bounds.start, bounds.start + bounds.limit);
+      const flags = yield* loadFlags(
+        services,
+        page.map((item) => item.id),
+      );
+      return json({
+        Items: page.map((item) => paintItem(services, itemDto(item, services.config.serverId), flags)),
+        TotalRecordCount: filtered.length,
+        StartIndex: bounds.start,
+      });
+    }
+
+    if (history || historyItem || historyClear) {
+      if (services.compat === undefined) return failure(500, "Internal", "Internal server error");
+      const match = (history ?? historyItem ?? historyClear)!;
+      yield* requireUser(principal, match[1]!);
+      if (historyClear) {
+        const body = yield* readJson(request);
+        const before = parseTimestamp(
+          typeof body === "object" && body !== null && "Before" in body
+            ? (body as { Before?: unknown }).Before
+            : undefined,
+        );
+        if (before === null) return yield* Effect.fail(new InvalidEmbyRequest());
+        return json({ ok: true, deleted: yield* services.compat.clearHistory(before) });
+      }
+      if (historyItem) {
+        const removed = yield* services.compat.deleteHistory(yield* pathSegment(historyItem[2]!));
+        if (!removed) return yield* Effect.fail(new EmbyNotFound());
+        return json({ ok: true });
+      }
+      if (url.searchParams.has("Cursor") && url.searchParams.has("StartIndex")) {
+        return yield* Effect.fail(new InvalidEmbyRequest());
+      }
+      const bounds = pageBounds(url);
+      if (bounds === null) return yield* Effect.fail(new InvalidEmbyRequest());
+      const cursorRaw = url.searchParams.get("Cursor");
+      const cursor = cursorRaw === null || cursorRaw === "" ? null : decodeHistoryCursor(cursorRaw);
+      if (cursorRaw !== null && cursorRaw !== "" && cursor === null) {
+        return yield* Effect.fail(new InvalidEmbyRequest());
+      }
+      const listed = yield* services.compat.listHistory({
+        cursor,
+        startIndex: bounds.start,
+        limit: bounds.limit,
+        search: url.searchParams.get("SearchTerm"),
+        itemId: url.searchParams.get("ItemId"),
+      });
+      return json({
+        Items: listed.items.map((entry) => ({
+          Id: entry.id,
+          ItemId: entry.canonicalId,
+          Name: entry.itemName,
+          MediaSourceId: entry.mediaSourceId,
+          SourceName: entry.sourceName,
+          Client: entry.clientName,
+          DeviceName: entry.deviceName,
+          StartedAt: isoTime(entry.startedAtMs),
+          StoppedAt: entry.stoppedAtMs === null ? null : isoTime(entry.stoppedAtMs),
+          PlaybackPositionTicks: entry.positionTicks,
+          RunTimeTicks: entry.runtimeTicks,
+          Completed: entry.completed,
+          ...(percentage(entry.positionTicks, entry.runtimeTicks) === undefined
+            ? {}
+            : { PlayedPercentage: percentage(entry.positionTicks, entry.runtimeTicks) }),
+        })),
+        TotalRecordCount: listed.total,
+        NextCursor: listed.nextCursor,
       });
     }
 
@@ -1034,6 +1711,28 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
           completed,
         ),
       );
+      if (services.compat !== undefined) {
+        const metadata = object(membership.item.displayMetadata);
+        const runtime = metadata.RunTimeTicks;
+        const authorization = {
+          ...parseAuthorization(request.headers.get("authorization")),
+          ...parseAuthorization(request.headers.get("x-emby-authorization")),
+        };
+        yield* services.compat.recordPlayback({
+          kind: playbackKind,
+          playSessionId: body.PlaySessionId,
+          canonicalId: membership.item.id,
+          itemName: typeof metadata.Name === "string" ? metadata.Name : membership.item.id,
+          mediaSourceId: body.MediaSourceId,
+          sourceName: membership.version.label,
+          deviceName: principal.deviceName,
+          clientName: authorization.client ?? null,
+          positionTicks: body.PositionTicks ?? 0,
+          runtimeTicks: typeof runtime === "number" ? runtime : null,
+          completed,
+          nowMs: services.now(),
+        });
+      }
       return new Response(null, { status: 204 });
     }
 
