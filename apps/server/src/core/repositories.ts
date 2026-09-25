@@ -1,6 +1,7 @@
 import type { OutboxFailureView, SystemStatusView } from "@oh-my-emby/contracts"
 import { Context, type Effect } from "effect"
 
+import type { DrivembyCompat } from "./drivemby-compat.js"
 import type { AuthError, ClaimError, IdentityFailure, RepositoryError } from "./errors.js"
 import type { PreparedIdentityCandidate } from "./identity.js"
 import type {
@@ -202,6 +203,7 @@ export interface RepositoriesService {
   readonly runMaintenanceBatch: (nowMs: number) => Effect.Effect<MaintenanceResult, RepositoryError>
   readonly readSystemStatus: () => Effect.Effect<SystemStatusView, RepositoryError>
   readonly listOutboxFailures: () => Effect.Effect<ReadonlyArray<OutboxFailureView>, RepositoryError>
+  readonly drivemby: DrivembyCompat
 }
 
 export class Repositories extends Context.Service<Repositories, RepositoriesService>()(

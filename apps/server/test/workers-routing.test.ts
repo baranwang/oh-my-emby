@@ -194,6 +194,10 @@ const runAcceptanceFetch = async (path: string, init?: RequestInit) => {
 }
 
 const mutableTables = [
+  "emby_connection_devices",
+  "emby_connections",
+  "playback_history",
+  "item_flags",
   "external_metadata_cache",
   "metadata_provider_settings",
   "playback_watermarks",

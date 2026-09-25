@@ -164,6 +164,7 @@ export const startBunRuntime = async (config: BunRuntimeConfig): Promise<BunRunt
       const dashboardHandler = yield* HttpRouter.toHttpEffect(HttpApiBuilder.layer(DashboardApi))
       const auth = yield* Auth
       const federation = yield* Federation
+      const repositories = yield* Repositories
       const userState = yield* UserState
       const libraries = yield* LibraryService
       const playback = yield* Playback
@@ -181,7 +182,8 @@ export const startBunRuntime = async (config: BunRuntimeConfig): Promise<BunRunt
           userState,
           libraries,
           playback,
-          resourceCache
+          resourceCache,
+          compat: repositories.drivemby
         }),
         handleDashboardAsset: (assetRequest) => serveDashboardAsset(assetRequest, config.assetsDir)
       })

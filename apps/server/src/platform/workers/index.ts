@@ -21,6 +21,7 @@ import { makeMetadataSettingsLayer } from "../../core/metadata-settings.js"
 import { makeMetadataProvidersLayer } from "../../core/metadata-providers.js"
 import { makeOutboxLayer } from "../../core/outbox.js"
 import { Playback, makePlaybackLayer } from "../../core/playback.js"
+import { Repositories } from "../../core/repositories.js"
 import { makeServerServiceLayer } from "../../core/server-service.js"
 import { makeUpstreamClientLayer } from "../../core/upstream-client.js"
 import { UserState, makeUserStateLayer } from "../../core/user-state.js"
@@ -113,6 +114,7 @@ export const runWorkerRequest = async (
     const dashboardHandler = yield* HttpRouter.toHttpEffect(HttpApiBuilder.layer(DashboardApi))
     const auth = yield* Auth
     const federation = yield* Federation
+    const repositories = yield* Repositories
     const userState = yield* UserState
     const libraries = yield* LibraryService
     const playback = yield* Playback
@@ -130,7 +132,8 @@ export const runWorkerRequest = async (
         userState,
         libraries,
         playback,
-        resourceCache
+        resourceCache,
+        compat: repositories.drivemby
       }),
       handleDashboardAsset: (assetRequest) => serveDashboardAsset(assetRequest, env.ASSETS)
     })

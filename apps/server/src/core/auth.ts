@@ -51,6 +51,7 @@ export interface EmbyTokenView {
   readonly accessToken: string
   readonly userId: string
   readonly expiresAtMs: number
+  readonly tokenId?: string
 }
 
 export interface SessionPrincipal {
@@ -86,6 +87,9 @@ export interface AuthService {
   readonly loginEmby: (
     input: EmbyLoginInput,
     options: LoginOptions
+  ) => Effect.Effect<EmbyTokenView, LoginError>
+  readonly issueEmbySession: (
+    input: EmbyLoginInput
   ) => Effect.Effect<EmbyTokenView, LoginError>
   readonly authenticateDashboard: (
     token: string
@@ -224,21 +228,33 @@ export const makeAuthLayer = (config: AuthLayerConfig = {}): Layer.Layer<Auth, n
     const loginDashboard: AuthService["loginDashboard"] = (input, options) =>
       verifyCredentials(input, options).pipe(Effect.flatMap(issueDashboardSession))
 
-    const loginEmby: AuthService["loginEmby"] = (input, options) => Effect.gen(function*() {
-      const user = yield* verifyCredentials(input, options)
+    const issueEmbyTokenFor = (
+      user: UserRecord,
+      device: Pick<EmbyLoginInput, "deviceId" | "deviceName">
+    ) => Effect.gen(function*() {
       const accessToken = encodeToken(randomBytes(tokenBytes))
       const issuedAtMs = now()
+      const tokenId = crypto.randomUUID()
       yield* repositories.issueEmbyToken({
-        id: crypto.randomUUID(),
+        id: tokenId,
         tokenHash: yield* hashToken(accessToken),
         expectedAuthGeneration: user.authGeneration,
-        deviceId: input.deviceId,
-        deviceName: input.deviceName,
+        deviceId: device.deviceId,
+        deviceName: device.deviceName,
         createdAtMs: issuedAtMs,
         lastUsedAtMs: issuedAtMs,
         expiresAtMs: embyTokenExpiresAtMs
       })
-      return { accessToken, userId: user.username, expiresAtMs: embyTokenExpiresAtMs }
+      return { accessToken, userId: user.username, expiresAtMs: embyTokenExpiresAtMs, tokenId }
+    })
+
+    const loginEmby: AuthService["loginEmby"] = (input, options) =>
+      verifyCredentials(input, options).pipe(Effect.flatMap((user) => issueEmbyTokenFor(user, input)))
+
+    const issueEmbySession: AuthService["issueEmbySession"] = (input) => Effect.gen(function*() {
+      const user = yield* repositories.getUserByName(input.username)
+      if (!user) return yield* Effect.fail(new InvalidCredentials())
+      return yield* issueEmbyTokenFor(user, input)
     })
 
     const authenticateDashboard: AuthService["authenticateDashboard"] = (token) => Effect.gen(function*() {
@@ -292,6 +308,7 @@ export const makeAuthLayer = (config: AuthLayerConfig = {}): Layer.Layer<Auth, n
       claim,
       loginDashboard,
       loginEmby,
+      issueEmbySession,
       authenticateDashboard,
       authenticateEmby,
       logoutDashboard,

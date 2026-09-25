@@ -1087,7 +1087,8 @@ it("keeps Wrangler and application migration bookkeeping separate", async () => 
     meta: expect.any(Object),
     results: [
       { version: 1, name: "initial" },
-      { version: 2, name: "dashboard_alignment" }
+      { version: 2, name: "dashboard_alignment" },
+      { version: 4, name: "drivemby_compat" }
     ]
   })
 })
