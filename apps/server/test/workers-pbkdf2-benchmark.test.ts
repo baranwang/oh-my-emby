@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest"
 
+import { PBKDF2_ITERATIONS } from "../src/core/limits.js"
 import benchmarkWorker from "../../../scripts/workers-pbkdf2-benchmark.js"
 
 describe("Workers PBKDF2 benchmark entrypoint", () => {
@@ -28,7 +29,7 @@ describe("Workers PBKDF2 benchmark entrypoint", () => {
     expect(result).toEqual({
       runtime: "Cloudflare Workers",
       compatibilityDate: "2026-09-20",
-      iterations: 310_000,
+      iterations: PBKDF2_ITERATIONS,
       derivations: 1
     })
   })

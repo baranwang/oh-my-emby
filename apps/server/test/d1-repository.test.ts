@@ -552,7 +552,7 @@ describe("D1 parity regressions", () => {
         password: {
           hash: new Uint8Array([20]),
           salt: new Uint8Array([21]),
-          iterations: 310_000
+          iterations: 100_000
         },
         expectedAuthGeneration: 1,
         updatedAtMs: 2_000

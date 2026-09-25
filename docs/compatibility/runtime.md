@@ -17,7 +17,7 @@ bun scripts/benchmark-pbkdf2.ts
 
 Remote Worker measurement is deliberately **UNEXECUTED** in Task 15 because remote Cloudflare side effects were not authorized. Deployed Workers deliberately freeze high-resolution timers while CPU-only code runs, so the temporary Worker performs one untimed derivation per authenticated request and `scripts/benchmark-workers-pbkdf2.ts` measures ten requests from the caller. The recorded value is therefore a conservative end-to-end upper bound that includes network latency, not a fabricated CPU-only duration. `./scripts/smoke-workers.sh --remote` runs this benchmark after the application smoke and prints the result before deleting the run-owned resources.
 
-If either target misses 250 ms, change only `PBKDF2_ITERATIONS`, then rerun authentication tests and both runtime benchmarks before release. Do not claim one target from the other target's result.
+Workers use 100,000 PBKDF2 iterations because 310,000 iterations exceeds the Worker CPU budget during interactive setup. If either target misses 250 ms, change only `PBKDF2_ITERATIONS`, then rerun authentication tests and both runtime benchmarks before release. Do not claim one target from the other target's result.
 
 ## Runtime smoke matrix
 
