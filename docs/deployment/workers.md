@@ -4,11 +4,12 @@
 
 Click the button, sign in to Cloudflare, and authorize GitHub or GitLab. Cloudflare clones this public repository into your account, creates the D1 database, builds the app, and deploys it. Later pushes to your copy deploy automatically.
 
-On the setup page, keep the root directory at the repository root. Accept these commands:
+On the setup page, keep the root directory at the repository root. The page should show:
 
 ```sh
-bun install --frozen-lockfile
-bun run build && bun --filter @oh-my-emby/server deploy
+bun run build
+bun run deploy
+bun run preview
 ```
 
 The deploy script applies D1 migrations and then deploys. If migrations fail, the new version is not deployed. Do not create the database yourself or write its ID into the repository. The binding name must stay `DB`.
