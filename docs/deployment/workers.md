@@ -12,7 +12,7 @@ bun run deploy
 bun run preview
 ```
 
-The deploy script applies D1 migrations and then deploys. If migrations fail, the new version is not deployed. Do not create the database yourself or write its ID into the repository. The binding name must stay `DB`.
+The deploy script publishes first so Cloudflare can create the D1 database, then applies its migrations. A failed migration leaves the new Worker deployed and must be rerun. Do not create the database yourself or write its ID into the repository. The binding name must stay `DB`.
 
 No API key or public-origin variable is required. The first visitor to an uninitialized deployment can become its owner, so keep the address private until you create the account. Then open `/dashboard`.
 
