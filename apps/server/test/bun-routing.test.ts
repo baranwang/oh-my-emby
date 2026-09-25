@@ -51,6 +51,19 @@ describe("Bun production routing", () => {
     expect(await response.text()).not.toContain("outside-secret")
   })
 
+  it("redirects GET / to the dashboard", async () => {
+    const response = await request("/", {
+      redirect: "manual",
+      headers: { accept: "text/html" }
+    })
+    expect(response.status).toBe(302)
+    expect(response.headers.get("location")).toBe("/dashboard")
+
+    const dashboard = await request("/dashboard", { headers: { accept: "text/html" } })
+    expect(dashboard.status).toBe(200)
+    expect(await dashboard.text()).toContain("<main>dashboard</main>")
+  })
+
   it("serves the SPA only for GET and HEAD Dashboard navigations", async () => {
     const get = await request("/dashboard/servers", { headers: { accept: "text/html" } })
     expect(get.status).toBe(200)

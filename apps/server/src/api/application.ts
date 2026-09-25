@@ -59,6 +59,12 @@ export const routeApplication = (
   if (pathname === "/health" && (request.method === "GET" || request.method === "HEAD")) {
     return Response.json({ status: "ok" })
   }
+  if (pathname === "/" && (request.method === "GET" || request.method === "HEAD")) {
+    return new Response(null, {
+      status: 302,
+      headers: { location: "/dashboard", "cache-control": "private, no-store" }
+    })
+  }
   if (pathname === "/api/dashboard" || pathname.startsWith("/api/dashboard/")) {
     return yield* services.handleDashboard(request)
   }
