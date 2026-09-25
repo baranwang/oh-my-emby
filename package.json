@@ -9,7 +9,7 @@
     "dev": "turbo run dev",
     "build": "turbo run build",
     "deploy": "bun --filter @oh-my-emby/server deploy",
-    "preview": "apps/server/node_modules/.bin/wrangler versions upload --config wrangler.jsonc",
+    "preview": "apps/server/node_modules/.bin/wrangler preview --config wrangler.jsonc",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
     "check": "turbo run typecheck test build"
