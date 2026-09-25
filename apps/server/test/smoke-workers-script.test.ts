@@ -2,7 +2,9 @@ import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest"
+
+import { PBKDF2_ITERATIONS } from "../src/core/limits.js";
 
 import benchmarkWorker from "../../../scripts/workers-pbkdf2-benchmark.js";
 
@@ -453,7 +455,7 @@ describe("Workers remote smoke plan", () => {
         runtime: "Cloudflare Workers",
         measurement: "remote-request-upper-bound",
         compatibilityDate: "2026-09-20",
-        iterations: 310_000,
+        iterations: PBKDF2_ITERATIONS,
         runs: 10,
         warmupRunsDiscarded: 1,
         gateMs: 250,

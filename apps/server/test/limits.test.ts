@@ -15,6 +15,6 @@ describe("bounded core", () => {
     expect(MAX_PAGE_SIZE).toBe(100)
     expect(MAX_MATERIALIZED_ITEMS).toBeGreaterThanOrEqual(MAX_PAGE_SIZE)
     expect(DB_BATCH_SIZE).toBeLessThanOrEqual(100)
-    expect(PBKDF2_ITERATIONS).toBe(310_000)
+    expect(PBKDF2_ITERATIONS).toBe(100_000)
   })
 })

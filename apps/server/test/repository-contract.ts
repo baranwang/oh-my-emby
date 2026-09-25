@@ -1,6 +1,8 @@
 import { Effect, type Layer } from "effect"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
+import { PBKDF2_ITERATIONS } from "../src/core/limits.js"
+
 import type {
   CanonicalFixture,
   ExternalMetadataCacheEntry,
@@ -29,7 +31,7 @@ export interface RepositoryHarness {
 export const passwordRecord = {
   hash: new Uint8Array([1, 2, 3]),
   salt: new Uint8Array([4, 5, 6]),
-  iterations: 310_000
+  iterations: PBKDF2_ITERATIONS
 }
 
 export const canonicalFixture: CanonicalFixture = {
@@ -550,7 +552,7 @@ export const repositoryContract = (makeHarness: () => Promise<RepositoryHarness>
         const repo = yield* Repositories
         const user = yield* repo.getUserByName("owner")
         expect(user?.username).toBe("owner")
-        expect(user?.password.iterations).toBe(310_000)
+        expect(user?.password.iterations).toBe(PBKDF2_ITERATIONS)
       }).pipe(Effect.provide(harness.layer)))
     })
   })
