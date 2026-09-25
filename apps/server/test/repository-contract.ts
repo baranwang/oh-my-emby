@@ -1,6 +1,8 @@
 import { Effect, type Layer } from "effect"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
+import { PBKDF2_ITERATIONS } from "../src/core/limits.js"
+
 import type {
   CanonicalFixture,
   ExternalMetadataCacheEntry,
