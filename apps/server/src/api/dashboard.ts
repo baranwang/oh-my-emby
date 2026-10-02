@@ -204,7 +204,8 @@ export const publicFailure = (
       ? error.detail
       : undefined;
   const diagnostic = detail === undefined ? {} : { detail };
-  const respond = (body: unknown) => HttpServerResponse.jsonUnsafe(body, { status: statusFor(tag) });
+  const respond = (body: unknown) =>
+    HttpServerResponse.jsonUnsafe(body, { status: statusFor(tag) });
   switch (tag) {
     case "AlreadyInitialized":
       return respond({ _tag: "Conflict", code: "already_initialized" });

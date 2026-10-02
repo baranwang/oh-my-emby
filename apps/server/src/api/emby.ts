@@ -235,7 +235,7 @@ const logRequest = (
 };
 
 const number = (value: string | null): number | undefined =>
-  value === null ? undefined : (value.trim() === "" ? Number.NaN : Number(value));
+  value === null ? undefined : value.trim() === "" ? Number.NaN : Number(value);
 
 const booleanQuery = (value: string | null): boolean | undefined => {
   if (value === null || value.trim() === "") return undefined;
@@ -336,7 +336,7 @@ const pathSegment = (value: string): Effect.Effect<string, InvalidEmbyRequest> =
 
 const normalizedPath = (pathname: string): string => {
   let path =
-    pathname === "/emby" ? "/" : (pathname.startsWith("/emby/") ? pathname.slice(5) : pathname);
+    pathname === "/emby" ? "/" : pathname.startsWith("/emby/") ? pathname.slice(5) : pathname;
   if (
     path === "/api/me" ||
     path.startsWith("/api/me/") ||
@@ -725,7 +725,13 @@ const paintUserData = (
 const pageBounds = (url: URL, fallbackLimit = 50) => {
   const start = number(url.searchParams.get("StartIndex")) ?? 0;
   const limit = number(url.searchParams.get("Limit")) ?? fallbackLimit;
-  if (!Number.isSafeInteger(start) || start < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 200) {
+  if (
+    !Number.isSafeInteger(start) ||
+    start < 0 ||
+    !Number.isSafeInteger(limit) ||
+    limit < 1 ||
+    limit > 200
+  ) {
     return null;
   }
   return { start, limit };
@@ -813,7 +819,8 @@ const consoleRequest = (
     const compat = services.compat;
     if (path === "/me/emby-connections" && methodOf(request) === "POST") {
       const body = yield* readJson(request);
-      const name = typeof body === "object" && body !== null && "name" in body ? body.name : undefined;
+      const name =
+        typeof body === "object" && body !== null && "name" in body ? body.name : undefined;
       const password =
         typeof body === "object" && body !== null && "password" in body ? body.password : undefined;
       if (typeof name !== "string" || name.trim().length < 1 || name.length > 80) {
@@ -1017,9 +1024,7 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
     const favorite = path.match(/^\/Users\/([^/]+)\/FavoriteItems\/([^/]+)$/);
     const played = path.match(/^\/Users\/([^/]+)\/PlayedItems\/([^/]+)$/);
     const playbackInfo =
-      method === "GET" || method === "POST"
-        ? path.match(/^\/Items\/([^/]+)\/PlaybackInfo$/)
-        : null;
+      method === "GET" || method === "POST" ? path.match(/^\/Items\/([^/]+)\/PlaybackInfo$/) : null;
     const videoStream =
       method === "GET" || method === "HEAD"
         ? path.match(/^\/Videos\/([^/]+)\/stream(?:\.[^/]+)?$/)
@@ -1055,8 +1060,7 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
       method === "POST" ? path.match(/^\/Users\/([^/]+)\/PlaybackHistory\/Clear$/) : null;
     const historyItem =
       method === "DELETE" ? path.match(/^\/Users\/([^/]+)\/PlaybackHistory\/([^/]+)$/) : null;
-    const history =
-      method === "GET" ? path.match(/^\/Users\/([^/]+)\/PlaybackHistory$/) : null;
+    const history = method === "GET" ? path.match(/^\/Users\/([^/]+)\/PlaybackHistory$/) : null;
     let playbackKind: PlaybackEvent["kind"] | null = null;
     if (method === "POST") {
       switch (path) {
@@ -1224,10 +1228,11 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
       );
       const watched = decoded.IsWatchlisted;
       const items = page.items.filter(
-        (item) =>
-          watched === undefined || (flags.get(item.id)?.watchlisted ?? false) === watched,
+        (item) => watched === undefined || (flags.get(item.id)?.watchlisted ?? false) === watched,
       );
-      return json(items.map((item) => paintItem(services, itemDto(item, services.config.serverId), flags)));
+      return json(
+        items.map((item) => paintItem(services, itemDto(item, services.config.serverId), flags)),
+      );
     }
 
     if (userItems || allItems || resumeItems || studios) {
@@ -1250,10 +1255,13 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
       };
       const page = studios
         ? yield* services.federation.studios(input)
-        : (decoded.SearchTerm
+        : decoded.SearchTerm
           ? yield* services.federation.search({ ...input, searchTerm: decoded.SearchTerm })
-          : yield* services.federation.list(input));
-      const hidden = resumeItems && services.compat !== undefined ? yield* services.compat.hiddenIds() : new Set<string>();
+          : yield* services.federation.list(input);
+      const hidden =
+        resumeItems && services.compat !== undefined
+          ? yield* services.compat.hiddenIds()
+          : new Set<string>();
       const visible = page.items.filter((item) => !hidden.has(item.id));
       const flags = studios
         ? new Map<string, ItemFlags>()
@@ -1379,8 +1387,12 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
       const dto = playbackInfoDto(info);
       const sources = dto.MediaSources.flatMap((source) => {
         if (mediaSourceId !== undefined && source.Id !== mediaSourceId) return [];
-        const current = source as EmbyMediaSourceDtoValue & { Path?: string; DirectStreamUrl?: string };
-        if (typeof current.Path !== "string" || !current.Path.startsWith("/Videos/")) return [source];
+        const current = source as EmbyMediaSourceDtoValue & {
+          Path?: string;
+          DirectStreamUrl?: string;
+        };
+        if (typeof current.Path !== "string" || !current.Path.startsWith("/Videos/"))
+          return [source];
         const absolute = new URL(current.Path, request.url).href;
         return [
           {
@@ -1472,10 +1484,7 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
       if (bounds === null) return yield* Effect.fail(new InvalidEmbyRequest());
       const seasonRaw = episodes ? url.searchParams.get("Season") : null;
       const seasonNumber = seasonRaw === null ? undefined : Number(seasonRaw);
-      if (
-        seasonNumber !== undefined &&
-        (!Number.isSafeInteger(seasonNumber) || seasonNumber < 0)
-      ) {
+      if (seasonNumber !== undefined && (!Number.isSafeInteger(seasonNumber) || seasonNumber < 0)) {
         return yield* Effect.fail(new InvalidEmbyRequest());
       }
       const seasonId = episodes ? url.searchParams.get("SeasonId")?.trim() || undefined : undefined;
@@ -1540,7 +1549,9 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
             const rightSeason = Number(object(right.displayMetadata).ParentIndexNumber ?? 0);
             const leftIndex = Number(object(left.displayMetadata).IndexNumber ?? 0);
             const rightIndex = Number(object(right.displayMetadata).IndexNumber ?? 0);
-            return leftSeason - rightSeason || leftIndex - rightIndex || left.id.localeCompare(right.id);
+            return (
+              leftSeason - rightSeason || leftIndex - rightIndex || left.id.localeCompare(right.id)
+            );
           });
         const upcoming = regular.find((episode) => !(episode.userState?.played ?? false));
         if (upcoming === undefined || (upcoming.userState?.positionTicks ?? 0) > 0) continue;
@@ -1551,7 +1562,9 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
         next.map((item) => item.id),
       );
       return json({
-        Items: next.map((item) => paintItem(services, itemDto(item, services.config.serverId), flags)),
+        Items: next.map((item) =>
+          paintItem(services, itemDto(item, services.config.serverId), flags),
+        ),
         TotalRecordCount: next.length,
         StartIndex: 0,
       });
@@ -1597,11 +1610,7 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
       const canonicalId = yield* pathSegment(watchlistItem[2]!);
       const membership = yield* services.federation.lookupMembership(canonicalId);
       if (membership === null) return yield* Effect.fail(new EmbyNotFound());
-      yield* services.compat.setWatchlisted(
-        membership.item.id,
-        method === "POST",
-        services.now(),
-      );
+      yield* services.compat.setWatchlisted(membership.item.id, method === "POST", services.now());
       const flags = yield* loadFlags(services, [membership.item.id]);
       return json(paintUserData(services, membership.item.userState, membership.item.id, flags));
     }
@@ -1621,7 +1630,10 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
       const types = split(url.searchParams.get("IncludeItemTypes"))?.filter(Boolean) ?? [];
       const filtered = hydrated.filter((item) => {
         const name = String(object(item.displayMetadata).Name ?? "").toLowerCase();
-        return (term === "" || name.includes(term)) && (types.length === 0 || types.includes(item.itemType));
+        return (
+          (term === "" || name.includes(term)) &&
+          (types.length === 0 || types.includes(item.itemType))
+        );
       });
       const page = filtered.slice(bounds.start, bounds.start + bounds.limit);
       const flags = yield* loadFlags(
@@ -1629,7 +1641,9 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
         page.map((item) => item.id),
       );
       return json({
-        Items: page.map((item) => paintItem(services, itemDto(item, services.config.serverId), flags)),
+        Items: page.map((item) =>
+          paintItem(services, itemDto(item, services.config.serverId), flags),
+        ),
         TotalRecordCount: filtered.length,
         StartIndex: bounds.start,
       });

@@ -19,9 +19,9 @@ const STALE_HEALTH_MS = 60_000;
 const healthLabel = (health: ServerHealthView["health"]) =>
   health === "healthy"
     ? m.status_healthy()
-    : (health === "degraded"
+    : health === "degraded"
       ? m.status_degraded()
-      : m.status_unknown());
+      : m.status_unknown();
 
 const isNotFound = (error: unknown) =>
   typeof error === "object" && error !== null && "_tag" in error && error._tag === "NotFound";
@@ -47,9 +47,9 @@ export const ServerHealthStatus = ({
   const freshness =
     health.lastSuccessAtMs === null
       ? m.health_missing()
-      : (effectiveNowMs - health.lastSuccessAtMs > STALE_HEALTH_MS
+      : effectiveNowMs - health.lastSuccessAtMs > STALE_HEALTH_MS
         ? m.health_stale()
-        : m.health_current());
+        : m.health_current();
 
   return (
     <div className="space-y-2 rounded-lg border p-4">
@@ -174,7 +174,7 @@ export const ServerDetailPage = ({
       </p>
       {health.isPending ? (
         <Skeleton aria-label={m.server_health_loading()} className="h-28 w-full" />
-      ) : (health.isError || !health.data ? (
+      ) : health.isError || !health.data ? (
         <div role="alert" className="border-destructive/40 space-y-2 rounded-lg border p-4">
           <p className="text-destructive text-sm">{m.server_health_failed()}</p>
           <Button variant="outline" onClick={() => void health.refetch()}>
@@ -183,7 +183,7 @@ export const ServerDetailPage = ({
         </div>
       ) : (
         <ServerHealthStatus health={health.data} />
-      ))}
+      )}
       <ServerForm
         server={server.data}
         {...(footerContainer ? { footerContainer } : {})}

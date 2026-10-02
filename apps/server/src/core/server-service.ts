@@ -155,11 +155,11 @@ const endpointOrder = (endpoints: ReadonlyArray<UpstreamEndpoint>): string =>
 const aggregateHealth = (endpoints: ReadonlyArray<UpstreamEndpoint>): UpstreamServer["health"] =>
   endpoints.some(({ health }) => health === "healthy")
     ? "healthy"
-    : (endpoints.some(
+    : endpoints.some(
           ({ health, verifiedCatalogId }) => health === "degraded" || verifiedCatalogId !== null,
         )
       ? "degraded"
-      : "unknown");
+      : "unknown";
 
 export const makeServerServiceLayer: Layer.Layer<
   ServerService,

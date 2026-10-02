@@ -72,7 +72,7 @@ const sources = [{ id: "source-1", serverId: "server-1", name: "Movies", mediaTy
 const savedServerFetch = async (request: RequestInfo | URL) => {
   const pathname = new URL(request instanceof Request ? request.url : request.toString()).pathname;
   return json(
-    pathname.endsWith("/test") ? connection : (pathname.endsWith("/libraries") ? sources : server),
+    pathname.endsWith("/test") ? connection : pathname.endsWith("/libraries") ? sources : server,
   );
 };
 

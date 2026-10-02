@@ -2007,11 +2007,11 @@ const makeRepositories = Effect.gen(function* () {
             ({ namespace, state }) => state === "exact" && providerNamespaces.has(namespace),
           )
             ? ["exact"]
-            : (clusterClaims.some(
+            : clusterClaims.some(
                   ({ namespace, state }) => state === "exact" && namespace.startsWith("fallback:"),
                 )
               ? ["fallback"]
-              : [])),
+              : []),
         ].reduce((retained, state) =>
           (stateRank[state as keyof typeof stateRank] ?? -1) >
           (stateRank[retained as keyof typeof stateRank] ?? -1)
@@ -2843,7 +2843,7 @@ const makeRepositories = Effect.gen(function* () {
         const mutate =
           input.expected === null
             ? [insert]
-            : (input.expected.id === generation.id
+            : input.expected.id === generation.id
               ? [
                   sql.unsafe(
                     `
@@ -2871,7 +2871,7 @@ const makeRepositories = Effect.gen(function* () {
                     [generation.queryKey, input.expected.id, input.expected.revision],
                   ),
                   insert,
-                ]);
+                ];
 
         const batch = sql.batch([
           assertExpected,

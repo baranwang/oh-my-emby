@@ -260,9 +260,7 @@ const isPrivateHostname = (hostname: string): boolean => {
   return isPrivateIpLiteral(lower);
 };
 
-const connectedAddressAllowed = (
-  policy: DestinationPolicy,
-): ((address: string) => boolean) => {
+const connectedAddressAllowed = (policy: DestinationPolicy): ((address: string) => boolean) => {
   return (address) => {
     const normalized = normalizeIpLiteral(address);
     if (normalized === null) return false;
@@ -285,7 +283,11 @@ const validateDestination = (
     return Effect.fail(new DestinationRejected({ serverId: server.id }));
   }
   const configuredBase = endpoint === undefined ? undefined : endpointUrl(endpoint);
-  if (resourcePolicy === "control" && configuredBase !== undefined && url.origin !== configuredBase.origin) {
+  if (
+    resourcePolicy === "control" &&
+    configuredBase !== undefined &&
+    url.origin !== configuredBase.origin
+  ) {
     return Effect.fail(new DestinationRejected({ serverId: server.id }));
   }
   if (policy.platform === "workers") {
@@ -321,7 +323,7 @@ const limitDiagnostic = (value: string): string => {
 
 const transportDiagnostic = (error: unknown): string | undefined => {
   const message =
-    error instanceof Error ? error.message : (typeof error === "string" ? error : undefined);
+    error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
   return message === undefined || message === ""
     ? undefined
     : limitDiagnostic(redactDiagnostic(message));
@@ -873,9 +875,9 @@ export const makeUpstreamClientLayer = (
             durationMs: Date.now() - startedAtMs,
             cacheOutcome: "bypass",
             retryOutcome: trace.retried
-              ? (failureCategory === "none"
+              ? failureCategory === "none"
                 ? "retried"
-                : "failed")
+                : "failed"
               : "none",
             failureCategory,
           });
@@ -990,9 +992,9 @@ export const makeUpstreamClientLayer = (
             const mediaType =
               folder.CollectionType === "movies"
                 ? ("movies" as const)
-                : (folder.CollectionType === "tvshows" || folder.CollectionType === "series"
+                : folder.CollectionType === "tvshows" || folder.CollectionType === "series"
                   ? ("series" as const)
-                  : null);
+                  : null;
             return mediaType === null || folder.ItemId.trim() === "" || folder.Name.trim() === ""
               ? []
               : [

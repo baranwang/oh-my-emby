@@ -1,9 +1,9 @@
-import type { ServerView } from "@oh-my-emby/contracts"
-import { Link } from "@tanstack/react-router"
-import { ArrowRightIcon, PlusIcon } from "lucide-react"
+import type { ServerView } from "@oh-my-emby/contracts";
+import { Link } from "@tanstack/react-router";
+import { ArrowRightIcon, PlusIcon } from "lucide-react";
 
-import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import {
   Card,
   CardAction,
@@ -11,25 +11,31 @@ import {
   CardDescription,
   CardFooter,
   CardHeader,
-  CardTitle
-} from "@/components/ui/card"
-import { Skeleton } from "@/components/ui/skeleton"
-import { m } from "@/paraglide/messages.js"
+  CardTitle,
+} from "@/components/ui/card";
+import { Skeleton } from "@/components/ui/skeleton";
+import { m } from "@/paraglide/messages.js";
 
 type ServerListProps = {
-  readonly state: "pending" | "error" | "success"
-  readonly servers: ReadonlyArray<ServerView>
-  readonly onRetry: () => void
-  readonly onCreate: () => void
-}
+  readonly state: "pending" | "error" | "success";
+  readonly servers: ReadonlyArray<ServerView>;
+  readonly onRetry: () => void;
+  readonly onCreate: () => void;
+};
 
-const healthLabel = (health: ServerView["health"]) => health === "healthy"
-  ? m.status_healthy()
-  : (health === "degraded" ? m.status_degraded() : m.status_unknown())
+const healthLabel = (health: ServerView["health"]) =>
+  health === "healthy"
+    ? m.status_healthy()
+    : health === "degraded"
+      ? m.status_degraded()
+      : m.status_unknown();
 
-const policyLabel = (policy: ServerView["userAgentPolicy"]) => policy === "fixed"
-  ? m.server_user_agent_fixed()
-  : (policy === "client-preferred" ? m.server_user_agent_client_preferred() : m.server_user_agent_passthrough())
+const policyLabel = (policy: ServerView["userAgentPolicy"]) =>
+  policy === "fixed"
+    ? m.server_user_agent_fixed()
+    : policy === "client-preferred"
+      ? m.server_user_agent_client_preferred()
+      : m.server_user_agent_passthrough();
 
 export const ServerList = ({ state, servers, onRetry, onCreate }: ServerListProps) => {
   if (state === "pending") {
@@ -38,16 +44,18 @@ export const ServerList = ({ state, servers, onRetry, onCreate }: ServerListProp
         <Skeleton className="h-52 w-full" />
         <Skeleton className="h-52 w-full" />
       </div>
-    )
+    );
   }
 
   if (state === "error") {
     return (
-      <div role="alert" className="space-y-3 rounded-lg border border-destructive/40 p-4">
-        <p className="text-sm text-destructive">{m.servers_load_failed()}</p>
-        <Button type="button" variant="outline" onClick={onRetry}>{m.retry()}</Button>
+      <div role="alert" className="border-destructive/40 space-y-3 rounded-lg border p-4">
+        <p className="text-destructive text-sm">{m.servers_load_failed()}</p>
+        <Button type="button" variant="outline" onClick={onRetry}>
+          {m.retry()}
+        </Button>
       </div>
-    )
+    );
   }
 
   return (
@@ -56,10 +64,22 @@ export const ServerList = ({ state, servers, onRetry, onCreate }: ServerListProp
         <li key={server.id}>
           <Card className="h-full min-h-52">
             <CardHeader>
-              <CardTitle><span className="block truncate">{server.name}</span></CardTitle>
-              <CardDescription><span className="block truncate">{server.endpoints[0]?.displayUrl}</span></CardDescription>
+              <CardTitle>
+                <span className="block truncate">{server.name}</span>
+              </CardTitle>
+              <CardDescription>
+                <span className="block truncate">{server.endpoints[0]?.displayUrl}</span>
+              </CardDescription>
               <CardAction>
-                <Badge variant={server.health === "healthy" ? "secondary" : (server.health === "degraded" ? "destructive" : "outline")}>
+                <Badge
+                  variant={
+                    server.health === "healthy"
+                      ? "secondary"
+                      : server.health === "degraded"
+                        ? "destructive"
+                        : "outline"
+                  }
+                >
                   {healthLabel(server.health)}
                 </Badge>
               </CardAction>
@@ -72,13 +92,15 @@ export const ServerList = ({ state, servers, onRetry, onCreate }: ServerListProp
                 </div>
                 <div className="flex items-center justify-between gap-4">
                   <dt className="text-muted-foreground">{m.server_catalog()}</dt>
-                  <dd className="max-w-44 truncate">{server.verifiedCatalogId ?? m.server_catalog_unverified()}</dd>
+                  <dd className="max-w-44 truncate">
+                    {server.verifiedCatalogId ?? m.server_catalog_unverified()}
+                  </dd>
                 </div>
               </dl>
             </CardContent>
             <CardFooter>
               <div className="flex w-full items-center justify-between gap-3">
-                <span className="min-w-0 truncate text-xs text-muted-foreground">
+                <span className="text-muted-foreground min-w-0 truncate text-xs">
                   {server.username} · {policyLabel(server.userAgentPolicy)}
                 </span>
                 <Button
@@ -106,10 +128,12 @@ export const ServerList = ({ state, servers, onRetry, onCreate }: ServerListProp
           <PlusIcon />
           <span>{m.add_server()}</span>
           {servers.length === 0 && (
-            <span className="max-w-xs text-balance text-xs font-normal text-muted-foreground">{m.servers_empty()}</span>
+            <span className="text-muted-foreground max-w-xs text-xs font-normal text-balance">
+              {m.servers_empty()}
+            </span>
           )}
         </Button>
       </li>
     </ul>
-  )
-}
+  );
+};

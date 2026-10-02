@@ -70,7 +70,7 @@ export const ServersPage = ({
         </p>
       </header>
       <ServerList
-        state={servers.isPending ? "pending" : (servers.isError ? "error" : "success")}
+        state={servers.isPending ? "pending" : servers.isError ? "error" : "success"}
         servers={servers.data ?? []}
         onRetry={() => void servers.refetch()}
         onCreate={onCreate}
@@ -91,13 +91,13 @@ export const ServersPage = ({
             <div className="p-4">
               {creating ? (
                 <CreateServerForm footerContainer={footerContainer} onClose={onClose} />
-              ) : (selectedId ? (
+              ) : selectedId ? (
                 <ServerDetailPage
                   id={selectedId}
                   onClose={onClose}
                   footerContainer={footerContainer}
                 />
-              ) : null)}
+              ) : null}
             </div>
           </ScrollArea>
           <DrawerFooter ref={setFooterContainer} />

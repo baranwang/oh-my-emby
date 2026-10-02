@@ -513,11 +513,11 @@ export const ServerForm = ({
               <p id={`${field.name}-error`} className="text-destructive text-sm">
                 {m.server_password_required()}
               </p>
-            ) : (server?.hasPassword ? (
+            ) : server?.hasPassword ? (
               <p id={`${field.name}-hint`} className="text-muted-foreground text-sm">
                 {m.server_password_configured()}
               </p>
-            ) : null)}
+            ) : null}
             {server?.hasPassword && (
               <div className="flex flex-wrap gap-2">
                 {!confirmingClear && field.state.value._tag !== "Clear" && (
@@ -654,9 +654,9 @@ export const ServerForm = ({
           >
             {connectionState === "pending"
               ? m.server_testing_connection()
-              : (connectionState === "success"
+              : connectionState === "success"
                 ? m.server_test_reachable()
-                : m.server_test_failed())}
+                : m.server_test_failed()}
           </p>
           {connectionResult && (
             <div className="space-y-2">
