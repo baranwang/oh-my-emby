@@ -135,6 +135,49 @@ const get = (path: string, token = "token") =>
   });
 
 describe("Emby catalog routes", () => {
+  it.each(["Movie", "Series", "Episode"])(
+    "returns external provider IDs in %s listings and details",
+    async (type) => {
+      const entry = item("external-id-item", type, {
+        displayMetadata: {
+          Name: "External IDs",
+          ProviderIds: {
+            Tmdb: "282158",
+            Imdb: "tt1234567",
+            Tvdb: " 456 ",
+            Empty: " ",
+            Invalid: 123,
+            Nested: { value: "private" },
+          },
+        },
+      });
+      const base = services();
+      const app = makeEmbyHandler({
+        ...base,
+        federation: {
+          ...base.federation,
+          detail: () => Effect.succeed(entry),
+          list: () =>
+            Effect.succeed({
+              items: [entry],
+              totalRecordCount: 1,
+              exhausted: true,
+              incompleteSourceIds: [],
+            }),
+        },
+      });
+      const detail = await (
+        await Effect.runPromise(app(get("/emby/Items/external-id-item")))
+      ).json();
+      const listing = await (
+        await Effect.runPromise(app(get(`/emby/Items?IncludeItemTypes=${type}`)))
+      ).json();
+      const expected = { Tmdb: "282158", Imdb: "tt1234567", Tvdb: "456" };
+      expect(detail.ProviderIds).toEqual(expected);
+      expect(listing.Items[0].ProviderIds).toEqual(expected);
+    },
+  );
+
   it("propagates Accept-Language through concurrent catalog and image requests", async () => {
     const base = services();
     const observed: string[] = [];
