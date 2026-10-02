@@ -1,3 +1,4 @@
+import { ClientLanguage, clientLanguage } from "../core/client-language.js";
 import { userAvatarPng } from "./user-avatar.js";
 import { Effect, Result, Schema } from "effect";
 import { getLogger } from "@logtape/logtape";
@@ -478,10 +479,17 @@ const mediaSourceDto = (
 const streamPath = (canonicalId: string, mediaSourceId: string) =>
   `/Videos/${encodeURIComponent(canonicalId)}/stream?MediaSourceId=${encodeURIComponent(mediaSourceId)}`;
 
-const artworkRevisionTag = (metadata: Readonly<Record<string, JsonValue>>) =>
-  typeof metadata.ExternalArtworkRevision === "number"
-    ? `-art-${metadata.ExternalArtworkRevision}`
-    : "";
+const artworkRevisionTag = (metadata: Readonly<Record<string, JsonValue>>) => {
+  const revision =
+    typeof metadata.ExternalArtworkRevision === "number"
+      ? `-art-${metadata.ExternalArtworkRevision}`
+      : "";
+  const language =
+    typeof metadata.ExternalArtworkLanguage === "string"
+      ? `-lang-${metadata.ExternalArtworkLanguage}`
+      : "";
+  return revision + language;
+};
 
 const imageTagTypes = (metadata: Readonly<Record<string, JsonValue>>) =>
   Object.fromEntries(
@@ -1847,6 +1855,7 @@ export const makeEmbyHandler =
   (request: Request): Effect.Effect<Response> => {
     const startedAt = Date.now();
     return handle(services, request).pipe(
+      Effect.provideService(ClientLanguage, clientLanguage(request.headers.get("accept-language"))),
       Effect.tap((response) => Effect.sync(() => logRequest(request, response, startedAt))),
       Effect.catch((error) =>
         Effect.sync(() => {

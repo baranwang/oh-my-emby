@@ -13,7 +13,6 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { useUpdateMetadataSettings } from "@/modules/system/hooks/use-system";
 import { MetadataLanguageSelect } from "@/modules/system/components/metadata-language-select";
-import { getLocale } from "@/paraglide/runtime.js";
 import { m } from "@/paraglide/messages.js";
 
 type Provider = MetadataProviderSettingsView["providers"][number];
@@ -52,7 +51,7 @@ export const MetadataProviderEditor = ({
   const form = useForm({
     defaultValues: {
       enabled: provider.enabled,
-      language: provider.language ?? "system",
+      language: provider.language ?? "client",
       logoLanguage: (provider.logoLanguage ?? "original") as string,
       posterLanguage: (provider.posterLanguage ?? "original") as string,
       credential: { _tag: "Preserve" } as SecretPatch,
@@ -64,12 +63,11 @@ export const MetadataProviderEditor = ({
         enabled: value.enabled,
         order: provider.order,
         language:
-          provider.id === "tmdb" && value.language !== "system" ? value.language.trim() : null,
+          provider.id === "tmdb" && value.language !== "client" ? value.language.trim() : null,
         ...(provider.id === "tmdb"
           ? {
               logoLanguage: value.logoLanguage,
               posterLanguage: value.posterLanguage,
-              systemLanguage: getLocale() === "zh-CN" ? "zh-CN" : "en-US",
             }
           : {}),
         credential: value.credential,

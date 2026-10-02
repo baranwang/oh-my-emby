@@ -1,6 +1,7 @@
 import { Effect, Layer } from "effect";
 import { describe, expect, it } from "vitest";
 
+import { ClientLanguage } from "../src/core/client-language.js";
 import { MetadataProviders, makeMetadataProvidersLayer } from "../src/core/metadata-providers.js";
 import type { ExternalMetadataCacheEntry, MetadataProviderSetting } from "../src/core/model.js";
 import { Repositories, type CatalogItemRecord } from "../src/core/repositories.js";
@@ -135,6 +136,102 @@ const fixture = (options: {
 };
 
 describe("MetadataProviders", () => {
+  it("isolates client-language metadata and artwork caches across concurrent requests", async () => {
+    const configured = settings();
+    configured[0] = {
+      ...configured[0],
+      language: null,
+      systemLanguage: "zh-CN",
+      posterLanguage: "metadata",
+      logoLanguage: "metadata",
+    };
+    configured[1] = { ...configured[1], enabled: false };
+    const requested: string[] = [];
+    const test = fixture({
+      providerSettings: configured,
+      fetch: async (request) => {
+        const url = new URL(request.url);
+        const language = url.searchParams.get("language");
+        if (url.pathname.endsWith("/images"))
+          return Response.json({
+            id: 20526,
+            posters: [
+              { file_path: "/zh.jpg", iso_639_1: "zh" },
+              { file_path: "/en.jpg", iso_639_1: "en" },
+            ],
+            logos: [],
+          });
+        requested.push(language!);
+        return Response.json({
+          id: 20526,
+          title: language,
+          overview: language,
+          original_language: "en",
+        });
+      },
+    });
+    const get = (language: string) =>
+      test.run(
+        Effect.gen(function* () {
+          const providers = yield* MetadataProviders;
+          return yield* providers.refresh(record());
+        }).pipe(Effect.provideService(ClientLanguage, language)),
+      );
+    const [chinese, english] = await Promise.all([get("zh-CN"), get("en-US")]);
+    expect(chinese.canonical.displayMetadata).toMatchObject({
+      Name: "zh-CN",
+      ExternalImages: { Primary: "https://image.tmdb.org/t/p/w780/zh.jpg" },
+    });
+    expect(english.canonical.displayMetadata).toMatchObject({
+      Name: "en-US",
+      ExternalImages: { Primary: "https://image.tmdb.org/t/p/w780/en.jpg" },
+    });
+    await get("zh-CN");
+    await get("en-US");
+    expect(requested.sort()).toEqual(["en-US", "zh-CN"]);
+    expect(test.writes).toHaveLength(2);
+    expect(new Set(test.writes.map((entry) => entry.identityValue)).size).toBe(2);
+  });
+  it("uses English for client-default requests without a header and ignores the old dashboard preference", async () => {
+    const configured = settings();
+    configured[0] = { ...configured[0], language: null, systemLanguage: "zh-CN" };
+    configured[1] = { ...configured[1], enabled: false };
+    let requested: string | null = null;
+    const test = fixture({
+      providerSettings: configured,
+      fetch: async (request) => {
+        requested = new URL(request.url).searchParams.get("language");
+        return Response.json({ id: 20526, title: "English" });
+      },
+    });
+    await test.run(
+      Effect.gen(function* () {
+        const providers = yield* MetadataProviders;
+        yield* providers.refresh(record());
+      }),
+    );
+    expect(requested).toBe("en-US");
+  });
+  it("keeps explicit metadata language independent of the client", async () => {
+    const configured = settings();
+    configured[1] = { ...configured[1], enabled: false };
+    let requested: string | null = null;
+    const test = fixture({
+      providerSettings: configured,
+      fetch: async (request) => {
+        requested = new URL(request.url).searchParams.get("language");
+        return Response.json({ id: 20526, title: "Chinese" });
+      },
+    });
+    await test.run(
+      Effect.gen(function* () {
+        const providers = yield* MetadataProviders;
+        yield* providers.refresh(record());
+      }).pipe(Effect.provideService(ClientLanguage, "ja-JP")),
+    );
+    expect(requested).toBe("zh-CN");
+  });
+
   it.each([
     ["metadata", "original", "/zh.jpg", "/ja-logo.png"],
     ["original", "metadata", "/ja.jpg", "/zh-logo.png"],
@@ -203,7 +300,7 @@ describe("MetadataProviders", () => {
     },
   );
 
-  it("uses the saved system language and refreshes artwork after preferences change", async () => {
+  it("uses client language and refreshes artwork after preferences change", async () => {
     const configured = settings();
     configured[0] = {
       ...configured[0],
@@ -236,7 +333,7 @@ describe("MetadataProviders", () => {
     await test.run(
       Effect.gen(function* () {
         yield* (yield* MetadataProviders).refresh(record());
-      }),
+      }).pipe(Effect.provideService(ClientLanguage, "zh-CN")),
     );
     expect(new URL(requests[0]!.url).searchParams.get("language")).toBe("zh-CN");
     test.settings[0] = { ...test.settings[0], posterLanguage: "original", updatedAtMs: 10001 };
@@ -244,7 +341,7 @@ describe("MetadataProviders", () => {
     const result = await test.run(
       Effect.gen(function* () {
         return yield* (yield* MetadataProviders).refresh(record());
-      }),
+      }).pipe(Effect.provideService(ClientLanguage, "zh-CN")),
     );
     expect(result.canonical.displayMetadata).toMatchObject({
       ExternalImages: { Primary: "https://image.tmdb.org/t/p/w780/en.jpg" },

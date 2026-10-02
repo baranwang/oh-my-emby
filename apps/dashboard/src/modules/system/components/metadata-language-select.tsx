@@ -38,7 +38,7 @@ export const MetadataLanguageSelect = ({
           { value: "metadata", label: m.metadata_language_metadata() },
           { value: "original", label: m.metadata_language_original() },
         ]
-      : [{ value: "system", label: m.metadata_language_system() }]),
+      : [{ value: "client", label: m.metadata_language_client() }]),
     ...TMDB_LANGUAGE_CODES.map((code) => ({ value: code, label: nativeLanguageName(code) })),
   ];
   if (!options.some((option) => option.value === value)) options.push({ value, label: value });

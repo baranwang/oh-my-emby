@@ -1,6 +1,7 @@
 import { Effect } from "effect";
 import { describe, expect, it } from "vitest";
 
+import { ClientLanguage } from "../src/core/client-language.js";
 import { makeEmbyHandler, type EmbyServices } from "../src/api/emby.js";
 import type { CanonicalItemView, FederatedQuery } from "../src/core/federation.js";
 
@@ -134,6 +135,53 @@ const get = (path: string, token = "token") =>
   });
 
 describe("Emby catalog routes", () => {
+  it("propagates Accept-Language through concurrent catalog and image requests", async () => {
+    const base = services();
+    const observed: string[] = [];
+    const app = makeEmbyHandler({
+      ...base,
+      federation: {
+        ...base.federation,
+        detail: () =>
+          Effect.map(ClientLanguage, (language) => {
+            observed.push(`detail:${language}`);
+            return item("movie-1", "Movie", {
+              displayMetadata: {
+                ImageTags: { Primary: "upstream" },
+                ExternalArtworkLanguage: language,
+              },
+            });
+          }),
+      },
+      playback: {
+        ...base.playback,
+        resolveImage: () =>
+          Effect.map(ClientLanguage, (language) => {
+            observed.push(`image:${language}`);
+            return {
+              _tag: "Redirect" as const,
+              location: new URL("https://image.tmdb.org/t/p/w780/poster.jpg"),
+            };
+          }),
+      },
+    });
+    const request = (path: string, language: string) =>
+      new Request(`https://local${path}`, {
+        headers: { authorization: "Bearer token", "accept-language": language },
+      });
+    const [chinese, english, imageResponse] = await Promise.all([
+      Effect.runPromise(app(request("/emby/Items/movie-1", "zh-CN,en;q=0.5"))),
+      Effect.runPromise(app(request("/emby/Items/movie-1", "en-US"))),
+      Effect.runPromise(app(request("/emby/Items/movie-1/Images/Primary", "ja-JP"))),
+    ]);
+    expect(chinese.status).toBe(200);
+    expect(english.status).toBe(200);
+    expect(imageResponse.status).toBe(302);
+    expect((await chinese.json()).ImageTags.Primary).toBe("local-lang-zh-CN");
+    expect((await english.json()).ImageTags.Primary).toBe("local-lang-en-US");
+    expect(observed.sort()).toEqual(["detail:en-US", "detail:zh-CN", "image:ja-JP"]);
+  });
+
   it("advertises external logos and changes image tags when artwork language settings change", async () => {
     let revision = 42;
     const base = services();

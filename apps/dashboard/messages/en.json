@@ -248,7 +248,7 @@
   "metadata_language_preference": "Metadata language preference",
   "metadata_logo_language": "Logo language",
   "metadata_poster_language": "Poster language",
-  "metadata_language_system": "System default",
+  "metadata_language_client": "Follow client language",
   "metadata_language_metadata": "Follow metadata language",
   "metadata_language_original": "Original language"
 }

@@ -248,7 +248,7 @@
   "metadata_language_preference": "元数据语言偏好",
   "metadata_logo_language": "Logo 语言",
   "metadata_poster_language": "海报语言",
-  "metadata_language_system": "系统默认",
+  "metadata_language_client": "跟随客户端语言",
   "metadata_language_metadata": "跟随元数据语言",
   "metadata_language_original": "影片原语言"
 }

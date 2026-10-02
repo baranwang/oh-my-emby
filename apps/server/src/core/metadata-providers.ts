@@ -1,5 +1,6 @@
 import { Context, Effect, Layer, Result, Schema } from "effect";
 
+import { ClientLanguage } from "./client-language.js";
 import { METADATA_FRESH_MS, METADATA_STALE_MS } from "./limits.js";
 import type { ExternalMetadataCacheEntry, JsonValue, MetadataProviderSetting } from "./model.js";
 import { Repositories, type CatalogItemRecord } from "./repositories.js";
@@ -21,6 +22,7 @@ export interface ExternalMetadataPayload {
     readonly Backdrop?: ReadonlyArray<string>;
   };
   readonly ExternalArtworkRevision?: number;
+  readonly ExternalArtworkLanguage?: string;
 }
 
 export class MetadataProviderFailure extends Schema.TaggedError<MetadataProviderFailure>()(
@@ -123,10 +125,12 @@ const payload = (
   backdrops: ReadonlyArray<string>,
   logo?: string,
   revision?: number,
+  language?: string,
 ): ExternalMetadataPayload => ({
   ...(name === undefined ? {} : { Name: name }),
   ...(overview === undefined ? {} : { Overview: overview }),
   ...(revision === undefined ? {} : { ExternalArtworkRevision: revision }),
+  ...(language === undefined ? {} : { ExternalArtworkLanguage: language }),
   ...(primary === undefined && logo === undefined && backdrops.length === 0
     ? {}
     : {
@@ -219,6 +223,7 @@ const mergePayloads = (
           : Math.max(revision ?? 0, entry.ExternalArtworkRevision),
       undefined,
     ),
+    first(({ ExternalArtworkLanguage }) => ExternalArtworkLanguage),
   );
 };
 
@@ -335,9 +340,8 @@ export const makeMetadataProvidersLayer = (
                 : `https://api.themoviedb.org/3/find/${encodeURIComponent(key.value)}`,
             );
             if (!direct) url.searchParams.set("external_source", "imdb_id");
-            const metadataLanguage = setting.language?.trim() || setting.systemLanguage || "en-US";
-            if (setting.language?.trim() || setting.systemLanguage)
-              url.searchParams.set("language", metadataLanguage);
+            const metadataLanguage = setting.language?.trim() || (yield* ClientLanguage);
+            url.searchParams.set("language", metadataLanguage);
             const result = yield* requestJson(
               setting,
               new Request(url, {
@@ -494,37 +498,45 @@ export const makeMetadataProvidersLayer = (
           : null;
       };
 
+      const cacheIdentity = (setting: MetadataProviderSetting, value: string) =>
+        Effect.map(ClientLanguage, (language) =>
+          setting.id === "tmdb" && !setting.language?.trim()
+            ? `${value}|client-language:${language}`
+            : value,
+        );
+
       const readCached = (
         setting: MetadataProviderSetting,
         key: { readonly namespace: string; readonly value: string },
         freshOnly: boolean,
       ) =>
-        repositories.readExternalMetadata(setting.id, key.namespace, key.value).pipe(
-          Effect.map((entry) => {
-            if (entry === null || entry.fetchedAtMs < setting.updatedAtMs) return null;
-            const usableUntil = freshOnly ? entry.freshUntilMs : entry.staleUntilMs;
-            return usableUntil > now() ? entry : null;
-          }),
-        );
+        Effect.gen(function* () {
+          const value = yield* cacheIdentity(setting, key.value);
+          const entry = yield* repositories.readExternalMetadata(setting.id, key.namespace, value);
+          if (entry === null || entry.fetchedAtMs < setting.updatedAtMs) return null;
+          const usableUntil = freshOnly ? entry.freshUntilMs : entry.staleUntilMs;
+          return usableUntil > now() ? entry : null;
+        });
 
       const writeCache = (
         setting: MetadataProviderSetting,
         key: { readonly namespace: string; readonly value: string },
         value: ExternalMetadataPayload | null,
-      ) => {
-        const fetchedAtMs = now();
-        const entry: ExternalMetadataCacheEntry = {
-          providerId: setting.id,
-          identityNamespace: key.namespace,
-          identityValue: key.value,
-          payload: value as JsonValue | null,
-          found: value !== null,
-          fetchedAtMs,
-          freshUntilMs: fetchedAtMs + METADATA_FRESH_MS,
-          staleUntilMs: fetchedAtMs + (value === null ? METADATA_FRESH_MS : METADATA_STALE_MS),
-        };
-        return repositories.writeExternalMetadata(entry);
-      };
+      ) =>
+        Effect.gen(function* () {
+          const fetchedAtMs = now();
+          const entry: ExternalMetadataCacheEntry = {
+            providerId: setting.id,
+            identityNamespace: key.namespace,
+            identityValue: yield* cacheIdentity(setting, key.value),
+            payload: value as JsonValue | null,
+            found: value !== null,
+            fetchedAtMs,
+            freshUntilMs: fetchedAtMs + METADATA_FRESH_MS,
+            staleUntilMs: fetchedAtMs + (value === null ? METADATA_FRESH_MS : METADATA_STALE_MS),
+          };
+          return yield* repositories.writeExternalMetadata(entry);
+        });
 
       const configured = () =>
         repositories
@@ -548,6 +560,8 @@ export const makeMetadataProvidersLayer = (
               (setting.logoLanguage !== undefined || setting.posterLanguage !== undefined)
             )
               values.push({ ExternalArtworkRevision: setting.updatedAtMs });
+            if (setting.id === "tmdb" && !setting.language?.trim())
+              values.push({ ExternalArtworkLanguage: yield* ClientLanguage });
             const entry = yield* readCached(setting, key, false);
             const normalized = entry?.found ? cachedPayload(setting.id, entry.payload) : null;
             if (normalized !== null) values.push(normalized);
@@ -583,6 +597,8 @@ export const makeMetadataProvidersLayer = (
               (setting.logoLanguage !== undefined || setting.posterLanguage !== undefined)
             )
               values.push({ ExternalArtworkRevision: setting.updatedAtMs });
+            if (setting.id === "tmdb" && !setting.language?.trim())
+              values.push({ ExternalArtworkLanguage: yield* ClientLanguage });
             const fresh = yield* readCached(setting, key, true);
             if (fresh !== null) {
               const normalized = fresh.found ? cachedPayload(setting.id, fresh.payload) : null;

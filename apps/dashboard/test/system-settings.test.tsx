@@ -189,7 +189,7 @@ describe("System settings", () => {
       ),
     ];
     expect(choices.map((option) => option.textContent)).toEqual([
-      "System default",
+      "Follow client language",
       "简体中文",
       "繁體中文（台灣）",
       "繁體中文（中國香港特別行政區）",
@@ -236,7 +236,6 @@ describe("System settings", () => {
       language: "zh-CN",
       logoLanguage: "metadata",
       posterLanguage: "original",
-      systemLanguage: "en-US",
       credential: { _tag: "Preserve" },
     });
   });
