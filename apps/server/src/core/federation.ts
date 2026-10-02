@@ -1485,8 +1485,7 @@ export const makeFederationLayer = (
             seasonUpstreamIds = new Set(season.sourceItems.map((item) => item.upstreamItemId));
           }
           const sources = yield* repositories.resolveEligibleSourcesForCanonical(activeId);
-          const collected: Array<CanonicalItemView> = [];
-          const seen = new Set<string>();
+          const collected = new Map<string, CanonicalItemView>();
           for (const sourceItem of series.sourceItems) {
             const source = sources.find(
               (candidateSource) =>
@@ -1540,15 +1539,19 @@ export const makeFederationLayer = (
                 })
                 .pipe(Effect.result);
               if (Result.isFailure(resolved)) continue;
+              // This endpoint explicitly requests MediaSources. Keep the playable-version
+              // projection alongside identity ingestion so catalog reads can use it.
+              if (Array.isArray(raw.MediaSources)) {
+                yield* cacheItem(resolved.success, "detail", raw, observedAtMs);
+              }
               const childId = yield* identity.lookupCanonicalId(resolved.success.canonical.id);
-              if (childId === null || seen.has(childId)) continue;
+              if (childId === null) continue;
               const current = (yield* repositories.readCatalogItems([childId], now()))[0];
               if (!current) continue;
-              seen.add(childId);
-              collected.push(view(current, []));
+              collected.set(childId, view(current, []));
             }
           }
-          let items = collected;
+          let items = [...collected.values()];
           if (query.kind === "Episode" && query.seasonNumber !== undefined) {
             items = items.filter(
               (item) => metadataNumber(item, "ParentIndexNumber") === query.seasonNumber,

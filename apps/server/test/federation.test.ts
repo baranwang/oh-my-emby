@@ -188,6 +188,112 @@ describe("Federation", () => {
     return makeFederationLayer(options).pipe(Layer.provide(dependencies));
   };
 
+  it("keeps episode resources available in season listings and details, and drops withdrawn versions", async () => {
+    let media = [
+      { Id: "episode-media", Container: "mkv", Protocol: "Http", SupportsDirectPlay: true },
+    ];
+    const layer = await setup(1, (_serverId, path) =>
+      Effect.succeed(
+        path.includes("/Episodes")
+          ? {
+              Items: [
+                item("episode-1", "Episode one", {
+                  Type: "Episode",
+                  ProviderIds: {},
+                  ParentIndexNumber: 1,
+                  IndexNumber: 1,
+                  SeriesId: "series-10",
+                  ImageTags: { Primary: "episode-image" },
+                  MediaSources: media,
+                }),
+              ],
+              TotalRecordCount: 1,
+            }
+          : { Items: [item("series-10", "Series", { Type: "Series" })], TotalRecordCount: 1 },
+      ),
+    );
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const federation = yield* Federation;
+        const series = (yield* federation.list(typedQuery(["Series"]))).items[0]!;
+        const children = {
+          seriesId: series.id,
+          kind: "Episode" as const,
+          seasonNumber: 1,
+          startIndex: 0,
+          limit: 30,
+        };
+        const page = yield* federation.showChildren(children);
+        expect(page?.items).toHaveLength(1);
+        expect(page!.items[0]!.mediaVersions).toHaveLength(1);
+        const episodeId = page!.items[0]!.id;
+        expect((yield* federation.detail(episodeId))?.mediaVersions).toHaveLength(1);
+        media = [];
+        const updated = yield* federation.showChildren(children);
+        expect(updated!.items[0]!.id).toBe(episodeId);
+        expect(updated!.items[0]!.mediaVersions).toHaveLength(0);
+        expect((yield* federation.detail(episodeId))?.mediaVersions).toHaveLength(0);
+      }).pipe(Effect.provide(layer)),
+    );
+  });
+
+  it.each([false, true])(
+    "merges episode resources from later sources when the first source is playable: %s",
+    async (firstPlayable) => {
+      const layer = await setup(2, (serverId, path) =>
+        Effect.succeed(
+          path.includes("/Episodes")
+            ? {
+                Items: [
+                  item(`episode-${serverId}`, "Episode one", {
+                    Type: "Episode",
+                    ProviderIds: {},
+                    ParentIndexNumber: 1,
+                    IndexNumber: 1,
+                    MediaSources:
+                      serverId === "server-0" && !firstPlayable
+                        ? []
+                        : [{ Id: `media-${serverId}`, Container: "mkv" }],
+                  }),
+                ],
+                TotalRecordCount: 1,
+              }
+            : {
+                Items: [
+                  item(`series-${serverId}`, "Series", {
+                    Type: "Series",
+                    ProviderIds: { Tmdb: "10" },
+                  }),
+                ],
+                TotalRecordCount: 1,
+              },
+        ),
+      );
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const federation = yield* Federation;
+          const series = (yield* federation.list(typedQuery(["Series"]))).items[0]!;
+          const page = yield* federation.showChildren({
+            seriesId: series.id,
+            kind: "Episode",
+            seasonNumber: 1,
+            startIndex: 0,
+            limit: 30,
+          });
+          expect(page!.items).toHaveLength(1);
+          const versions = page!.items[0]!.mediaVersions;
+          expect(versions).toHaveLength(firstPlayable ? 2 : 1);
+          expect(versions.map((version) => version.upstreamMediaSourceId)).toContain(
+            "media-server-1",
+          );
+          expect((yield* federation.detail(page!.items[0]!.id))?.mediaVersions).toHaveLength(
+            versions.length,
+          );
+        }).pipe(Effect.provide(layer)),
+      );
+    },
+  );
+
   describe("whole-server item counts", () => {
     it("returns upstream totals with an empty local cache and no enabled library bindings", async () => {
       const paths: Array<string> = [];
