@@ -1,33 +1,33 @@
-import * as D1Client from "@effect/sql-d1/D1Client"
+import * as D1Client from "@effect/sql-d1/D1Client";
 import {
   ServerView as ServerViewSchema,
   SourceLibraryView as SourceLibraryViewSchema,
-  VirtualLibraryView as VirtualLibraryViewSchema
-} from "@oh-my-emby/contracts"
-import { Effect, Layer, Result, Schema } from "effect"
-import type { Statement } from "effect/unstable/sql/Statement"
+  VirtualLibraryView as VirtualLibraryViewSchema,
+} from "@oh-my-emby/contracts";
+import { Effect, Layer, Result, Schema } from "effect";
+import type { Statement } from "effect/unstable/sql/Statement";
 
 import {
   AUTH_RATE_WINDOW_MS,
   DB_BATCH_SIZE,
   OUTBOX_BATCH_SIZE,
   OUTBOX_LEASE_MS,
-  UNCERTAINTY_REAPPLY_MS
-} from "../../core/limits.js"
+  UNCERTAINTY_REAPPLY_MS,
+} from "../../core/limits.js";
 import {
   AlreadyInitialized,
   AuthenticationChanged,
   IdentityConflict,
-  RepositoryError
-} from "../../core/errors.js"
+  RepositoryError,
+} from "../../core/errors.js";
 import {
   clustersCompatible,
   stableCanonicalId,
   toClaimSet,
   type ExternalClaim,
   type PreparedIdentityCandidate,
-  type ProviderNamespace
-} from "../../core/identity.js"
+  type ProviderNamespace,
+} from "../../core/identity.js";
 import type {
   CanonicalAlias,
   CanonicalItem,
@@ -50,152 +50,171 @@ import type {
   UpstreamServer,
   UserRecord,
   UserStateRecord,
-  VirtualLibrary
-} from "../../core/model.js"
-import { makeSqlDrivembyCompat } from "../../core/drivemby-compat.js"
+  VirtualLibrary,
+} from "../../core/model.js";
+import { makeSqlDrivembyCompat } from "../../core/drivemby-compat.js";
 import {
   Repositories,
   type CatalogItemRecord,
   type DetailProjectionSuppression,
   type MetadataProjection,
-  type RepositoriesService
-} from "../../core/repositories.js"
+  type RepositoriesService,
+} from "../../core/repositories.js";
 
-const decodeServerId = Schema.decodeUnknownSync(ServerViewSchema.fields.id)
-const decodeSourceLibraryId = Schema.decodeUnknownSync(SourceLibraryViewSchema.fields.id)
-const decodeVirtualLibraryId = Schema.decodeUnknownSync(VirtualLibraryViewSchema.fields.id)
+const decodeServerId = Schema.decodeUnknownSync(ServerViewSchema.fields.id);
+const decodeSourceLibraryId = Schema.decodeUnknownSync(SourceLibraryViewSchema.fields.id);
+const decodeVirtualLibraryId = Schema.decodeUnknownSync(VirtualLibraryViewSchema.fields.id);
 
-const failure = (operation: string, cause: unknown) => new RepositoryError({
-  operation,
-  message: cause instanceof Error ? cause.message : String(cause)
-})
+const failure = (operation: string, cause: unknown) =>
+  new RepositoryError({
+    operation,
+    message: cause instanceof Error ? cause.message : String(cause),
+  });
 
 const database = <A, E, R>(operation: string, effect: Effect.Effect<A, E, R>) =>
-  effect.pipe(Effect.mapError((cause) => failure(operation, cause)))
+  effect.pipe(Effect.mapError((cause) => failure(operation, cause)));
 
 const authDatabase = <A, E, R>(operation: string, effect: Effect.Effect<A, E, R>) =>
-  effect.pipe(Effect.mapError((cause) =>
-    cause instanceof AuthenticationChanged ? cause : failure(operation, cause)
-  ))
+  effect.pipe(
+    Effect.mapError((cause) =>
+      cause instanceof AuthenticationChanged ? cause : failure(operation, cause),
+    ),
+  );
 
 const identityDatabase = <A, E, R>(operation: string, effect: Effect.Effect<A, E, R>) =>
-  effect.pipe(Effect.mapError((cause) =>
-    cause instanceof IdentityConflict ? cause : failure(operation, cause)
-  ))
+  effect.pipe(
+    Effect.mapError((cause) =>
+      cause instanceof IdentityConflict ? cause : failure(operation, cause),
+    ),
+  );
 
-const decode = <A>(operation: string, evaluate: () => A) => Effect.try({
-  try: evaluate,
-  catch: (cause) => failure(operation, cause)
-})
+const decode = <A>(operation: string, evaluate: () => A) =>
+  Effect.try({
+    try: evaluate,
+    catch: (cause) => failure(operation, cause),
+  });
 
 const boolean = (value: unknown, field: string): boolean => {
-  if (value === 0) return false
-  if (value === 1) return true
-  throw new TypeError(`${field} must be encoded as 0 or 1`)
-}
+  if (value === 0) return false;
+  if (value === 1) return true;
+  throw new TypeError(`${field} must be encoded as 0 or 1`);
+};
 
 const integer = (value: unknown, field: string): number => {
-  if (typeof value === "number" && Number.isSafeInteger(value)) return value
-  throw new TypeError(`${field} must be a safe integer`)
-}
+  if (typeof value === "number" && Number.isSafeInteger(value)) return value;
+  throw new TypeError(`${field} must be a safe integer`);
+};
 
 const bytes = (value: unknown, field: string): Uint8Array => {
-  if (value instanceof Uint8Array) return value
-  if (Array.isArray(value) && value.every((byte) => Number.isInteger(byte) && byte >= 0 && byte <= 255)) {
-    return Uint8Array.from(value)
+  if (value instanceof Uint8Array) return value;
+  if (
+    Array.isArray(value) &&
+    value.every((byte) => Number.isInteger(byte) && byte >= 0 && byte <= 255)
+  ) {
+    return Uint8Array.from(value);
   }
-  if (value instanceof ArrayBuffer) return new Uint8Array(value)
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
   if (ArrayBuffer.isView(value)) {
-    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength)
+    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
   }
-  throw new TypeError(`${field} must be bytes`)
-}
+  throw new TypeError(`${field} must be bytes`);
+};
 
 const mediaType = (value: unknown): MediaType => {
-  if (value === "movies" || value === "series") return value
-  throw new TypeError("media_type is invalid")
-}
+  if (value === "movies" || value === "series") return value;
+  throw new TypeError("media_type is invalid");
+};
 
 const health = (value: unknown): ServerHealth => {
-  if (value === "unknown" || value === "healthy" || value === "degraded") return value
-  throw new TypeError("health is invalid")
-}
+  if (value === "unknown" || value === "healthy" || value === "degraded") return value;
+  throw new TypeError("health is invalid");
+};
 
 const userAgentPolicy = (value: unknown): UpstreamServer["userAgentPolicy"] => {
-  if (value === "fixed" || value === "client-preferred" || value === "passthrough") return value
-  throw new TypeError("user_agent_policy is invalid")
-}
+  if (value === "fixed" || value === "client-preferred" || value === "passthrough") return value;
+  throw new TypeError("user_agent_policy is invalid");
+};
 
 const metadataProviderId = (value: unknown): MetadataProviderSetting["id"] => {
-  if (value === "tmdb" || value === "trakt") return value
-  throw new TypeError("provider_id is invalid")
-}
+  if (value === "tmdb" || value === "trakt") return value;
+  throw new TypeError("provider_id is invalid");
+};
 
 const metadataProviderStatus = (value: unknown): MetadataProviderSetting["status"] => {
-  if (value === "unconfigured" || value === "ready" || value === "degraded") return value
-  throw new TypeError("provider status is invalid")
-}
+  if (value === "unconfigured" || value === "ready" || value === "degraded") return value;
+  throw new TypeError("provider status is invalid");
+};
 
 const normalizeJson = (value: unknown): JsonValue => {
-  if (value === null || typeof value === "string" || typeof value === "boolean") return value
-  if (typeof value === "number" && Number.isFinite(value)) return value
-  if (Array.isArray(value)) return value.map(normalizeJson)
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (Array.isArray(value)) return value.map(normalizeJson);
   if (typeof value === "object" && value !== null) {
-    const prototype = Object.getPrototypeOf(value)
+    const prototype = Object.getPrototypeOf(value);
     if (prototype !== Object.prototype && prototype !== null) {
-      throw new TypeError("JSON objects must be plain objects")
+      throw new TypeError("JSON objects must be plain objects");
     }
     return Object.fromEntries(
-      Object.keys(value).sort().map((key) => [
-        key,
-        normalizeJson((value as Record<string, unknown>)[key])
-      ])
-    )
+      Object.keys(value)
+        .sort()
+        .map((key) => [key, normalizeJson((value as Record<string, unknown>)[key])]),
+    );
   }
-  throw new TypeError("value is not valid JSON")
-}
+  throw new TypeError("value is not valid JSON");
+};
 
-const canonicalJson = (value: unknown): string => JSON.stringify(normalizeJson(value))
+const canonicalJson = (value: unknown): string => JSON.stringify(normalizeJson(value));
 const json = (value: unknown, field: string): JsonValue => {
-  if (typeof value !== "string") throw new TypeError(`${field} must be JSON text`)
-  return normalizeJson(JSON.parse(value))
-}
+  if (typeof value !== "string") throw new TypeError(`${field} must be JSON text`);
+  return normalizeJson(JSON.parse(value));
+};
 
 const mergeMissingJson = (current: JsonValue, incoming: JsonValue): JsonValue => {
   if (
-    typeof current !== "object" || current === null || Array.isArray(current) ||
-    typeof incoming !== "object" || incoming === null || Array.isArray(incoming)
-  ) return current
-  const currentObject = current as { readonly [key: string]: JsonValue }
-  const incomingObject = incoming as { readonly [key: string]: JsonValue }
-  const merged: Record<string, JsonValue> = { ...incomingObject }
+    typeof current !== "object" ||
+    current === null ||
+    Array.isArray(current) ||
+    typeof incoming !== "object" ||
+    incoming === null ||
+    Array.isArray(incoming)
+  )
+    return current;
+  const currentObject = current as { readonly [key: string]: JsonValue };
+  const incomingObject = incoming as { readonly [key: string]: JsonValue };
+  const merged: Record<string, JsonValue> = { ...incomingObject };
   for (const [key, value] of Object.entries(currentObject)) {
-    const candidate = incomingObject[key]
-    merged[key] = candidate === undefined ? value : mergeMissingJson(value, candidate)
+    const candidate = incomingObject[key];
+    merged[key] = candidate === undefined ? value : mergeMissingJson(value, candidate);
   }
-  return merged
-}
+  return merged;
+};
 
 const mergeProjectionJson = (current: JsonValue, incoming: JsonValue): JsonValue => {
   if (
-    typeof current !== "object" || current === null || Array.isArray(current) ||
-    typeof incoming !== "object" || incoming === null || Array.isArray(incoming)
-  ) return incoming
-  const currentObject = current as { readonly [key: string]: JsonValue }
-  const incomingObject = incoming as { readonly [key: string]: JsonValue }
-  const merged: Record<string, JsonValue> = { ...currentObject }
+    typeof current !== "object" ||
+    current === null ||
+    Array.isArray(current) ||
+    typeof incoming !== "object" ||
+    incoming === null ||
+    Array.isArray(incoming)
+  )
+    return incoming;
+  const currentObject = current as { readonly [key: string]: JsonValue };
+  const incomingObject = incoming as { readonly [key: string]: JsonValue };
+  const merged: Record<string, JsonValue> = { ...currentObject };
   for (const [key, value] of Object.entries(incomingObject)) {
-    merged[key] = currentObject[key] === undefined ? value : mergeProjectionJson(currentObject[key], value)
+    merged[key] =
+      currentObject[key] === undefined ? value : mergeProjectionJson(currentObject[key], value);
   }
-  return merged
-}
+  return merged;
+};
 
 const desiredUserState = (value: unknown): DesiredUserState => {
-  const decoded = json(value, "payload_json")
+  const decoded = json(value, "payload_json");
   if (decoded === null || Array.isArray(decoded) || typeof decoded !== "object") {
-    throw new TypeError("payload_json must contain a desired user state object")
+    throw new TypeError("payload_json must contain a desired user state object");
   }
-  const fields = decoded as Record<string, JsonValue>
+  const fields = decoded as Record<string, JsonValue>;
   if (
     typeof fields.played !== "boolean" ||
     typeof fields.favorite !== "boolean" ||
@@ -207,55 +226,55 @@ const desiredUserState = (value: unknown): DesiredUserState => {
     fields.positionTicks < 0 ||
     (fields.lastPlayedVersionId !== null && typeof fields.lastPlayedVersionId !== "string")
   ) {
-    throw new TypeError("payload_json contains an invalid desired user state")
+    throw new TypeError("payload_json contains an invalid desired user state");
   }
   return {
     played: fields.played,
     favorite: fields.favorite,
     playCount: fields.playCount,
     positionTicks: fields.positionTicks,
-    lastPlayedVersionId: fields.lastPlayedVersionId
-  }
-}
+    lastPlayedVersionId: fields.lastPlayedVersionId,
+  };
+};
 
 interface UserRow {
-  readonly username: string
-  readonly password_hash: unknown
-  readonly password_salt: unknown
-  readonly pbkdf2_iterations: unknown
-  readonly auth_generation: unknown
-  readonly created_at_ms: unknown
-  readonly updated_at_ms: unknown
+  readonly username: string;
+  readonly password_hash: unknown;
+  readonly password_salt: unknown;
+  readonly pbkdf2_iterations: unknown;
+  readonly auth_generation: unknown;
+  readonly created_at_ms: unknown;
+  readonly updated_at_ms: unknown;
 }
 
 interface DashboardSessionRow {
-  readonly id: string
-  readonly token_hash: unknown
-  readonly auth_generation: unknown
-  readonly created_at_ms: unknown
-  readonly last_seen_at_ms: unknown
-  readonly expires_at_ms: unknown
-  readonly username: string
-  readonly current_auth_generation: unknown
+  readonly id: string;
+  readonly token_hash: unknown;
+  readonly auth_generation: unknown;
+  readonly created_at_ms: unknown;
+  readonly last_seen_at_ms: unknown;
+  readonly expires_at_ms: unknown;
+  readonly username: string;
+  readonly current_auth_generation: unknown;
 }
 
 interface EmbyTokenRow {
-  readonly id: string
-  readonly token_hash: unknown
-  readonly auth_generation: unknown
-  readonly device_id: string
-  readonly device_name: string
-  readonly created_at_ms: unknown
-  readonly last_used_at_ms: unknown
-  readonly expires_at_ms: unknown
-  readonly username: string
-  readonly current_auth_generation: unknown
+  readonly id: string;
+  readonly token_hash: unknown;
+  readonly auth_generation: unknown;
+  readonly device_id: string;
+  readonly device_name: string;
+  readonly created_at_ms: unknown;
+  readonly last_used_at_ms: unknown;
+  readonly expires_at_ms: unknown;
+  readonly username: string;
+  readonly current_auth_generation: unknown;
 }
 
 interface AuthRateLimitRow {
-  readonly window_started_at_ms: unknown
-  readonly attempt_count: unknown
-  readonly blocked_until_ms: unknown | null
+  readonly window_started_at_ms: unknown;
+  readonly attempt_count: unknown;
+  readonly blocked_until_ms: unknown | null;
 }
 
 const userRecord = (row: UserRow): UserRecord => ({
@@ -263,56 +282,56 @@ const userRecord = (row: UserRow): UserRecord => ({
   password: {
     hash: bytes(row.password_hash, "password_hash"),
     salt: bytes(row.password_salt, "password_salt"),
-    iterations: integer(row.pbkdf2_iterations, "pbkdf2_iterations")
+    iterations: integer(row.pbkdf2_iterations, "pbkdf2_iterations"),
   },
   authGeneration: integer(row.auth_generation, "auth_generation"),
   createdAtMs: integer(row.created_at_ms, "created_at_ms"),
-  updatedAtMs: integer(row.updated_at_ms, "updated_at_ms")
-})
+  updatedAtMs: integer(row.updated_at_ms, "updated_at_ms"),
+});
 
 interface ServerRow {
-  readonly id: string
-  readonly catalog_namespace: string
-  readonly verified_catalog_id: string | null
-  readonly verified_base_url: string | null
-  readonly generation: unknown
-  readonly name: string
-  readonly base_url: string
-  readonly username: string
-  readonly password: string | null
-  readonly access_token: string | null
-  readonly access_token_expires_at_ms: unknown | null
-  readonly upstream_user_id: string | null
-  readonly user_agent: string
-  readonly user_agent_policy: unknown
-  readonly enabled: unknown
-  readonly health: unknown
-  readonly last_success_at_ms: unknown | null
-  readonly deleted_at_ms: unknown | null
-  readonly created_at_ms: unknown
-  readonly updated_at_ms: unknown
+  readonly id: string;
+  readonly catalog_namespace: string;
+  readonly verified_catalog_id: string | null;
+  readonly verified_base_url: string | null;
+  readonly generation: unknown;
+  readonly name: string;
+  readonly base_url: string;
+  readonly username: string;
+  readonly password: string | null;
+  readonly access_token: string | null;
+  readonly access_token_expires_at_ms: unknown | null;
+  readonly upstream_user_id: string | null;
+  readonly user_agent: string;
+  readonly user_agent_policy: unknown;
+  readonly enabled: unknown;
+  readonly health: unknown;
+  readonly last_success_at_ms: unknown | null;
+  readonly deleted_at_ms: unknown | null;
+  readonly created_at_ms: unknown;
+  readonly updated_at_ms: unknown;
 }
 
 interface EndpointRow {
-  readonly endpoint_id: string | null
-  readonly endpoint_protocol: string | null
-  readonly endpoint_host: string | null
-  readonly endpoint_port: unknown | null
-  readonly endpoint_path: string | null
-  readonly endpoint_order: unknown | null
-  readonly endpoint_verified_catalog_id: string | null
-  readonly endpoint_health: unknown | null
-  readonly endpoint_last_success_at_ms: unknown | null
-  readonly endpoint_created_at_ms: unknown | null
-  readonly endpoint_updated_at_ms: unknown | null
+  readonly endpoint_id: string | null;
+  readonly endpoint_protocol: string | null;
+  readonly endpoint_host: string | null;
+  readonly endpoint_port: unknown | null;
+  readonly endpoint_path: string | null;
+  readonly endpoint_order: unknown | null;
+  readonly endpoint_verified_catalog_id: string | null;
+  readonly endpoint_health: unknown | null;
+  readonly endpoint_last_success_at_ms: unknown | null;
+  readonly endpoint_created_at_ms: unknown | null;
+  readonly endpoint_updated_at_ms: unknown | null;
 }
 
-type ServerWithEndpointRow = ServerRow & EndpointRow
+type ServerWithEndpointRow = ServerRow & EndpointRow;
 
 const endpointUrl = (endpoint: Pick<UpstreamEndpoint, "protocol" | "host" | "port" | "path">) =>
   new URL(
-    `${endpoint.protocol}://${endpoint.host}${endpoint.port === null ? "" : `:${endpoint.port}`}${endpoint.path}`
-  ).href
+    `${endpoint.protocol}://${endpoint.host}${endpoint.port === null ? "" : `:${endpoint.port}`}${endpoint.path}`,
+  ).href;
 
 const upstreamEndpoint = (row: EndpointRow): UpstreamEndpoint => {
   if (
@@ -325,17 +344,17 @@ const upstreamEndpoint = (row: EndpointRow): UpstreamEndpoint => {
     row.endpoint_created_at_ms === null ||
     row.endpoint_updated_at_ms === null
   )
-    throw new TypeError("endpoint row is incomplete")
+    throw new TypeError("endpoint row is incomplete");
   if (row.endpoint_protocol !== "http" && row.endpoint_protocol !== "https") {
-    throw new TypeError("endpoint protocol is invalid")
+    throw new TypeError("endpoint protocol is invalid");
   }
   const endpoint: Pick<UpstreamEndpoint, "id" | "protocol" | "host" | "port" | "path"> = {
     id: row.endpoint_id,
     protocol: row.endpoint_protocol,
     host: row.endpoint_host,
     port: row.endpoint_port === null ? null : integer(row.endpoint_port, "endpoint_port"),
-    path: row.endpoint_path
-  }
+    path: row.endpoint_path,
+  };
   return {
     ...endpoint,
     displayUrl: endpointUrl(endpoint) as UpstreamEndpoint["displayUrl"],
@@ -347,13 +366,13 @@ const upstreamEndpoint = (row: EndpointRow): UpstreamEndpoint => {
         : integer(row.endpoint_last_success_at_ms, "endpoint_last_success_at_ms"),
     order: integer(row.endpoint_order, "endpoint_order"),
     createdAtMs: integer(row.endpoint_created_at_ms, "endpoint_created_at_ms"),
-    updatedAtMs: integer(row.endpoint_updated_at_ms, "endpoint_updated_at_ms")
-  }
-}
+    updatedAtMs: integer(row.endpoint_updated_at_ms, "endpoint_updated_at_ms"),
+  };
+};
 
 const upstreamServer = (
   row: ServerRow,
-  endpoints: ReadonlyArray<UpstreamEndpoint>
+  endpoints: ReadonlyArray<UpstreamEndpoint>,
 ): UpstreamServer => ({
   id: decodeServerId(row.id),
   catalogNamespace: row.catalog_namespace,
@@ -366,36 +385,36 @@ const upstreamServer = (
   username: row.username,
   password: row.password,
   accessToken: row.access_token,
-  accessTokenExpiresAtMs: row.access_token_expires_at_ms === null
-    ? null
-    : integer(row.access_token_expires_at_ms, "access_token_expires_at_ms"),
+  accessTokenExpiresAtMs:
+    row.access_token_expires_at_ms === null
+      ? null
+      : integer(row.access_token_expires_at_ms, "access_token_expires_at_ms"),
   upstreamUserId: row.upstream_user_id,
   userAgentPolicy: userAgentPolicy(row.user_agent_policy),
   userAgent: row.user_agent === "" ? null : row.user_agent,
   enabled: boolean(row.enabled, "enabled"),
   health: health(row.health),
-  lastSuccessAtMs: row.last_success_at_ms === null
-    ? null
-    : integer(row.last_success_at_ms, "last_success_at_ms"),
+  lastSuccessAtMs:
+    row.last_success_at_ms === null ? null : integer(row.last_success_at_ms, "last_success_at_ms"),
   deletedAtMs: row.deleted_at_ms === null ? null : integer(row.deleted_at_ms, "deleted_at_ms"),
   createdAtMs: integer(row.created_at_ms, "created_at_ms"),
-  updatedAtMs: integer(row.updated_at_ms, "updated_at_ms")
-})
+  updatedAtMs: integer(row.updated_at_ms, "updated_at_ms"),
+});
 
 const upstreamServers = (
-  rows: ReadonlyArray<ServerWithEndpointRow>
+  rows: ReadonlyArray<ServerWithEndpointRow>,
 ): ReadonlyArray<UpstreamServer> => {
-  const servers = new Map<string, { row: ServerRow; endpoints: Array<UpstreamEndpoint> }>()
+  const servers = new Map<string, { row: ServerRow; endpoints: Array<UpstreamEndpoint> }>();
   for (const row of rows) {
-    let server = servers.get(row.id)
+    let server = servers.get(row.id);
     if (!server) {
-      server = { row, endpoints: [] }
-      servers.set(row.id, server)
+      server = { row, endpoints: [] };
+      servers.set(row.id, server);
     }
-    if (row.endpoint_id !== null) server.endpoints.push(upstreamEndpoint(row))
+    if (row.endpoint_id !== null) server.endpoints.push(upstreamEndpoint(row));
   }
-  return Array.from(servers.values(), ({ row, endpoints }) => upstreamServer(row, endpoints))
-}
+  return Array.from(servers.values(), ({ row, endpoints }) => upstreamServer(row, endpoints));
+};
 
 const serverSelect = `
   SELECT server.*,
@@ -412,60 +431,60 @@ const serverSelect = `
     endpoint.updated_at_ms AS endpoint_updated_at_ms
   FROM upstream_servers server
   LEFT JOIN upstream_server_endpoints endpoint ON endpoint.server_id = server.id
-`
+`;
 
 interface UserStateRow {
-  readonly canonical_id: string
-  readonly revision: unknown
-  readonly played: unknown
-  readonly favorite: unknown
-  readonly play_count: unknown
-  readonly position_ticks: unknown
-  readonly last_played_version_id: string | null
-  readonly updated_at_ms: unknown
+  readonly canonical_id: string;
+  readonly revision: unknown;
+  readonly played: unknown;
+  readonly favorite: unknown;
+  readonly play_count: unknown;
+  readonly position_ticks: unknown;
+  readonly last_played_version_id: string | null;
+  readonly updated_at_ms: unknown;
 }
 
 interface CanonicalRow {
-  readonly id: string
-  readonly item_type: string
-  readonly identity_state: string
-  readonly display_metadata_json: unknown
-  readonly created_at_ms: unknown
-  readonly updated_at_ms: unknown
+  readonly id: string;
+  readonly item_type: string;
+  readonly identity_state: string;
+  readonly display_metadata_json: unknown;
+  readonly created_at_ms: unknown;
+  readonly updated_at_ms: unknown;
 }
 
 interface IdentityClaimRow {
-  readonly canonical_id: string
-  readonly namespace: string
-  readonly value: string
-  readonly state: string
-  readonly source_item_id: string
-  readonly created_at_ms: unknown
+  readonly canonical_id: string;
+  readonly namespace: string;
+  readonly value: string;
+  readonly state: string;
+  readonly source_item_id: string;
+  readonly created_at_ms: unknown;
 }
 
 interface SourceItemRow {
-  readonly id: string
-  readonly server_id: string
-  readonly catalog_namespace: string
-  readonly server_generation: unknown
-  readonly source_library_id: string
-  readonly upstream_item_id: string
-  readonly item_type: string
-  readonly canonical_id: string | null
-  readonly quarantine_reason: string | null
-  readonly created_at_ms: unknown
-  readonly updated_at_ms: unknown
+  readonly id: string;
+  readonly server_id: string;
+  readonly catalog_namespace: string;
+  readonly server_generation: unknown;
+  readonly source_library_id: string;
+  readonly upstream_item_id: string;
+  readonly item_type: string;
+  readonly canonical_id: string | null;
+  readonly quarantine_reason: string | null;
+  readonly created_at_ms: unknown;
+  readonly updated_at_ms: unknown;
 }
 
 interface MediaVersionRow {
-  readonly id: string
-  readonly source_item_id: string
-  readonly server_generation: unknown
-  readonly upstream_media_source_id: string
-  readonly label: string
-  readonly capabilities_json: unknown
-  readonly streams_json: unknown
-  readonly updated_at_ms: unknown
+  readonly id: string;
+  readonly source_item_id: string;
+  readonly server_generation: unknown;
+  readonly upstream_media_source_id: string;
+  readonly label: string;
+  readonly capabilities_json: unknown;
+  readonly streams_json: unknown;
+  readonly updated_at_ms: unknown;
 }
 
 const canonicalItem = (row: CanonicalRow): CanonicalItem => ({
@@ -474,16 +493,16 @@ const canonicalItem = (row: CanonicalRow): CanonicalItem => ({
   identityState: row.identity_state,
   displayMetadata: json(row.display_metadata_json, "display_metadata_json"),
   createdAtMs: integer(row.created_at_ms, "created_at_ms"),
-  updatedAtMs: integer(row.updated_at_ms, "updated_at_ms")
-})
+  updatedAtMs: integer(row.updated_at_ms, "updated_at_ms"),
+});
 
 const identityClaim = (row: IdentityClaimRow): IdentityClaim => ({
   namespace: row.namespace,
   value: row.value,
   state: row.state,
   sourceItemId: row.source_item_id,
-  createdAtMs: integer(row.created_at_ms, "created_at_ms")
-})
+  createdAtMs: integer(row.created_at_ms, "created_at_ms"),
+});
 
 const sourceItem = (row: SourceItemRow): SourceItemRecord => ({
   id: row.id,
@@ -496,8 +515,8 @@ const sourceItem = (row: SourceItemRow): SourceItemRecord => ({
   canonicalId: row.canonical_id,
   quarantineReason: row.quarantine_reason,
   createdAtMs: integer(row.created_at_ms, "created_at_ms"),
-  updatedAtMs: integer(row.updated_at_ms, "updated_at_ms")
-})
+  updatedAtMs: integer(row.updated_at_ms, "updated_at_ms"),
+});
 
 const mediaVersion = (row: MediaVersionRow): SourceMediaVersion => ({
   id: row.id,
@@ -507,15 +526,17 @@ const mediaVersion = (row: MediaVersionRow): SourceMediaVersion => ({
   label: row.label,
   capabilities: json(row.capabilities_json, "capabilities_json"),
   streams: json(row.streams_json, "streams_json"),
-  updatedAtMs: integer(row.updated_at_ms, "updated_at_ms")
-})
+  updatedAtMs: integer(row.updated_at_ms, "updated_at_ms"),
+});
 
-const providerNamespaces = new Set<string>(["tmdb:movie", "tmdb:tv", "imdb:title"])
-const externalClaims = (rows: ReadonlyArray<IdentityClaimRow>): ReadonlyArray<ExternalClaim> => rows
-  .filter((row): row is IdentityClaimRow & { readonly namespace: ProviderNamespace } =>
-    row.state === "exact" && providerNamespaces.has(row.namespace)
-  )
-  .map(({ namespace, value }) => ({ namespace, value }))
+const providerNamespaces = new Set<string>(["tmdb:movie", "tmdb:tv", "imdb:title"]);
+const externalClaims = (rows: ReadonlyArray<IdentityClaimRow>): ReadonlyArray<ExternalClaim> =>
+  rows
+    .filter(
+      (row): row is IdentityClaimRow & { readonly namespace: ProviderNamespace } =>
+        row.state === "exact" && providerNamespaces.has(row.namespace),
+    )
+    .map(({ namespace, value }) => ({ namespace, value }));
 
 const userState = (row: UserStateRow): UserStateRecord => ({
   canonicalId: row.canonical_id,
@@ -525,27 +546,32 @@ const userState = (row: UserStateRow): UserStateRecord => ({
   playCount: integer(row.play_count, "play_count"),
   positionTicks: integer(row.position_ticks, "position_ticks"),
   lastPlayedVersionId: row.last_played_version_id,
-  updatedAtMs: integer(row.updated_at_ms, "updated_at_ms")
-})
+  updatedAtMs: integer(row.updated_at_ms, "updated_at_ms"),
+});
 
-const makeRepositories = Effect.gen(function*() {
-  const sql = yield* D1Client.D1Client
-  yield* sql.unsafe("PRAGMA foreign_keys = ON").pipe(Effect.orDie)
-  const pragma = yield* sql.unsafe<{ foreign_keys: number }>("PRAGMA foreign_keys").pipe(Effect.orDie)
+const makeRepositories = Effect.gen(function* () {
+  const sql = yield* D1Client.D1Client;
+  yield* sql.unsafe("PRAGMA foreign_keys = ON").pipe(Effect.orDie);
+  const pragma = yield* sql
+    .unsafe<{ foreign_keys: number }>("PRAGMA foreign_keys")
+    .pipe(Effect.orDie);
   if (pragma[0]?.foreign_keys !== 1) {
-    return yield* Effect.die("SQLite foreign key enforcement is unavailable")
+    return yield* Effect.die("SQLite foreign key enforcement is unavailable");
   }
   const drivemby = yield* makeSqlDrivembyCompat({
     unsafe: <A extends object>(statement: string, params?: ReadonlyArray<unknown>) =>
       (params === undefined
         ? sql.unsafe<A>(statement)
-        : sql.unsafe<A>(statement, params as never)) as Effect.Effect<ReadonlyArray<A>, unknown>
-  }).pipe(Effect.orDie)
+        : sql.unsafe<A>(statement, params as never)) as Effect.Effect<ReadonlyArray<A>, unknown>,
+  }).pipe(Effect.orDie);
 
-  const claimUser: RepositoriesService["claimUser"] = (input) => Effect.suspend(() => {
-    const nowMs = input.nowMs ?? Date.now()
-    return Effect.gen(function*() {
-      const inserted = yield* Effect.result(sql.unsafe<UserRow>(`
+  const claimUser: RepositoriesService["claimUser"] = (input) =>
+    Effect.suspend(() => {
+      const nowMs = input.nowMs ?? Date.now();
+      return Effect.gen(function* () {
+        const inserted = yield* Effect.result(
+          sql.unsafe<UserRow>(
+            `
         INSERT INTO users (
           singleton, username, password_hash, password_salt, pbkdf2_iterations,
           auth_generation, created_at_ms, updated_at_ms
@@ -559,44 +585,47 @@ const makeRepositories = Effect.gen(function*() {
               input.password.salt,
               input.password.iterations,
               nowMs,
-              nowMs
-            ]
-          )
-        )
+              nowMs,
+            ],
+          ),
+        );
         if (Result.isFailure(inserted)) {
           const existing = yield* sql.unsafe<{ readonly singleton: number }>(
-            "SELECT singleton FROM users WHERE singleton = 1"
-          )
-          if (existing[0]) return yield* Effect.fail(new AlreadyInitialized())
-          return yield* Effect.fail(inserted.failure)
+            "SELECT singleton FROM users WHERE singleton = 1",
+          );
+          if (existing[0]) return yield* Effect.fail(new AlreadyInitialized());
+          return yield* Effect.fail(inserted.failure);
         }
-        if (inserted.success[0] === undefined) return yield* Effect.fail(new AlreadyInitialized())
-        return yield* decode("claimUser", () => userRecord(inserted.success[0]!))
+        if (inserted.success[0] === undefined) return yield* Effect.fail(new AlreadyInitialized());
+        return yield* decode("claimUser", () => userRecord(inserted.success[0]!));
       }).pipe(
         Effect.mapError((cause) =>
-          cause instanceof AlreadyInitialized ? cause : failure("claimUser", cause)
-        )
-      )
-    })
+          cause instanceof AlreadyInitialized ? cause : failure("claimUser", cause),
+        ),
+      );
+    });
 
   const getUserByName: RepositoriesService["getUserByName"] = (username) =>
     database(
       "getUserByName",
-      sql.unsafe<UserRow>("SELECT * FROM users WHERE username = ?", [username])
+      sql.unsafe<UserRow>("SELECT * FROM users WHERE username = ?", [username]),
     ).pipe(
       Effect.flatMap((rows) =>
-        decode("getUserByName", () => (rows[0] ? userRecord(rows[0]) : null))
-      )
-    )
+        decode("getUserByName", () => (rows[0] ? userRecord(rows[0]) : null)),
+      ),
+    );
 
   const getUser: RepositoriesService["getUser"] = () =>
     database("getUser", sql.unsafe<UserRow>("SELECT * FROM users WHERE singleton = 1")).pipe(
-      Effect.flatMap((rows) => decode("getUser", () => (rows[0] ? userRecord(rows[0]) : null)))
-    )
+      Effect.flatMap((rows) => decode("getUser", () => (rows[0] ? userRecord(rows[0]) : null))),
+    );
 
   const issueDashboardSession: RepositoriesService["issueDashboardSession"] = (input) =>
-    authDatabase("issueDashboardSession", Effect.gen(function*() {
-      const rows = yield* sql.unsafe<{ auth_generation: unknown }>(`
+    authDatabase(
+      "issueDashboardSession",
+      Effect.gen(function* () {
+        const rows = yield* sql.unsafe<{ auth_generation: unknown }>(
+          `
         INSERT INTO dashboard_sessions (
           id, user_singleton, token_hash, auth_generation, created_at_ms,
           last_seen_at_ms, expires_at_ms
@@ -605,28 +634,34 @@ const makeRepositories = Effect.gen(function*() {
         FROM users
         WHERE singleton = 1 AND auth_generation = ?
         RETURNING auth_generation
-      `, [
-        input.id,
-        input.tokenHash,
-        input.createdAtMs,
-        input.lastSeenAtMs,
-        input.expiresAtMs,
-        input.expectedAuthGeneration
-      ])
-      if (!rows[0]) return yield* Effect.fail(new AuthenticationChanged())
-      return {
-        id: input.id,
-        tokenHash: input.tokenHash,
-        authGeneration: integer(rows[0].auth_generation, "auth_generation"),
-        createdAtMs: input.createdAtMs,
-        lastSeenAtMs: input.lastSeenAtMs,
-        expiresAtMs: input.expiresAtMs
-      }
-    }))
+      `,
+          [
+            input.id,
+            input.tokenHash,
+            input.createdAtMs,
+            input.lastSeenAtMs,
+            input.expiresAtMs,
+            input.expectedAuthGeneration,
+          ],
+        );
+        if (!rows[0]) return yield* Effect.fail(new AuthenticationChanged());
+        return {
+          id: input.id,
+          tokenHash: input.tokenHash,
+          authGeneration: integer(rows[0].auth_generation, "auth_generation"),
+          createdAtMs: input.createdAtMs,
+          lastSeenAtMs: input.lastSeenAtMs,
+          expiresAtMs: input.expiresAtMs,
+        };
+      }),
+    );
 
   const issueEmbyToken: RepositoriesService["issueEmbyToken"] = (input) =>
-    authDatabase("issueEmbyToken", Effect.gen(function*() {
-      const rows = yield* sql.unsafe<{ auth_generation: unknown }>(`
+    authDatabase(
+      "issueEmbyToken",
+      Effect.gen(function* () {
+        const rows = yield* sql.unsafe<{ auth_generation: unknown }>(
+          `
         INSERT INTO emby_tokens (
           id, user_singleton, token_hash, auth_generation, device_id, device_name,
           created_at_ms, last_used_at_ms, expires_at_ms
@@ -635,117 +670,142 @@ const makeRepositories = Effect.gen(function*() {
         FROM users
         WHERE singleton = 1 AND auth_generation = ?
         RETURNING auth_generation
-      `, [
-        input.id,
-        input.tokenHash,
-        input.deviceId,
-        input.deviceName,
-        input.createdAtMs,
-        input.lastUsedAtMs,
-        input.expiresAtMs,
-        input.expectedAuthGeneration
-      ])
-      if (!rows[0]) return yield* Effect.fail(new AuthenticationChanged())
-      return {
-        id: input.id,
-        tokenHash: input.tokenHash,
-        authGeneration: integer(rows[0].auth_generation, "auth_generation"),
-        deviceId: input.deviceId,
-        deviceName: input.deviceName,
-        createdAtMs: input.createdAtMs,
-        lastUsedAtMs: input.lastUsedAtMs,
-        expiresAtMs: input.expiresAtMs
-      }
-    }))
+      `,
+          [
+            input.id,
+            input.tokenHash,
+            input.deviceId,
+            input.deviceName,
+            input.createdAtMs,
+            input.lastUsedAtMs,
+            input.expiresAtMs,
+            input.expectedAuthGeneration,
+          ],
+        );
+        if (!rows[0]) return yield* Effect.fail(new AuthenticationChanged());
+        return {
+          id: input.id,
+          tokenHash: input.tokenHash,
+          authGeneration: integer(rows[0].auth_generation, "auth_generation"),
+          deviceId: input.deviceId,
+          deviceName: input.deviceName,
+          createdAtMs: input.createdAtMs,
+          lastUsedAtMs: input.lastUsedAtMs,
+          expiresAtMs: input.expiresAtMs,
+        };
+      }),
+    );
 
   const lookupDashboardSession: RepositoriesService["lookupDashboardSession"] = (input) =>
-    database("lookupDashboardSession", Effect.gen(function*() {
-      const rows = yield* sql.unsafe<DashboardSessionRow>(`
+    database(
+      "lookupDashboardSession",
+      Effect.gen(function* () {
+        const rows = yield* sql.unsafe<DashboardSessionRow>(
+          `
         SELECT s.*, u.username, u.auth_generation AS current_auth_generation
         FROM dashboard_sessions s
         JOIN users u ON u.singleton = s.user_singleton
         WHERE s.token_hash = ?
         LIMIT 1
-      `, [input.tokenHash])
-      const row = rows[0]
-      if (!row) return null
-      const authGeneration = integer(row.auth_generation, "auth_generation")
-      const currentAuthGeneration = integer(row.current_auth_generation, "current_auth_generation")
-      const expiresAtMs = integer(row.expires_at_ms, "expires_at_ms")
-      if (authGeneration !== currentAuthGeneration || expiresAtMs <= input.nowMs) return null
-      let lastSeenAtMs = integer(row.last_seen_at_ms, "last_seen_at_ms")
-      let nextExpiresAtMs = expiresAtMs
-      if (input.nowMs - lastSeenAtMs >= input.refreshAfterMs) {
-        const refreshed = yield* sql.unsafe<{ id: string }>(`
+      `,
+          [input.tokenHash],
+        );
+        const row = rows[0];
+        if (!row) return null;
+        const authGeneration = integer(row.auth_generation, "auth_generation");
+        const currentAuthGeneration = integer(
+          row.current_auth_generation,
+          "current_auth_generation",
+        );
+        const expiresAtMs = integer(row.expires_at_ms, "expires_at_ms");
+        if (authGeneration !== currentAuthGeneration || expiresAtMs <= input.nowMs) return null;
+        let lastSeenAtMs = integer(row.last_seen_at_ms, "last_seen_at_ms");
+        let nextExpiresAtMs = expiresAtMs;
+        if (input.nowMs - lastSeenAtMs >= input.refreshAfterMs) {
+          const refreshed = yield* sql.unsafe<{ id: string }>(
+            `
           UPDATE dashboard_sessions
           SET last_seen_at_ms = ?, expires_at_ms = ?
           WHERE id = ? AND auth_generation = ? AND expires_at_ms > ?
             AND auth_generation = (SELECT auth_generation FROM users WHERE singleton = 1)
           RETURNING id
-        `, [
-          input.nowMs,
-          input.nowMs + input.idleMs,
-          row.id,
+        `,
+            [input.nowMs, input.nowMs + input.idleMs, row.id, authGeneration, input.nowMs],
+          );
+          if (!refreshed[0]) return null;
+          lastSeenAtMs = input.nowMs;
+          nextExpiresAtMs = input.nowMs + input.idleMs;
+        }
+        return {
+          id: row.id,
+          tokenHash: bytes(row.token_hash, "token_hash"),
           authGeneration,
-          input.nowMs
-        ])
-        if (!refreshed[0]) return null
-        lastSeenAtMs = input.nowMs
-        nextExpiresAtMs = input.nowMs + input.idleMs
-      }
-      return {
-        id: row.id,
-        tokenHash: bytes(row.token_hash, "token_hash"),
-        authGeneration,
-        username: row.username,
-        createdAtMs: integer(row.created_at_ms, "created_at_ms"),
-        lastSeenAtMs,
-        expiresAtMs: nextExpiresAtMs
-      }
-    }))
+          username: row.username,
+          createdAtMs: integer(row.created_at_ms, "created_at_ms"),
+          lastSeenAtMs,
+          expiresAtMs: nextExpiresAtMs,
+        };
+      }),
+    );
 
   const lookupEmbyToken: RepositoriesService["lookupEmbyToken"] = (input) =>
-    database("lookupEmbyToken", Effect.gen(function*() {
-      const rows = yield* sql.unsafe<EmbyTokenRow>(`
+    database(
+      "lookupEmbyToken",
+      Effect.gen(function* () {
+        const rows = yield* sql.unsafe<EmbyTokenRow>(
+          `
         SELECT t.*, u.username, u.auth_generation AS current_auth_generation
         FROM emby_tokens t
         JOIN users u ON u.singleton = t.user_singleton
         WHERE t.token_hash = ?
         LIMIT 1
-      `, [input.tokenHash])
-      const row = rows[0]
-      if (!row) return null
-      const authGeneration = integer(row.auth_generation, "auth_generation")
-      if (
-        authGeneration !== integer(row.current_auth_generation, "current_auth_generation") ||
-        integer(row.expires_at_ms, "expires_at_ms") <= input.nowMs
-      ) return null
-      yield* sql.unsafe(
-        "UPDATE emby_tokens SET last_used_at_ms = ? WHERE id = ? AND auth_generation = ?",
-        [input.nowMs, row.id, authGeneration]
-      )
-      return {
-        id: row.id,
-        tokenHash: bytes(row.token_hash, "token_hash"),
-        authGeneration,
-        username: row.username,
-        deviceId: row.device_id,
-        deviceName: row.device_name,
-        createdAtMs: integer(row.created_at_ms, "created_at_ms"),
-        lastUsedAtMs: input.nowMs,
-        expiresAtMs: integer(row.expires_at_ms, "expires_at_ms")
-      }
-    }))
+      `,
+          [input.tokenHash],
+        );
+        const row = rows[0];
+        if (!row) return null;
+        const authGeneration = integer(row.auth_generation, "auth_generation");
+        if (
+          authGeneration !== integer(row.current_auth_generation, "current_auth_generation") ||
+          integer(row.expires_at_ms, "expires_at_ms") <= input.nowMs
+        )
+          return null;
+        yield* sql.unsafe(
+          "UPDATE emby_tokens SET last_used_at_ms = ? WHERE id = ? AND auth_generation = ?",
+          [input.nowMs, row.id, authGeneration],
+        );
+        return {
+          id: row.id,
+          tokenHash: bytes(row.token_hash, "token_hash"),
+          authGeneration,
+          username: row.username,
+          deviceId: row.device_id,
+          deviceName: row.device_name,
+          createdAtMs: integer(row.created_at_ms, "created_at_ms"),
+          lastUsedAtMs: input.nowMs,
+          expiresAtMs: integer(row.expires_at_ms, "expires_at_ms"),
+        };
+      }),
+    );
 
-  const deleteDashboardSession: RepositoriesService["deleteDashboardSession"] = (id, authGeneration) =>
-    database("deleteDashboardSession", sql.unsafe(
-      "DELETE FROM dashboard_sessions WHERE id = ? AND auth_generation = ?",
-      [id, authGeneration]
-    )).pipe(Effect.asVoid)
+  const deleteDashboardSession: RepositoriesService["deleteDashboardSession"] = (
+    id,
+    authGeneration,
+  ) =>
+    database(
+      "deleteDashboardSession",
+      sql.unsafe("DELETE FROM dashboard_sessions WHERE id = ? AND auth_generation = ?", [
+        id,
+        authGeneration,
+      ]),
+    ).pipe(Effect.asVoid);
 
   const consumeAuthAttempt: RepositoriesService["consumeAuthAttempt"] = (input) =>
-    database("consumeAuthAttempt", Effect.gen(function*() {
-      const inserted = yield* sql.unsafe<AuthRateLimitRow>(`
+    database(
+      "consumeAuthAttempt",
+      Effect.gen(function* () {
+        const inserted = yield* sql.unsafe<AuthRateLimitRow>(
+          `
         INSERT INTO auth_rate_limits (
           scope_key, window_started_at_ms, attempt_count, blocked_until_ms
         ) SELECT ?, ?, 1, NULL
@@ -754,9 +814,12 @@ const makeRepositories = Effect.gen(function*() {
           WHERE scope_key = ? AND window_started_at_ms > ?
         )
         RETURNING window_started_at_ms, attempt_count, blocked_until_ms
-      `, [input.scopeKey, input.nowMs, input.scopeKey, input.nowMs - input.windowMs])
-      if (inserted[0]) return true
-      const updated = yield* sql.unsafe<AuthRateLimitRow>(`
+      `,
+          [input.scopeKey, input.nowMs, input.scopeKey, input.nowMs - input.windowMs],
+        );
+        if (inserted[0]) return true;
+        const updated = yield* sql.unsafe<AuthRateLimitRow>(
+          `
         UPDATE auth_rate_limits
         SET attempt_count = attempt_count + 1,
             blocked_until_ms = CASE
@@ -770,53 +833,69 @@ const makeRepositories = Effect.gen(function*() {
           AND window_started_at_ms > ?
           AND (blocked_until_ms IS NULL OR blocked_until_ms <= ?)
         RETURNING window_started_at_ms, attempt_count, blocked_until_ms
-      `, [
-        input.maxAttempts,
-        input.nowMs + input.blockMs,
-        input.scopeKey,
-        input.scopeKey,
-        input.nowMs - input.windowMs,
-        input.nowMs
-      ])
-      return updated[0] !== undefined
-    }))
+      `,
+          [
+            input.maxAttempts,
+            input.nowMs + input.blockMs,
+            input.scopeKey,
+            input.scopeKey,
+            input.nowMs - input.windowMs,
+            input.nowMs,
+          ],
+        );
+        return updated[0] !== undefined;
+      }),
+    );
 
   const clearAuthAttempts: RepositoriesService["clearAuthAttempts"] = (scopeKey) =>
     database(
       "clearAuthAttempts",
-      sql.unsafe("DELETE FROM auth_rate_limits WHERE scope_key = ?", [scopeKey])
-    ).pipe(Effect.asVoid)
+      sql.unsafe("DELETE FROM auth_rate_limits WHERE scope_key = ?", [scopeKey]),
+    ).pipe(Effect.asVoid);
 
   const revokeAuthentication: RepositoriesService["revokeAuthentication"] = (input) =>
-    authDatabase("revokeAuthentication", Effect.gen(function*() {
-      const result = yield* Effect.result(sql.batch([
-        sql.unsafe(`
+    authDatabase(
+      "revokeAuthentication",
+      Effect.gen(function* () {
+        const result = yield* Effect.result(
+          sql.batch([
+            sql.unsafe(
+              `
           UPDATE users
           SET password_hash = ?, password_salt = ?, pbkdf2_iterations = ?,
               auth_generation = auth_generation + 1, updated_at_ms = ?
           WHERE singleton = 1 AND auth_generation = ?
-        `, [
-          input.password.hash,
-          input.password.salt,
-          input.password.iterations,
-          input.updatedAtMs,
-          input.expectedAuthGeneration
-        ]),
-        sql.unsafe(`
+        `,
+              [
+                input.password.hash,
+                input.password.salt,
+                input.password.iterations,
+                input.updatedAtMs,
+                input.expectedAuthGeneration,
+              ],
+            ),
+            sql.unsafe(
+              `
           DELETE FROM dashboard_sessions
           WHERE EXISTS (
             SELECT 1 FROM users
             WHERE singleton = 1 AND auth_generation = ? AND updated_at_ms = ?
           )
-        `, [input.expectedAuthGeneration + 1, input.updatedAtMs]),
-        sql.unsafe(`
+        `,
+              [input.expectedAuthGeneration + 1, input.updatedAtMs],
+            ),
+            sql.unsafe(
+              `
           DELETE FROM emby_tokens
           WHERE EXISTS (
             SELECT 1 FROM users
             WHERE singleton = 1 AND auth_generation = ? AND updated_at_ms = ?
           )
-        `, [input.expectedAuthGeneration + 1, input.updatedAtMs]),
-        sql.unsafe(`
+        `,
+              [input.expectedAuthGeneration + 1, input.updatedAtMs],
+            ),
+            sql.unsafe(
+              `
           INSERT INTO schema_migrations(version, name, applied_at_ms)
           SELECT 1, 'd1-auth-revocation-fence', 0
           WHERE NOT EXISTS (
@@ -830,36 +909,36 @@ const makeRepositories = Effect.gen(function*() {
                 input.updatedAtMs,
                 input.password.hash,
                 input.password.salt,
-                input.password.iterations
-              ]
-            )
-          ])
-        )
+                input.password.iterations,
+              ],
+            ),
+          ]),
+        );
         if (Result.isFailure(result)) {
           const users = yield* sql.unsafe<{ readonly auth_generation: unknown }>(
-            "SELECT auth_generation FROM users WHERE singleton = 1"
-          )
+            "SELECT auth_generation FROM users WHERE singleton = 1",
+          );
           if (
             users[0] === undefined ||
             integer(users[0].auth_generation, "auth_generation") !== input.expectedAuthGeneration
           )
-            return yield* Effect.fail(new AuthenticationChanged())
-          return yield* Effect.fail(result.failure)
+            return yield* Effect.fail(new AuthenticationChanged());
+          return yield* Effect.fail(result.failure);
         }
-      })
-    )
+      }),
+    );
 
   const replaceEndpointStatements = (
     input: UpstreamServer,
     fenceSql: string,
-    fenceParameters: ReadonlyArray<unknown>
+    fenceParameters: ReadonlyArray<unknown>,
   ) => [
     sql.unsafe(
       `
       DELETE FROM upstream_server_endpoints
       WHERE server_id = ? AND EXISTS (${fenceSql})
     `,
-      [input.id, ...fenceParameters]
+      [input.id, ...fenceParameters],
     ),
     ...input.endpoints.map((endpoint, order) =>
       sql.unsafe(
@@ -884,11 +963,11 @@ const makeRepositories = Effect.gen(function*() {
           endpoint.lastSuccessAtMs,
           endpoint.createdAtMs,
           endpoint.updatedAtMs,
-          ...fenceParameters
-        ]
-      )
-    )
-  ]
+          ...fenceParameters,
+        ],
+      ),
+    ),
+  ];
 
   const readServer = (id: string) =>
     Effect.gen(function* () {
@@ -898,10 +977,10 @@ const makeRepositories = Effect.gen(function*() {
       WHERE server.id = ?
       ORDER BY endpoint.endpoint_order
     `,
-        [id]
-      )
-      return yield* decode("readServer", () => upstreamServers(rows)[0] ?? null)
-    })
+        [id],
+      );
+      return yield* decode("readServer", () => upstreamServers(rows)[0] ?? null);
+    });
 
   const listServers: RepositoriesService["listServers"] = () =>
     database(
@@ -910,8 +989,8 @@ const makeRepositories = Effect.gen(function*() {
       ${serverSelect}
       WHERE server.deleted_at_ms IS NULL
       ORDER BY server.id, endpoint.endpoint_order
-    `)
-    ).pipe(Effect.flatMap((rows) => decode("listServers", () => upstreamServers(rows))))
+    `),
+    ).pipe(Effect.flatMap((rows) => decode("listServers", () => upstreamServers(rows))));
 
   const getServer: RepositoriesService["getServer"] = (id) =>
     database(
@@ -922,15 +1001,15 @@ const makeRepositories = Effect.gen(function*() {
       WHERE server.id = ? AND server.deleted_at_ms IS NULL
       ORDER BY endpoint.endpoint_order
     `,
-        [id]
-      )
-    ).pipe(Effect.flatMap((rows) => decode("getServer", () => upstreamServers(rows)[0] ?? null)))
+        [id],
+      ),
+    ).pipe(Effect.flatMap((rows) => decode("getServer", () => upstreamServers(rows)[0] ?? null)));
 
   const createServer: RepositoriesService["createServer"] = (input, limit) =>
     database(
       "createServer",
       Effect.gen(function* () {
-        const fenceSql = "SELECT 1 FROM upstream_servers WHERE id = ? AND created_at_ms = ?"
+        const fenceSql = "SELECT 1 FROM upstream_servers WHERE id = ? AND created_at_ms = ?";
         yield* sql.batch([
           sql.unsafe(
             `
@@ -964,20 +1043,20 @@ const makeRepositories = Effect.gen(function*() {
               input.createdAtMs,
               input.updatedAtMs,
               input.userAgentPolicy,
-              limit
-            ]
+              limit,
+            ],
           ),
-          ...replaceEndpointStatements(input, fenceSql, [input.id, input.createdAtMs])
-        ])
-        return yield* readServer(input.id)
-      })
-    )
+          ...replaceEndpointStatements(input, fenceSql, [input.id, input.createdAtMs]),
+        ]);
+        return yield* readServer(input.id);
+      }),
+    );
 
   const saveServer: RepositoriesService["saveServer"] = (input) =>
     database(
       "saveServer",
       Effect.gen(function* () {
-        const fenceSql = "SELECT 1 FROM upstream_servers WHERE id = ?"
+        const fenceSql = "SELECT 1 FROM upstream_servers WHERE id = ?";
         yield* sql.batch([
           sql.unsafe(
             `
@@ -1027,17 +1106,20 @@ const makeRepositories = Effect.gen(function*() {
               input.deletedAtMs,
               input.createdAtMs,
               input.updatedAtMs,
-              input.userAgentPolicy
-            ]
+              input.userAgentPolicy,
+            ],
           ),
-          ...replaceEndpointStatements(input, fenceSql, [input.id])
-        ])
-        return yield* readServer(input.id).pipe(Effect.map((server) => server!))
-      })
-    )
+          ...replaceEndpointStatements(input, fenceSql, [input.id]),
+        ]);
+        return yield* readServer(input.id).pipe(Effect.map((server) => server!));
+      }),
+    );
 
   const saveServerResult: RepositoriesService["saveServerResult"] = (input) =>
-    database("saveServerResult", sql.unsafe<ServerRow>(`
+    database(
+      "saveServerResult",
+      sql.unsafe<ServerRow>(
+        `
         UPDATE upstream_servers SET
           verified_catalog_id = CASE WHEN ? = 1 THEN ? ELSE verified_catalog_id END,
           verified_base_url = CASE WHEN ? = 1 THEN ? ELSE verified_base_url END,
@@ -1067,25 +1149,25 @@ const makeRepositories = Effect.gen(function*() {
           input.lastSuccessAtMs ?? null,
           input.updatedAtMs,
           input.serverId,
-          input.expectedGeneration
-        ]
-      )
+          input.expectedGeneration,
+        ],
+      ),
     ).pipe(
       Effect.flatMap((saved) =>
         saved[0] === undefined
           ? Effect.succeed(null)
-          : database("readServerResult", readServer(input.serverId))
-      )
-    )
+          : database("readServerResult", readServer(input.serverId)),
+      ),
+    );
 
   const saveServerConfiguration: RepositoriesService["saveServerConfiguration"] = (
     input,
-    expectedGeneration
+    expectedGeneration,
   ) =>
     database(
       "saveServerConfiguration",
       Effect.gen(function* () {
-        const fenceSql = "SELECT 1 FROM upstream_servers WHERE id = ? AND generation = ?"
+        const fenceSql = "SELECT 1 FROM upstream_servers WHERE id = ? AND generation = ?";
         const results = yield* sql.batch([
           ...replaceEndpointStatements(input, fenceSql, [input.id, expectedGeneration]),
           sql.unsafe<{ readonly id: string }>(
@@ -1116,35 +1198,38 @@ const makeRepositories = Effect.gen(function*() {
               input.lastSuccessAtMs,
               input.updatedAtMs,
               input.id,
-              expectedGeneration
-            ]
-          )
-        ])
-        if (results[results.length - 1]?.[0] === undefined) return null
-        return yield* readServer(input.id)
-      })
-    )
+              expectedGeneration,
+            ],
+          ),
+        ]);
+        if (results[results.length - 1]?.[0] === undefined) return null;
+        return yield* readServer(input.id);
+      }),
+    );
 
   const deleteServer: RepositoriesService["deleteServer"] = (id) =>
-    database("deleteServer", sql.unsafe(`
+    database(
+      "deleteServer",
+      sql.unsafe(
+        `
       UPDATE upstream_servers SET
         enabled = 0, health = 'unknown', generation = generation + 1,
         access_token = NULL, access_token_expires_at_ms = NULL, upstream_user_id = NULL,
         deleted_at_ms = ?, updated_at_ms = ?
       WHERE id = ? AND deleted_at_ms IS NULL
     `,
-        [Date.now(), Date.now(), id]
-      )
-    ).pipe(Effect.asVoid)
+        [Date.now(), Date.now(), id],
+      ),
+    ).pipe(Effect.asVoid);
 
   interface MetadataProviderRow {
-    readonly provider_id: unknown
-    readonly enabled: unknown
-    readonly provider_order: unknown
-    readonly language: string | null
-    readonly credential: string | null
-    readonly status: unknown
-    readonly updated_at_ms: unknown
+    readonly provider_id: unknown;
+    readonly enabled: unknown;
+    readonly provider_order: unknown;
+    readonly language: string | null;
+    readonly credential: string | null;
+    readonly status: unknown;
+    readonly updated_at_ms: unknown;
   }
 
   const metadataProviderSetting = (row: MetadataProviderRow): MetadataProviderSetting => ({
@@ -1154,8 +1239,8 @@ const makeRepositories = Effect.gen(function*() {
     language: row.language,
     credential: row.credential,
     status: metadataProviderStatus(row.status),
-    updatedAtMs: integer(row.updated_at_ms, "updated_at_ms")
-  })
+    updatedAtMs: integer(row.updated_at_ms, "updated_at_ms"),
+  });
 
   const readMetadataSettings: RepositoriesService["readMetadataSettings"] = () =>
     database(
@@ -1167,19 +1252,20 @@ const makeRepositories = Effect.gen(function*() {
         ) VALUES
           ('tmdb', 0, 0, NULL, NULL, 'unconfigured', 0),
           ('trakt', 0, 1, NULL, NULL, 'unconfigured', 0)
-      `)
+      `);
         const rows = yield* sql.unsafe<MetadataProviderRow>(
-          "SELECT * FROM metadata_provider_settings ORDER BY provider_order"
-        )
+          "SELECT * FROM metadata_provider_settings ORDER BY provider_order",
+        );
         return yield* decode("readMetadataSettings", () => {
-          if (rows.length !== 2) throw new TypeError("metadata settings must contain two providers")
+          if (rows.length !== 2)
+            throw new TypeError("metadata settings must contain two providers");
           return rows.map(metadataProviderSetting) as unknown as readonly [
             MetadataProviderSetting,
-            MetadataProviderSetting
-          ]
-        })
-      })
-    )
+            MetadataProviderSetting,
+          ];
+        });
+      }),
+    );
 
   const writeMetadataSettings: RepositoriesService["writeMetadataSettings"] = (settings) =>
     database(
@@ -1201,35 +1287,40 @@ const makeRepositories = Effect.gen(function*() {
                 setting.language,
                 setting.credential,
                 setting.status,
-                setting.updatedAtMs
-              ]
-            )
-          )
-        ])
-        return settings
-      })
-    )
+                setting.updatedAtMs,
+              ],
+            ),
+          ),
+        ]);
+        return settings;
+      }),
+    );
 
-  const updateMetadataProviderStatus: RepositoriesService["updateMetadataProviderStatus"] = (input) =>
+  const updateMetadataProviderStatus: RepositoriesService["updateMetadataProviderStatus"] = (
+    input,
+  ) =>
     database(
       "updateMetadataProviderStatus",
-      sql.unsafe<{ provider_id: string }>(`
+      sql.unsafe<{ provider_id: string }>(
+        `
         UPDATE metadata_provider_settings
         SET status = ?
         WHERE provider_id = ? AND updated_at_ms = ? AND credential IS NOT NULL
         RETURNING provider_id
-      `, [input.status, input.providerId, input.expectedUpdatedAtMs])
-    ).pipe(Effect.map((rows) => rows.length === 1))
+      `,
+        [input.status, input.providerId, input.expectedUpdatedAtMs],
+      ),
+    ).pipe(Effect.map((rows) => rows.length === 1));
 
   interface ExternalMetadataRow {
-    readonly provider_id: unknown
-    readonly identity_namespace: string
-    readonly identity_value: string
-    readonly payload_json: unknown | null
-    readonly found: unknown
-    readonly fetched_at_ms: unknown
-    readonly fresh_until_ms: unknown
-    readonly stale_until_ms: unknown
+    readonly provider_id: unknown;
+    readonly identity_namespace: string;
+    readonly identity_value: string;
+    readonly payload_json: unknown | null;
+    readonly found: unknown;
+    readonly fetched_at_ms: unknown;
+    readonly fresh_until_ms: unknown;
+    readonly stale_until_ms: unknown;
   }
 
   const externalMetadata = (row: ExternalMetadataRow): ExternalMetadataCacheEntry => ({
@@ -1240,13 +1331,13 @@ const makeRepositories = Effect.gen(function*() {
     found: boolean(row.found, "found"),
     fetchedAtMs: integer(row.fetched_at_ms, "fetched_at_ms"),
     freshUntilMs: integer(row.fresh_until_ms, "fresh_until_ms"),
-    staleUntilMs: integer(row.stale_until_ms, "stale_until_ms")
-  })
+    staleUntilMs: integer(row.stale_until_ms, "stale_until_ms"),
+  });
 
   const readExternalMetadata: RepositoriesService["readExternalMetadata"] = (
     providerId,
     identityNamespace,
-    identityValue
+    identityValue,
   ) =>
     database(
       "readExternalMetadata",
@@ -1255,15 +1346,15 @@ const makeRepositories = Effect.gen(function*() {
     SELECT * FROM external_metadata_cache
     WHERE provider_id = ? AND identity_namespace = ? AND identity_value = ?
   `,
-        [providerId, identityNamespace, identityValue]
-      )
+        [providerId, identityNamespace, identityValue],
+      ),
     ).pipe(
       Effect.flatMap((rows) =>
         decode("readExternalMetadata", () =>
-          rows[0] === undefined ? null : externalMetadata(rows[0])
-        )
-      )
-    )
+          rows[0] === undefined ? null : externalMetadata(rows[0]),
+        ),
+      ),
+    );
 
   const writeExternalMetadata: RepositoriesService["writeExternalMetadata"] = (entry) =>
     database(
@@ -1289,28 +1380,30 @@ const makeRepositories = Effect.gen(function*() {
           entry.found ? 1 : 0,
           entry.fetchedAtMs,
           entry.freshUntilMs,
-          entry.staleUntilMs
-        ]
-      )
-    ).pipe(Effect.asVoid)
+          entry.staleUntilMs,
+        ],
+      ),
+    ).pipe(Effect.asVoid);
 
   interface LibraryRow {
-    readonly id: string
-    readonly name: string
-    readonly media_type: unknown
-    readonly enabled: unknown
-    readonly created_at_ms: unknown
-    readonly updated_at_ms: unknown
-    readonly server_id: string | null
-    readonly source_library_id: string | null
-    readonly source_library_name: string | null
-    readonly source_media_type: unknown | null
-    readonly source_order: unknown | null
-    readonly source_enabled: unknown | null
+    readonly id: string;
+    readonly name: string;
+    readonly media_type: unknown;
+    readonly enabled: unknown;
+    readonly created_at_ms: unknown;
+    readonly updated_at_ms: unknown;
+    readonly server_id: string | null;
+    readonly source_library_id: string | null;
+    readonly source_library_name: string | null;
+    readonly source_media_type: unknown | null;
+    readonly source_order: unknown | null;
+    readonly source_enabled: unknown | null;
   }
 
   const listVirtualLibraries: RepositoriesService["listVirtualLibraries"] = () =>
-    database("listVirtualLibraries", sql.unsafe<LibraryRow>(`
+    database(
+      "listVirtualLibraries",
+      sql.unsafe<LibraryRow>(`
       SELECT
         vl.*,
         ls.server_id,
@@ -1322,48 +1415,64 @@ const makeRepositories = Effect.gen(function*() {
       FROM virtual_libraries vl
       LEFT JOIN library_sources ls ON ls.virtual_library_id = vl.id
       ORDER BY vl.id, ls.source_order, ls.server_id, ls.source_library_id
-    `)).pipe(Effect.flatMap((rows) => decode("listVirtualLibraries", () => {
-      const libraries = new Map<string, VirtualLibrary & { sources: Array<LibrarySource> }>()
-      for (const row of rows) {
-        let library = libraries.get(row.id)
-        if (!library) {
-          library = {
-            id: decodeVirtualLibraryId(row.id),
-            name: row.name,
-            mediaType: mediaType(row.media_type),
-            enabled: boolean(row.enabled, "enabled"),
-            createdAtMs: integer(row.created_at_ms, "created_at_ms"),
-            updatedAtMs: integer(row.updated_at_ms, "updated_at_ms"),
-            sources: []
+    `),
+    ).pipe(
+      Effect.flatMap((rows) =>
+        decode("listVirtualLibraries", () => {
+          const libraries = new Map<string, VirtualLibrary & { sources: Array<LibrarySource> }>();
+          for (const row of rows) {
+            let library = libraries.get(row.id);
+            if (!library) {
+              library = {
+                id: decodeVirtualLibraryId(row.id),
+                name: row.name,
+                mediaType: mediaType(row.media_type),
+                enabled: boolean(row.enabled, "enabled"),
+                createdAtMs: integer(row.created_at_ms, "created_at_ms"),
+                updatedAtMs: integer(row.updated_at_ms, "updated_at_ms"),
+                sources: [],
+              };
+              libraries.set(row.id, library);
+            }
+            if (
+              row.server_id !== null &&
+              row.source_library_id !== null &&
+              row.source_library_name !== null
+            ) {
+              library.sources.push({
+                serverId: decodeServerId(row.server_id),
+                sourceLibraryId: decodeSourceLibraryId(row.source_library_id),
+                sourceLibraryName: row.source_library_name,
+                mediaType: mediaType(row.source_media_type),
+                sourceOrder: integer(row.source_order, "source_order"),
+                enabled: boolean(row.source_enabled, "source_enabled"),
+              });
+            }
           }
-          libraries.set(row.id, library)
-        }
-        if (row.server_id !== null && row.source_library_id !== null && row.source_library_name !== null) {
-          library.sources.push({
-            serverId: decodeServerId(row.server_id),
-            sourceLibraryId: decodeSourceLibraryId(row.source_library_id),
-            sourceLibraryName: row.source_library_name,
-            mediaType: mediaType(row.source_media_type),
-            sourceOrder: integer(row.source_order, "source_order"),
-            enabled: boolean(row.source_enabled, "source_enabled")
-          })
-        }
-      }
-      return Array.from(libraries.values())
-    })))
+          return Array.from(libraries.values());
+        }),
+      ),
+    );
 
   const saveVirtualLibrary: RepositoriesService["saveVirtualLibrary"] = (input, serverFences) => {
-    if (serverFences.length === 0) return Effect.succeed(null)
-    return database("saveVirtualLibrary", Effect.gen(function*() {
-      const eligibility = serverFences.map(() => `EXISTS(
+    if (serverFences.length === 0) return Effect.succeed(null);
+    return database(
+      "saveVirtualLibrary",
+      Effect.gen(function* () {
+        const eligibility = serverFences
+          .map(
+            () => `EXISTS(
         SELECT 1 FROM upstream_servers us
         WHERE us.id = ? AND us.generation = ? AND us.enabled = 1
           AND us.deleted_at_ms IS NULL AND us.health = 'healthy'
           AND us.verified_base_url IS NOT NULL
-      )`).join(" AND ")
-      const fences = serverFences.flatMap((fence) => [fence.serverId, fence.generation])
-      yield* sql.batch([
-        sql.unsafe(`
+      )`,
+          )
+          .join(" AND ");
+        const fences = serverFences.flatMap((fence) => [fence.serverId, fence.generation]);
+        yield* sql.batch([
+          sql.unsafe(
+            `
           INSERT INTO virtual_libraries (
             id, name, media_type, enabled, created_at_ms, updated_at_ms
           ) SELECT ?, ?, ?, ?, ?, ?
@@ -1373,16 +1482,19 @@ const makeRepositories = Effect.gen(function*() {
             media_type = excluded.media_type,
             enabled = excluded.enabled,
             updated_at_ms = excluded.updated_at_ms
-        `, [
-          input.id,
-          input.name,
-          input.mediaType,
-          input.enabled ? 1 : 0,
-          input.createdAtMs,
-          input.updatedAtMs,
-          ...fences
-        ]),
-        sql.unsafe(`
+        `,
+            [
+              input.id,
+              input.name,
+              input.mediaType,
+              input.enabled ? 1 : 0,
+              input.createdAtMs,
+              input.updatedAtMs,
+              ...fences,
+            ],
+          ),
+          sql.unsafe(
+            `
           DELETE FROM library_sources
           WHERE virtual_library_id = ?
             AND EXISTS (
@@ -1390,8 +1502,12 @@ const makeRepositories = Effect.gen(function*() {
               WHERE id = ? AND updated_at_ms = ?
             )
             AND ${eligibility}
-        `, [input.id, input.id, input.updatedAtMs, ...fences]),
-        ...input.sources.map((source) => sql.unsafe(`
+        `,
+            [input.id, input.id, input.updatedAtMs, ...fences],
+          ),
+          ...input.sources.map((source) =>
+            sql.unsafe(
+              `
           INSERT INTO library_sources (
             virtual_library_id, server_id, source_library_id, source_library_name,
             media_type, source_order, enabled
@@ -1400,34 +1516,45 @@ const makeRepositories = Effect.gen(function*() {
             SELECT 1 FROM virtual_libraries
             WHERE id = ? AND updated_at_ms = ?
           ) AND ${eligibility}
-        `, [
-          input.id,
-          source.serverId,
-          source.sourceLibraryId,
-          source.sourceLibraryName,
-          source.mediaType,
-          source.sourceOrder,
-          source.enabled ? 1 : 0,
-          input.id,
-          input.updatedAtMs,
-          ...fences
-        ]))
-      ])
-      const saved = yield* sql.unsafe<{ readonly id: string }>(`
+        `,
+              [
+                input.id,
+                source.serverId,
+                source.sourceLibraryId,
+                source.sourceLibraryName,
+                source.mediaType,
+                source.sourceOrder,
+                source.enabled ? 1 : 0,
+                input.id,
+                input.updatedAtMs,
+                ...fences,
+              ],
+            ),
+          ),
+        ]);
+        const saved = yield* sql.unsafe<{ readonly id: string }>(
+          `
         SELECT id FROM virtual_libraries
         WHERE id = ? AND updated_at_ms = ? AND ${eligibility}
-      `, [input.id, input.updatedAtMs, ...fences])
-      return saved[0] === undefined ? null : input
-    }))
-  }
+      `,
+          [input.id, input.updatedAtMs, ...fences],
+        );
+        return saved[0] === undefined ? null : input;
+      }),
+    );
+  };
 
   const deleteVirtualLibrary: RepositoriesService["deleteVirtualLibrary"] = (id) =>
-    database("deleteVirtualLibrary", sql.unsafe("DELETE FROM virtual_libraries WHERE id = ?", [id])).pipe(
-      Effect.asVoid
-    )
+    database(
+      "deleteVirtualLibrary",
+      sql.unsafe("DELETE FROM virtual_libraries WHERE id = ?", [id]),
+    ).pipe(Effect.asVoid);
 
   const isSourceEligible: RepositoriesService["isSourceEligible"] = (serverId, sourceLibraryId) =>
-    database("isSourceEligible", sql.unsafe<{ readonly eligible: unknown }>(`
+    database(
+      "isSourceEligible",
+      sql.unsafe<{ readonly eligible: unknown }>(
+        `
       SELECT EXISTS(
         SELECT 1
         FROM library_sources ls
@@ -1439,33 +1566,38 @@ const makeRepositories = Effect.gen(function*() {
           AND us.health = 'healthy'
           AND (us.verified_catalog_id IS NOT NULL OR us.verified_base_url IS NOT NULL)
       ) AS eligible
-    `, [serverId, sourceLibraryId])).pipe(
-      Effect.flatMap((rows) => decode("isSourceEligible", () => boolean(rows[0]?.eligible, "eligible")))
-    )
+    `,
+        [serverId, sourceLibraryId],
+      ),
+    ).pipe(
+      Effect.flatMap((rows) =>
+        decode("isSourceEligible", () => boolean(rows[0]?.eligible, "eligible")),
+      ),
+    );
 
   interface EligibleSourceRow extends EndpointRow {
-    readonly virtual_library_id: string
-    readonly server_id: string
-    readonly server_name: string
-    readonly source_library_id: string
-    readonly source_library_name: string
-    readonly media_type: unknown
-    readonly source_order: unknown
-    readonly source_enabled: unknown
-    readonly catalog_namespace: string
-    readonly verified_catalog_id: string
-    readonly generation: unknown
-    readonly username: string
-    readonly password: string | null
-    readonly access_token: string | null
-    readonly access_token_expires_at_ms: unknown | null
-    readonly user_agent: string
-    readonly user_agent_policy: unknown
+    readonly virtual_library_id: string;
+    readonly server_id: string;
+    readonly server_name: string;
+    readonly source_library_id: string;
+    readonly source_library_name: string;
+    readonly media_type: unknown;
+    readonly source_order: unknown;
+    readonly source_enabled: unknown;
+    readonly catalog_namespace: string;
+    readonly verified_catalog_id: string;
+    readonly generation: unknown;
+    readonly username: string;
+    readonly password: string | null;
+    readonly access_token: string | null;
+    readonly access_token_expires_at_ms: unknown | null;
+    readonly user_agent: string;
+    readonly user_agent_policy: unknown;
   }
 
   const eligibleSource = (
     row: EligibleSourceRow,
-    endpoints: ReadonlyArray<UpstreamEndpoint>
+    endpoints: ReadonlyArray<UpstreamEndpoint>,
   ): EligibleSource => ({
     virtualLibraryId: decodeVirtualLibraryId(row.virtual_library_id),
     serverId: decodeServerId(row.server_id),
@@ -1488,30 +1620,33 @@ const makeRepositories = Effect.gen(function*() {
         ? null
         : integer(row.access_token_expires_at_ms, "access_token_expires_at_ms"),
     userAgentPolicy: userAgentPolicy(row.user_agent_policy),
-    userAgent: row.user_agent === "" ? null : row.user_agent
-  })
+    userAgent: row.user_agent === "" ? null : row.user_agent,
+  });
 
   const eligibleSources = (
-    rows: ReadonlyArray<EligibleSourceRow>
+    rows: ReadonlyArray<EligibleSourceRow>,
   ): ReadonlyArray<EligibleSource> => {
     const sources = new Map<
       string,
       { row: EligibleSourceRow; endpoints: Array<UpstreamEndpoint> }
-    >()
+    >();
     for (const row of rows) {
-      const key = `${row.virtual_library_id}\0${row.server_id}\0${row.source_library_id}`
-      let source = sources.get(key)
+      const key = `${row.virtual_library_id}\0${row.server_id}\0${row.source_library_id}`;
+      let source = sources.get(key);
       if (!source) {
-        source = { row, endpoints: [] }
-        sources.set(key, source)
+        source = { row, endpoints: [] };
+        sources.set(key, source);
       }
-      if (row.endpoint_id !== null) source.endpoints.push(upstreamEndpoint(row))
+      if (row.endpoint_id !== null) source.endpoints.push(upstreamEndpoint(row));
     }
-    return Array.from(sources.values(), ({ row, endpoints }) => eligibleSource(row, endpoints))
-  }
+    return Array.from(sources.values(), ({ row, endpoints }) => eligibleSource(row, endpoints));
+  };
 
   const resolveEligibleSources: RepositoriesService["resolveEligibleSources"] = (libraryId) =>
-    database("resolveEligibleSources", sql.unsafe<EligibleSourceRow>(`
+    database(
+      "resolveEligibleSources",
+      sql.unsafe<EligibleSourceRow>(
+        `
       SELECT
         ls.virtual_library_id,
         ls.server_id,
@@ -1558,52 +1693,63 @@ const makeRepositories = Effect.gen(function*() {
         AND (us.verified_catalog_id IS NOT NULL OR us.verified_base_url IS NOT NULL)
       ORDER BY ls.source_order, ls.server_id, ls.source_library_id, endpoint.endpoint_order
     `,
-        [libraryId]
-      )
-    ).pipe(Effect.flatMap((rows) => decode("resolveEligibleSources", () => eligibleSources(rows))))
+        [libraryId],
+      ),
+    ).pipe(Effect.flatMap((rows) => decode("resolveEligibleSources", () => eligibleSources(rows))));
 
-  const resolveCanonicalIdInTransaction = (id: string) => Effect.gen(function*() {
-    const rows = yield* sql.unsafe<{ readonly canonical_id: string }>(`
+  const resolveCanonicalIdInTransaction = (id: string) =>
+    Effect.gen(function* () {
+      const rows = yield* sql.unsafe<{ readonly canonical_id: string }>(
+        `
       SELECT id AS canonical_id FROM canonical_items WHERE id = ?
       UNION ALL
       SELECT canonical_id FROM canonical_aliases
       WHERE alias_id = ? AND NOT EXISTS (SELECT 1 FROM canonical_items WHERE id = ?)
       LIMIT 1
-    `, [id, id, id])
-    return rows[0]?.canonical_id ?? null
-  })
+    `,
+        [id, id, id],
+      );
+      return rows[0]?.canonical_id ?? null;
+    });
 
   const lookupCanonicalId: RepositoriesService["lookupCanonicalId"] = (id) =>
-    database("lookupCanonicalId", resolveCanonicalIdInTransaction(id))
+    database("lookupCanonicalId", resolveCanonicalIdInTransaction(id));
 
-  const assertIdentityFence = (candidate: PreparedIdentityCandidate, lock: boolean) => Effect.gen(function*() {
-    const rows = lock
-      ? yield* sql.unsafe<{ readonly id: string }>(`
+  const assertIdentityFence = (candidate: PreparedIdentityCandidate, lock: boolean) =>
+    Effect.gen(function* () {
+      const rows = lock
+        ? yield* sql.unsafe<{ readonly id: string }>(
+            `
           UPDATE upstream_servers
           SET updated_at_ms = updated_at_ms
           WHERE id = ? AND catalog_namespace = ? AND verified_catalog_id = ?
             AND generation = ? AND deleted_at_ms IS NULL
           RETURNING id
-        `, [
-          candidate.serverId,
-          candidate.catalogNamespace,
-          candidate.verifiedCatalogId,
-          candidate.serverGeneration
-        ])
-      : yield* sql.unsafe<{ readonly id: string }>(`
+        `,
+            [
+              candidate.serverId,
+              candidate.catalogNamespace,
+              candidate.verifiedCatalogId,
+              candidate.serverGeneration,
+            ],
+          )
+        : yield* sql.unsafe<{ readonly id: string }>(
+            `
           SELECT id FROM upstream_servers
           WHERE id = ? AND catalog_namespace = ? AND verified_catalog_id = ?
             AND generation = ? AND deleted_at_ms IS NULL
-        `, [
-          candidate.serverId,
-          candidate.catalogNamespace,
-          candidate.verifiedCatalogId,
-          candidate.serverGeneration
-        ])
-    if (!rows[0]) {
-      return yield* Effect.fail(new IdentityConflict({ message: "server-generation-changed" }))
-    }
-  })
+        `,
+            [
+              candidate.serverId,
+              candidate.catalogNamespace,
+              candidate.verifiedCatalogId,
+              candidate.serverGeneration,
+            ],
+          );
+      if (!rows[0]) {
+        return yield* Effect.fail(new IdentityConflict({ message: "server-generation-changed" }));
+      }
+    });
 
   const eligibleTargetConditions = `
     server.generation = item.server_generation
@@ -1612,26 +1758,28 @@ const makeRepositories = Effect.gen(function*() {
     AND (server.verified_catalog_id IS NOT NULL OR server.verified_base_url IS NOT NULL)
     AND binding.enabled = 1
     AND library.enabled = 1
-  `
-  const eligibleTargetSql = `item.canonical_id = ? AND ${eligibleTargetConditions}`
+  `;
+  const eligibleTargetSql = `item.canonical_id = ? AND ${eligibleTargetConditions}`;
 
   const outboxPayload = (state: UserStateRecord): DesiredUserState => ({
     played: state.played,
     favorite: state.favorite,
     playCount: state.playCount,
     positionTicks: state.positionTicks,
-    lastPlayedVersionId: state.lastPlayedVersionId
-  })
+    lastPlayedVersionId: state.lastPlayedVersionId,
+  });
 
   const upsertOutboxTarget = (
     target: {
-      readonly id: string
-      readonly server_id: string
-      readonly server_generation: number
+      readonly id: string;
+      readonly server_id: string;
+      readonly server_generation: number;
     },
     state: UserStateRecord,
-    nowMs: number
-  ) => sql.unsafe(`
+    nowMs: number,
+  ) =>
+    sql.unsafe(
+      `
     INSERT INTO state_outbox (
       target_id, canonical_id, source_item_id, server_id, server_generation,
       desired_revision, delivered_revision, payload_json, attempt_count,
@@ -1733,154 +1881,208 @@ const makeRepositories = Effect.gen(function*() {
       payload_json = excluded.payload_json,
       eligible = 1,
       updated_at_ms = excluded.updated_at_ms
-  `, [
-    target.id,
-    state.canonicalId,
-    target.id,
-    target.server_id,
-    target.server_generation,
-    state.revision,
-    canonicalJson(outboxPayload(state)),
-    nowMs,
-    nowMs
-  ])
-
+  `,
+      [
+        target.id,
+        state.canonicalId,
+        target.id,
+        target.server_id,
+        target.server_generation,
+        state.revision,
+        canonicalJson(outboxPayload(state)),
+        nowMs,
+        nowMs,
+      ],
+    );
 
   const resolveIdentityD1: RepositoriesService["resolveIdentity"] = (candidate) =>
-    identityDatabase("resolveIdentity", Effect.gen(function*() {
-      yield* assertIdentityFence(candidate, false)
+    identityDatabase(
+      "resolveIdentity",
+      Effect.gen(function* () {
+        yield* assertIdentityFence(candidate, false);
 
-      type MatchClaim = { readonly namespace: string; readonly value: string }
-      let matchClaims: ReadonlyArray<MatchClaim> = candidate.claims
-      let proposedCanonicalId = candidate.proposedCanonicalId
-      let identityState = candidate.claims.length > 0 ? "exact" : "source-exclusive"
-      let quarantineReason = candidate.sourceExclusiveReason
+        type MatchClaim = { readonly namespace: string; readonly value: string };
+        let matchClaims: ReadonlyArray<MatchClaim> = candidate.claims;
+        let proposedCanonicalId = candidate.proposedCanonicalId;
+        let identityState = candidate.claims.length > 0 ? "exact" : "source-exclusive";
+        let quarantineReason = candidate.sourceExclusiveReason;
 
-      if (candidate.fallback !== null) {
-        const parentId = yield* resolveCanonicalIdInTransaction(candidate.fallback.canonicalSeriesId)
-        const parent = parentId === null ? [] : yield* sql.unsafe<{ readonly id: string }>(
-          "SELECT id FROM canonical_items WHERE id = ? AND item_type = 'Series'",
-          [parentId]
-        )
-        if (parent[0]) {
-          const namespace = `fallback:${candidate.fallback.kind}`
-          const value = JSON.stringify(candidate.fallback.kind === "season"
-            ? [parent[0].id, candidate.fallback.seasonNumber]
-            : [parent[0].id, candidate.fallback.seasonNumber, candidate.fallback.episodeNumber])
-          matchClaims = [{ namespace, value }]
-          proposedCanonicalId = yield* Effect.promise(() => stableCanonicalId([namespace, value]))
-          identityState = "fallback"
-          quarantineReason = null
-        } else {
-          matchClaims = []
-          proposedCanonicalId = null
-          identityState = "source-exclusive"
-          quarantineReason = "parent-unresolved"
+        if (candidate.fallback !== null) {
+          const parentId = yield* resolveCanonicalIdInTransaction(
+            candidate.fallback.canonicalSeriesId,
+          );
+          const parent =
+            parentId === null
+              ? []
+              : yield* sql.unsafe<{ readonly id: string }>(
+                  "SELECT id FROM canonical_items WHERE id = ? AND item_type = 'Series'",
+                  [parentId],
+                );
+          if (parent[0]) {
+            const namespace = `fallback:${candidate.fallback.kind}`;
+            const value = JSON.stringify(
+              candidate.fallback.kind === "season"
+                ? [parent[0].id, candidate.fallback.seasonNumber]
+                : [parent[0].id, candidate.fallback.seasonNumber, candidate.fallback.episodeNumber],
+            );
+            matchClaims = [{ namespace, value }];
+            proposedCanonicalId = yield* Effect.promise(() =>
+              stableCanonicalId([namespace, value]),
+            );
+            identityState = "fallback";
+            quarantineReason = null;
+          } else {
+            matchClaims = [];
+            proposedCanonicalId = null;
+            identityState = "source-exclusive";
+            quarantineReason = "parent-unresolved";
+          }
         }
-      }
 
-      const existingRows = yield* sql.unsafe<SourceItemRow>(`
+        const existingRows = yield* sql.unsafe<SourceItemRow>(
+          `
         SELECT * FROM source_items
         WHERE catalog_namespace = ? AND upstream_item_id = ? AND item_type = ?
         LIMIT 1
-      `, [candidate.catalogNamespace, candidate.upstreamItemId, candidate.itemType])
-      const existing = existingRows[0]
-      const sourceItemId = existing?.id ?? candidate.sourceItemId
+      `,
+          [candidate.catalogNamespace, candidate.upstreamItemId, candidate.itemType],
+        );
+        const existing = existingRows[0];
+        const sourceItemId = existing?.id ?? candidate.sourceItemId;
 
-      const candidateIds = new Set<string>()
-      if (existing?.canonical_id) candidateIds.add(existing.canonical_id)
-      if (proposedCanonicalId !== null) {
-        const proposedTarget = yield* resolveCanonicalIdInTransaction(proposedCanonicalId)
-        if (proposedTarget !== null) candidateIds.add(proposedTarget)
-      }
-      if (matchClaims.length > 0) {
-        const predicate = matchClaims.map(() => "(ic.namespace = ? AND ic.value = ?)").join(" OR ")
-        const matched = yield* sql.unsafe<{ readonly canonical_id: string }>(`
+        const candidateIds = new Set<string>();
+        if (existing?.canonical_id) candidateIds.add(existing.canonical_id);
+        if (proposedCanonicalId !== null) {
+          const proposedTarget = yield* resolveCanonicalIdInTransaction(proposedCanonicalId);
+          if (proposedTarget !== null) candidateIds.add(proposedTarget);
+        }
+        if (matchClaims.length > 0) {
+          const predicate = matchClaims
+            .map(() => "(ic.namespace = ? AND ic.value = ?)")
+            .join(" OR ");
+          const matched = yield* sql.unsafe<{ readonly canonical_id: string }>(
+            `
           SELECT DISTINCT ic.canonical_id
           FROM identity_claims ic
           JOIN canonical_items ci ON ci.id = ic.canonical_id
           WHERE ic.state = 'exact' AND ci.item_type = ? AND (${predicate})
-        `, [candidate.itemType, ...matchClaims.flatMap(({ namespace, value }) => [namespace, value])])
-        for (const row of matched) candidateIds.add(row.canonical_id)
-      }
+        `,
+            [
+              candidate.itemType,
+              ...matchClaims.flatMap(({ namespace, value }) => [namespace, value]),
+            ],
+          );
+          for (const row of matched) candidateIds.add(row.canonical_id);
+        }
 
-      const ids = [...candidateIds]
-      const canonicalRows = ids.length === 0 ? [] : yield* sql.unsafe<CanonicalRow>(`
+        const ids = [...candidateIds];
+        const canonicalRows =
+          ids.length === 0
+            ? []
+            : yield* sql.unsafe<CanonicalRow>(
+                `
         SELECT * FROM canonical_items
         WHERE id IN (${ids.map(() => "?").join(", ")}) AND item_type = ?
         ORDER BY created_at_ms, id
-      `, [...ids, candidate.itemType])
-      const clusterClaims = canonicalRows.length === 0 ? [] : yield* sql.unsafe<IdentityClaimRow>(`
+      `,
+                [...ids, candidate.itemType],
+              );
+        const clusterClaims =
+          canonicalRows.length === 0
+            ? []
+            : yield* sql.unsafe<IdentityClaimRow>(
+                `
         SELECT * FROM identity_claims
         WHERE canonical_id IN (${canonicalRows.map(() => "?").join(", ")})
         ORDER BY created_at_ms, canonical_id, namespace
-      `, canonicalRows.map(({ id }) => id))
+      `,
+                canonicalRows.map(({ id }) => id),
+              );
 
-      const stateRank = { "source-exclusive": 0, fallback: 1, exact: 2 } as const
-      const retainedIdentityState = [
-        identityState,
-        ...canonicalRows.map(({ identity_state }) => identity_state),
-        ...(clusterClaims.some(({ namespace, state }) => state === "exact" && providerNamespaces.has(namespace))
-          ? ["exact"]
-          : clusterClaims.some(({ namespace, state }) => state === "exact" && namespace.startsWith("fallback:"))
-            ? ["fallback"]
-            : [])
-      ].reduce((retained, state) =>
-        (stateRank[state as keyof typeof stateRank] ?? -1) > (stateRank[retained as keyof typeof stateRank] ?? -1)
-          ? state
-          : retained
-      )
+        const stateRank = { "source-exclusive": 0, fallback: 1, exact: 2 } as const;
+        const retainedIdentityState = [
+          identityState,
+          ...canonicalRows.map(({ identity_state }) => identity_state),
+          ...(clusterClaims.some(
+            ({ namespace, state }) => state === "exact" && providerNamespaces.has(namespace),
+          )
+            ? ["exact"]
+            : clusterClaims.some(
+                  ({ namespace, state }) => state === "exact" && namespace.startsWith("fallback:"),
+                )
+              ? ["fallback"]
+              : []),
+        ].reduce((retained, state) =>
+          (stateRank[state as keyof typeof stateRank] ?? -1) >
+          (stateRank[retained as keyof typeof stateRank] ?? -1)
+            ? state
+            : retained,
+        );
 
-      let incompatible = false
-      const candidateSet = toClaimSet(candidate.claims)
-      for (const row of canonicalRows) {
-        if (!clustersCompatible(
-          candidateSet,
-          toClaimSet(externalClaims(clusterClaims.filter((entry) => entry.canonical_id === row.id)))
-        )) incompatible = true
-      }
-      const values = new Map<string, string>()
-      for (const entry of [
-        ...clusterClaims.filter(({ state }) => state === "exact").map(({ namespace, value }) => ({ namespace, value })),
-        ...matchClaims
-      ]) {
-        const current = values.get(entry.namespace)
-        if (current !== undefined && current !== entry.value) incompatible = true
-        values.set(entry.namespace, entry.value)
-      }
+        let incompatible = false;
+        const candidateSet = toClaimSet(candidate.claims);
+        for (const row of canonicalRows) {
+          if (
+            !clustersCompatible(
+              candidateSet,
+              toClaimSet(
+                externalClaims(clusterClaims.filter((entry) => entry.canonical_id === row.id)),
+              ),
+            )
+          )
+            incompatible = true;
+        }
+        const values = new Map<string, string>();
+        for (const entry of [
+          ...clusterClaims
+            .filter(({ state }) => state === "exact")
+            .map(({ namespace, value }) => ({ namespace, value })),
+          ...matchClaims,
+        ]) {
+          const current = values.get(entry.namespace);
+          if (current !== undefined && current !== entry.value) incompatible = true;
+          values.set(entry.namespace, entry.value);
+        }
 
-      let survivorId: string
-      let reason = quarantineReason
-      if (incompatible) {
-        survivorId = existing?.canonical_id ?? candidate.sourceExclusiveCanonicalId
-        const target = yield* resolveCanonicalIdInTransaction(survivorId)
-        if (target !== null) survivorId = target
-        reason = "ambiguous-identity"
-      } else if (canonicalRows[0]) {
-        survivorId = canonicalRows[0].id
-      } else {
-        survivorId = proposedCanonicalId ?? candidate.sourceExclusiveCanonicalId
-        const target = yield* resolveCanonicalIdInTransaction(survivorId)
-        if (target !== null) survivorId = target
-      }
-      const retiredIds = incompatible
-        ? []
-        : canonicalRows.map(({ id }) => id).filter((id) => id !== survivorId)
-      const writes: Array<Statement<unknown>> = []
+        let survivorId: string;
+        let reason = quarantineReason;
+        if (incompatible) {
+          survivorId = existing?.canonical_id ?? candidate.sourceExclusiveCanonicalId;
+          const target = yield* resolveCanonicalIdInTransaction(survivorId);
+          if (target !== null) survivorId = target;
+          reason = "ambiguous-identity";
+        } else if (canonicalRows[0]) {
+          survivorId = canonicalRows[0].id;
+        } else {
+          survivorId = proposedCanonicalId ?? candidate.sourceExclusiveCanonicalId;
+          const target = yield* resolveCanonicalIdInTransaction(survivorId);
+          if (target !== null) survivorId = target;
+        }
+        const retiredIds = incompatible
+          ? []
+          : canonicalRows.map(({ id }) => id).filter((id) => id !== survivorId);
+        const writes: Array<Statement<unknown>> = [];
 
-      writes.push(sql.unsafe(`
+        writes.push(
+          sql.unsafe(
+            `
         INSERT OR IGNORE INTO canonical_items (
           id, item_type, identity_state, display_metadata_json, created_at_ms, updated_at_ms
         ) VALUES (?, ?, ?, ?, ?, ?)
-      `, [
-        survivorId,
-        candidate.itemType,
-        incompatible ? "source-exclusive" : identityState,
-        canonicalJson(candidate.displayMetadata),
-        candidate.observedAtMs,
-        candidate.observedAtMs
-      ]))
-      writes.push(sql.unsafe(`
+      `,
+            [
+              survivorId,
+              candidate.itemType,
+              incompatible ? "source-exclusive" : identityState,
+              canonicalJson(candidate.displayMetadata),
+              candidate.observedAtMs,
+              candidate.observedAtMs,
+            ],
+          ),
+        );
+        writes.push(
+          sql.unsafe(
+            `
         INSERT INTO source_items (
           id, server_id, catalog_namespace, server_generation, source_library_id,
           upstream_item_id, item_type, canonical_id, quarantine_reason, created_at_ms,
@@ -1892,24 +2094,31 @@ const makeRepositories = Effect.gen(function*() {
           canonical_id = excluded.canonical_id,
           quarantine_reason = excluded.quarantine_reason,
           updated_at_ms = excluded.updated_at_ms
-      `, [
-        sourceItemId,
-        candidate.serverId,
-        candidate.catalogNamespace,
-        candidate.serverGeneration,
-        candidate.sourceLibraryId,
-        candidate.upstreamItemId,
-        candidate.itemType,
-        survivorId,
-        reason,
-        existing === undefined ? candidate.observedAtMs : integer(existing.created_at_ms, "created_at_ms"),
-        candidate.observedAtMs
-      ]))
+      `,
+            [
+              sourceItemId,
+              candidate.serverId,
+              candidate.catalogNamespace,
+              candidate.serverGeneration,
+              candidate.sourceLibraryId,
+              candidate.upstreamItemId,
+              candidate.itemType,
+              survivorId,
+              reason,
+              existing === undefined
+                ? candidate.observedAtMs
+                : integer(existing.created_at_ms, "created_at_ms"),
+              candidate.observedAtMs,
+            ],
+          ),
+        );
 
-      if (retiredIds.length > 0) {
-        const retired = retiredIds.map(() => "?").join(", ")
-        const cluster = [survivorId, ...retiredIds]
-        writes.push(sql.unsafe(`
+        if (retiredIds.length > 0) {
+          const retired = retiredIds.map(() => "?").join(", ");
+          const cluster = [survivorId, ...retiredIds];
+          writes.push(
+            sql.unsafe(
+              `
           DELETE FROM query_generation_items AS retired_item
           WHERE retired_item.canonical_id IN (${retired})
             AND EXISTS (
@@ -1919,20 +2128,31 @@ const makeRepositories = Effect.gen(function*() {
                   preferred.canonical_id IN (${retired}) AND preferred.ordinal < retired_item.ordinal
                 ))
             )
-        `, [...retiredIds, survivorId, ...retiredIds]))
-        writes.push(sql.unsafe(
-          `UPDATE query_generation_items SET canonical_id = ? WHERE canonical_id IN (${retired})`,
-          [survivorId, ...retiredIds]
-        ))
-        writes.push(sql.unsafe(
-          `UPDATE source_items SET canonical_id = ? WHERE canonical_id IN (${retired})`,
-          [survivorId, ...retiredIds]
-        ))
-        writes.push(sql.unsafe(
-          `UPDATE state_outbox SET canonical_id = ? WHERE canonical_id IN (${retired})`,
-          [survivorId, ...retiredIds]
-        ))
-        writes.push(sql.unsafe(`
+        `,
+              [...retiredIds, survivorId, ...retiredIds],
+            ),
+          );
+          writes.push(
+            sql.unsafe(
+              `UPDATE query_generation_items SET canonical_id = ? WHERE canonical_id IN (${retired})`,
+              [survivorId, ...retiredIds],
+            ),
+          );
+          writes.push(
+            sql.unsafe(
+              `UPDATE source_items SET canonical_id = ? WHERE canonical_id IN (${retired})`,
+              [survivorId, ...retiredIds],
+            ),
+          );
+          writes.push(
+            sql.unsafe(
+              `UPDATE state_outbox SET canonical_id = ? WHERE canonical_id IN (${retired})`,
+              [survivorId, ...retiredIds],
+            ),
+          );
+          writes.push(
+            sql.unsafe(
+              `
           INSERT INTO playback_watermarks (canonical_id, started_at_ms, session_id)
           SELECT ?, started_at_ms, session_id
           FROM playback_watermarks
@@ -1942,16 +2162,25 @@ const makeRepositories = Effect.gen(function*() {
           ON CONFLICT(canonical_id) DO UPDATE SET
             started_at_ms = excluded.started_at_ms,
             session_id = excluded.session_id
-        `, [survivorId, ...cluster]))
-        writes.push(sql.unsafe(
-          `DELETE FROM playback_watermarks WHERE canonical_id IN (${retired})`,
-          retiredIds
-        ))
-        writes.push(sql.unsafe(
-          `UPDATE playback_sessions SET canonical_id = ? WHERE canonical_id IN (${retired})`,
-          [survivorId, ...retiredIds]
-        ))
-        writes.push(sql.unsafe(`
+        `,
+              [survivorId, ...cluster],
+            ),
+          );
+          writes.push(
+            sql.unsafe(
+              `DELETE FROM playback_watermarks WHERE canonical_id IN (${retired})`,
+              retiredIds,
+            ),
+          );
+          writes.push(
+            sql.unsafe(
+              `UPDATE playback_sessions SET canonical_id = ? WHERE canonical_id IN (${retired})`,
+              [survivorId, ...retiredIds],
+            ),
+          );
+          writes.push(
+            sql.unsafe(
+              `
           INSERT INTO user_state (
             canonical_id, revision, played, favorite, play_count, position_ticks,
             last_played_version_id, updated_at_ms
@@ -1972,44 +2201,64 @@ const makeRepositories = Effect.gen(function*() {
             updated_at_ms = excluded.updated_at_ms
           WHERE excluded.revision > user_state.revision
              OR (excluded.revision = user_state.revision AND excluded.updated_at_ms > user_state.updated_at_ms)
-        `, [survivorId, ...cluster]))
-        writes.push(sql.unsafe(
-          `DELETE FROM user_state WHERE canonical_id IN (${retired})`,
-          retiredIds
-        ))
-        for (const row of clusterClaims.filter(({ canonical_id, state }) =>
-          state === "exact" && retiredIds.includes(canonical_id)
-        )) {
-          writes.push(sql.unsafe(`
+        `,
+              [survivorId, ...cluster],
+            ),
+          );
+          writes.push(
+            sql.unsafe(`DELETE FROM user_state WHERE canonical_id IN (${retired})`, retiredIds),
+          );
+          for (const row of clusterClaims.filter(
+            ({ canonical_id, state }) => state === "exact" && retiredIds.includes(canonical_id),
+          )) {
+            writes.push(
+              sql.unsafe(
+                `
             INSERT OR IGNORE INTO identity_claims (
               canonical_id, namespace, value, state, source_item_id, created_at_ms
             ) VALUES (?, ?, ?, 'exact', ?, ?)
-          `, [survivorId, row.namespace, row.value, row.source_item_id, row.created_at_ms]))
-        }
-        writes.push(sql.unsafe(
-          `DELETE FROM identity_claims WHERE canonical_id IN (${retired})`,
-          retiredIds
-        ))
-        writes.push(sql.unsafe(
-          `UPDATE canonical_aliases SET canonical_id = ? WHERE canonical_id IN (${retired})`,
-          [survivorId, ...retiredIds]
-        ))
-        for (const retiredId of retiredIds) {
-          writes.push(sql.unsafe(`
+          `,
+                [survivorId, row.namespace, row.value, row.source_item_id, row.created_at_ms],
+              ),
+            );
+          }
+          writes.push(
+            sql.unsafe(
+              `DELETE FROM identity_claims WHERE canonical_id IN (${retired})`,
+              retiredIds,
+            ),
+          );
+          writes.push(
+            sql.unsafe(
+              `UPDATE canonical_aliases SET canonical_id = ? WHERE canonical_id IN (${retired})`,
+              [survivorId, ...retiredIds],
+            ),
+          );
+          for (const retiredId of retiredIds) {
+            writes.push(
+              sql.unsafe(
+                `
             INSERT INTO canonical_aliases (alias_id, canonical_id, retired_at_ms)
             VALUES (?, ?, ?)
             ON CONFLICT(alias_id) DO UPDATE SET
               canonical_id = excluded.canonical_id,
               retired_at_ms = excluded.retired_at_ms
-          `, [retiredId, survivorId, candidate.observedAtMs]))
+          `,
+                [retiredId, survivorId, candidate.observedAtMs],
+              ),
+            );
+          }
+          writes.push(
+            sql.unsafe(`DELETE FROM canonical_items WHERE id IN (${retired})`, retiredIds),
+          );
         }
-        writes.push(sql.unsafe(`DELETE FROM canonical_items WHERE id IN (${retired})`, retiredIds))
-      }
 
-      if (incompatible) {
-        if (existing?.canonical_id === null || existing === undefined) {
-          for (const entry of candidate.claims) {
-            writes.push(sql.unsafe(`
+        if (incompatible) {
+          if (existing?.canonical_id === null || existing === undefined) {
+            for (const entry of candidate.claims) {
+              writes.push(
+                sql.unsafe(
+                  `
               INSERT INTO identity_claims (
                 canonical_id, namespace, value, state, source_item_id, created_at_ms
               ) VALUES (?, ?, ?, 'quarantined', ?, ?)
@@ -2017,16 +2266,22 @@ const makeRepositories = Effect.gen(function*() {
                 value = excluded.value,
                 state = excluded.state,
                 source_item_id = excluded.source_item_id
-            `, [survivorId, entry.namespace, entry.value, sourceItemId, candidate.observedAtMs]))
+            `,
+                  [survivorId, entry.namespace, entry.value, sourceItemId, candidate.observedAtMs],
+                ),
+              );
+            }
           }
-        }
-      } else {
-        writes.push(sql.unsafe(
-          "DELETE FROM identity_claims WHERE canonical_id = ? AND state <> 'exact'",
-          [survivorId]
-        ))
-        for (const entry of matchClaims) {
-          writes.push(sql.unsafe(`
+        } else {
+          writes.push(
+            sql.unsafe("DELETE FROM identity_claims WHERE canonical_id = ? AND state <> 'exact'", [
+              survivorId,
+            ]),
+          );
+          for (const entry of matchClaims) {
+            writes.push(
+              sql.unsafe(
+                `
             INSERT INTO identity_claims (
               canonical_id, namespace, value, state, source_item_id, created_at_ms
             ) VALUES (?, ?, ?, 'exact', ?, ?)
@@ -2034,24 +2289,43 @@ const makeRepositories = Effect.gen(function*() {
               value = excluded.value,
               state = excluded.state,
               source_item_id = excluded.source_item_id
-          `, [survivorId, entry.namespace, entry.value, sourceItemId, candidate.observedAtMs]))
-        }
-        if (proposedCanonicalId !== null && proposedCanonicalId !== survivorId) {
-          writes.push(sql.unsafe(`
+          `,
+                [survivorId, entry.namespace, entry.value, sourceItemId, candidate.observedAtMs],
+              ),
+            );
+          }
+          if (proposedCanonicalId !== null && proposedCanonicalId !== survivorId) {
+            writes.push(
+              sql.unsafe(
+                `
             INSERT INTO canonical_aliases (alias_id, canonical_id, retired_at_ms)
             VALUES (?, ?, ?)
             ON CONFLICT(alias_id) DO UPDATE SET canonical_id = excluded.canonical_id
-          `, [proposedCanonicalId, survivorId, candidate.observedAtMs]))
+          `,
+                [proposedCanonicalId, survivorId, candidate.observedAtMs],
+              ),
+            );
+          }
         }
-      }
 
-      writes.push(sql.unsafe(`
+        writes.push(
+          sql.unsafe(
+            `
         UPDATE canonical_items
         SET identity_state = ?, updated_at_ms = ?
         WHERE id = ?
-      `, [incompatible ? "source-exclusive" : retainedIdentityState, candidate.observedAtMs, survivorId]))
-      for (const version of candidate.mediaVersions) {
-        writes.push(sql.unsafe(`
+      `,
+            [
+              incompatible ? "source-exclusive" : retainedIdentityState,
+              candidate.observedAtMs,
+              survivorId,
+            ],
+          ),
+        );
+        for (const version of candidate.mediaVersions) {
+          writes.push(
+            sql.unsafe(
+              `
           INSERT INTO source_media_versions (
             id, source_item_id, server_generation, upstream_media_source_id,
             label, capabilities_json, streams_json, updated_at_ms
@@ -2063,19 +2337,24 @@ const makeRepositories = Effect.gen(function*() {
             capabilities_json = excluded.capabilities_json,
             streams_json = excluded.streams_json,
             updated_at_ms = excluded.updated_at_ms
-        `, [
-          version.id,
-          sourceItemId,
-          candidate.serverGeneration,
-          version.upstreamMediaSourceId,
-          version.label,
-          canonicalJson(version.capabilities),
-          canonicalJson(version.streams),
-          candidate.observedAtMs
-        ]))
-      }
+        `,
+              [
+                version.id,
+                sourceItemId,
+                candidate.serverGeneration,
+                version.upstreamMediaSourceId,
+                version.label,
+                canonicalJson(version.capabilities),
+                canonicalJson(version.streams),
+                candidate.observedAtMs,
+              ],
+            ),
+          );
+        }
 
-      writes.push(sql.unsafe(`
+        writes.push(
+          sql.unsafe(
+            `
         UPDATE state_outbox
         SET eligible = 0, lease_owner = NULL, lease_expires_at_ms = NULL, updated_at_ms = ?
         WHERE canonical_id = ? AND eligible = 1 AND NOT EXISTS (
@@ -2088,8 +2367,13 @@ const makeRepositories = Effect.gen(function*() {
           JOIN virtual_libraries library ON library.id = binding.virtual_library_id
           WHERE item.id = state_outbox.source_item_id AND ${eligibleTargetSql}
         )
-      `, [candidate.observedAtMs, survivorId, survivorId]))
-      writes.push(sql.unsafe(`
+      `,
+            [candidate.observedAtMs, survivorId, survivorId],
+          ),
+        );
+        writes.push(
+          sql.unsafe(
+            `
         INSERT INTO state_outbox (
           target_id, canonical_id, source_item_id, server_id, server_generation,
           desired_revision, delivered_revision, payload_json, attempt_count,
@@ -2140,8 +2424,13 @@ const makeRepositories = Effect.gen(function*() {
           permanent_failure_code = CASE WHEN state_outbox.desired_revision <> excluded.desired_revision THEN NULL ELSE state_outbox.permanent_failure_code END,
           eligible = 1,
           updated_at_ms = excluded.updated_at_ms
-      `, [candidate.observedAtMs, candidate.observedAtMs, survivorId]))
-      writes.push(sql.unsafe(`
+      `,
+            [candidate.observedAtMs, candidate.observedAtMs, survivorId],
+          ),
+        );
+        writes.push(
+          sql.unsafe(
+            `
         INSERT INTO schema_migrations(version, name, applied_at_ms)
         SELECT 1, 'd1-identity-fence', 0
         WHERE NOT EXISTS (
@@ -2154,68 +2443,70 @@ const makeRepositories = Effect.gen(function*() {
               candidate.serverId,
               candidate.catalogNamespace,
               candidate.verifiedCatalogId,
-              candidate.serverGeneration
-            ]
-          )
-        )
+              candidate.serverGeneration,
+            ],
+          ),
+        );
 
-        const batchResult = yield* Effect.result(sql.batch(writes))
+        const batchResult = yield* Effect.result(sql.batch(writes));
         if (Result.isFailure(batchResult)) {
-          const fenceResult = yield* Effect.result(assertIdentityFence(candidate, false))
+          const fenceResult = yield* Effect.result(assertIdentityFence(candidate, false));
           return yield* Effect.fail(
             Result.isFailure(fenceResult) && fenceResult.failure instanceof IdentityConflict
               ? fenceResult.failure
-              : batchResult.failure
-          )
+              : batchResult.failure,
+          );
         }
 
         const canonicals = yield* sql.unsafe<CanonicalRow>(
           "SELECT * FROM canonical_items WHERE id = ?",
-          [survivorId]
-        )
+          [survivorId],
+        );
         const sources = yield* sql.unsafe<SourceItemRow>(
           "SELECT * FROM source_items WHERE id = ?",
-          [sourceItemId]
-        )
+          [sourceItemId],
+        );
         const claims = yield* sql.unsafe<IdentityClaimRow>(
           "SELECT * FROM identity_claims WHERE canonical_id = ? ORDER BY namespace",
-          [survivorId]
-        )
+          [survivorId],
+        );
         const aliases = yield* sql.unsafe<{
-          readonly alias_id: string
-          readonly canonical_id: string
-          readonly retired_at_ms: unknown
-        }>("SELECT * FROM canonical_aliases WHERE canonical_id = ? ORDER BY alias_id", [survivorId])
+          readonly alias_id: string;
+          readonly canonical_id: string;
+          readonly retired_at_ms: unknown;
+        }>("SELECT * FROM canonical_aliases WHERE canonical_id = ? ORDER BY alias_id", [
+          survivorId,
+        ]);
         const versions = yield* sql.unsafe<MediaVersionRow>(
           "SELECT * FROM source_media_versions WHERE source_item_id = ? ORDER BY id",
-          [sourceItemId]
-        )
+          [sourceItemId],
+        );
         return yield* decode("resolveIdentity", (): IdentityResolution => ({
           canonical: canonicalItem(canonicals[0]!),
           aliases: aliases.map((row): CanonicalAlias => ({
             aliasId: row.alias_id,
             canonicalId: row.canonical_id,
-            retiredAtMs: integer(row.retired_at_ms, "retired_at_ms")
+            retiredAtMs: integer(row.retired_at_ms, "retired_at_ms"),
           })),
           claims: claims.map(identityClaim),
           sourceItem: sourceItem(sources[0]!),
-          mediaVersions: versions.map(mediaVersion)
-        }))
-      })
-    )
+          mediaVersions: versions.map(mediaVersion),
+        }));
+      }),
+    );
 
   const persistIdentityResult: RepositoriesService["persistIdentityResult"] = (result) =>
     database(
       "persistIdentityResult",
       Effect.gen(function* () {
-        const canonical = result.canonical
-        const source = result.sourceItem
+        const canonical = result.canonical;
+        const source = result.sourceItem;
         const stateRows = yield* sql.unsafe<UserStateRow>(
           "SELECT * FROM user_state WHERE canonical_id = ?",
-          [canonical.id]
-        )
-        const state = stateRows[0] ? userState(stateRows[0]) : null
-        const targets = state === null ? [] : [...(yield* readEligibleStateTargets(canonical.id))]
+          [canonical.id],
+        );
+        const state = stateRows[0] ? userState(stateRows[0]) : null;
+        const targets = state === null ? [] : [...(yield* readEligibleStateTargets(canonical.id))];
         if (state !== null && !targets.some(({ id }) => id === source.id)) {
           const eligible = yield* sql.unsafe<{ readonly eligible: unknown }>(
             `
@@ -2230,16 +2521,20 @@ const makeRepositories = Effect.gen(function*() {
               AND (server.verified_catalog_id IS NOT NULL OR server.verified_base_url IS NOT NULL)
               AND binding.enabled = 1 AND library.enabled = 1
           ) AS eligible
-        `, [source.serverId, source.serverGeneration, source.sourceLibraryId])
-        if (eligible[0] && boolean(eligible[0].eligible, "eligible")) {
-          targets.push({
-            id: source.id,
-            server_id: source.serverId,
-            server_generation: source.serverGeneration
-          })
+        `,
+            [source.serverId, source.serverGeneration, source.sourceLibraryId],
+          );
+          if (eligible[0] && boolean(eligible[0].eligible, "eligible")) {
+            targets.push({
+              id: source.id,
+              server_id: source.serverId,
+              server_generation: source.serverGeneration,
+            });
+          }
         }
-      }
-      const writes: Array<Statement<unknown>> = [sql.unsafe(`
+        const writes: Array<Statement<unknown>> = [
+          sql.unsafe(
+            `
         INSERT INTO canonical_items (
           id, item_type, identity_state, display_metadata_json, created_at_ms, updated_at_ms
         ) VALUES (?, ?, ?, ?, ?, ?)
@@ -2248,14 +2543,18 @@ const makeRepositories = Effect.gen(function*() {
           identity_state = excluded.identity_state,
           display_metadata_json = excluded.display_metadata_json,
           updated_at_ms = excluded.updated_at_ms
-      `, [
-        canonical.id,
-        canonical.itemType,
-        canonical.identityState,
-        canonicalJson(canonical.displayMetadata),
-        canonical.createdAtMs,
-        canonical.updatedAtMs
-      ]), sql.unsafe(`
+      `,
+            [
+              canonical.id,
+              canonical.itemType,
+              canonical.identityState,
+              canonicalJson(canonical.displayMetadata),
+              canonical.createdAtMs,
+              canonical.updatedAtMs,
+            ],
+          ),
+          sql.unsafe(
+            `
         INSERT INTO source_items (
           id, server_id, catalog_namespace, server_generation, source_library_id,
           upstream_item_id, item_type, canonical_id, quarantine_reason, created_at_ms,
@@ -2267,30 +2566,40 @@ const makeRepositories = Effect.gen(function*() {
           canonical_id = excluded.canonical_id,
           quarantine_reason = excluded.quarantine_reason,
           updated_at_ms = excluded.updated_at_ms
-      `, [
-        source.id,
-        source.serverId,
-        source.catalogNamespace,
-        source.serverGeneration,
-        source.sourceLibraryId,
-        source.upstreamItemId,
-        source.itemType,
-        source.canonicalId,
-        source.quarantineReason,
-        source.createdAtMs,
-        source.updatedAtMs
-      ])]
-      for (const alias of result.aliases) {
-        writes.push(sql.unsafe(`
+      `,
+            [
+              source.id,
+              source.serverId,
+              source.catalogNamespace,
+              source.serverGeneration,
+              source.sourceLibraryId,
+              source.upstreamItemId,
+              source.itemType,
+              source.canonicalId,
+              source.quarantineReason,
+              source.createdAtMs,
+              source.updatedAtMs,
+            ],
+          ),
+        ];
+        for (const alias of result.aliases) {
+          writes.push(
+            sql.unsafe(
+              `
           INSERT INTO canonical_aliases (alias_id, canonical_id, retired_at_ms)
           VALUES (?, ?, ?)
           ON CONFLICT(alias_id) DO UPDATE SET
             canonical_id = excluded.canonical_id,
             retired_at_ms = excluded.retired_at_ms
-        `, [alias.aliasId, alias.canonicalId, alias.retiredAtMs]))
-      }
-      for (const claim of result.claims) {
-        writes.push(sql.unsafe(`
+        `,
+              [alias.aliasId, alias.canonicalId, alias.retiredAtMs],
+            ),
+          );
+        }
+        for (const claim of result.claims) {
+          writes.push(
+            sql.unsafe(
+              `
           INSERT INTO identity_claims (
             canonical_id, namespace, value, state, source_item_id, created_at_ms
           ) VALUES (?, ?, ?, ?, ?, ?)
@@ -2298,10 +2607,22 @@ const makeRepositories = Effect.gen(function*() {
             value = excluded.value,
             state = excluded.state,
             source_item_id = excluded.source_item_id
-        `, [canonical.id, claim.namespace, claim.value, claim.state, claim.sourceItemId, claim.createdAtMs]))
-      }
-      for (const version of result.mediaVersions) {
-        writes.push(sql.unsafe(`
+        `,
+              [
+                canonical.id,
+                claim.namespace,
+                claim.value,
+                claim.state,
+                claim.sourceItemId,
+                claim.createdAtMs,
+              ],
+            ),
+          );
+        }
+        for (const version of result.mediaVersions) {
+          writes.push(
+            sql.unsafe(
+              `
           INSERT INTO source_media_versions (
             id, source_item_id, server_generation, upstream_media_source_id,
             label, capabilities_json, streams_json, updated_at_ms
@@ -2312,27 +2633,37 @@ const makeRepositories = Effect.gen(function*() {
             capabilities_json = excluded.capabilities_json,
             streams_json = excluded.streams_json,
             updated_at_ms = excluded.updated_at_ms
-        `, [
-          version.id,
-          version.sourceItemId,
-          version.serverGeneration,
-          version.upstreamMediaSourceId,
-          version.label,
-          canonicalJson(version.capabilities),
-          canonicalJson(version.streams),
-          version.updatedAtMs
-        ]))
-      }
-      if (state !== null) {
-        writes.push(sql.unsafe(`
+        `,
+              [
+                version.id,
+                version.sourceItemId,
+                version.serverGeneration,
+                version.upstreamMediaSourceId,
+                version.label,
+                canonicalJson(version.capabilities),
+                canonicalJson(version.streams),
+                version.updatedAtMs,
+              ],
+            ),
+          );
+        }
+        if (state !== null) {
+          writes.push(
+            sql.unsafe(
+              `
           INSERT INTO schema_migrations(version, name, applied_at_ms)
           SELECT 1, 'd1-identity-state-fence', 0
           WHERE NOT EXISTS (
             SELECT 1 FROM user_state
             WHERE canonical_id = ? AND revision = ? AND updated_at_ms = ?
           )
-        `, [state.canonicalId, state.revision, state.updatedAtMs]))
-        writes.push(sql.unsafe(`
+        `,
+              [state.canonicalId, state.revision, state.updatedAtMs],
+            ),
+          );
+          writes.push(
+            sql.unsafe(
+              `
           UPDATE state_outbox
           SET eligible = 0, lease_owner = NULL, lease_expires_at_ms = NULL, updated_at_ms = ?
           WHERE canonical_id = ? AND eligible = 1 AND NOT EXISTS (
@@ -2345,28 +2676,32 @@ const makeRepositories = Effect.gen(function*() {
             JOIN virtual_libraries library ON library.id = binding.virtual_library_id
             WHERE item.id = state_outbox.source_item_id AND ${eligibleTargetSql}
           )
-        `, [canonical.updatedAtMs, canonical.id, canonical.id]))
-        for (const target of targets) {
-          writes.push(upsertOutboxTarget(target, state, canonical.updatedAtMs))
+        `,
+              [canonical.updatedAtMs, canonical.id, canonical.id],
+            ),
+          );
+          for (const target of targets) {
+            writes.push(upsertOutboxTarget(target, state, canonical.updatedAtMs));
+          }
         }
-      }
-      yield* sql.batch(writes)
-      return canonical
-    }))
+        yield* sql.batch(writes);
+        return canonical;
+      }),
+    );
 
   interface QueryGenerationRow {
-    readonly id: string
-    readonly query_key: string
-    readonly revision: unknown
-    readonly user_key: string
-    readonly device_id: string
-    readonly virtual_library_id: string
-    readonly normalized_query_json: unknown
-    readonly source_state_json: unknown
-    readonly all_sources_exhausted: unknown
-    readonly state_dependent: unknown
-    readonly created_at_ms: unknown
-    readonly expires_at_ms: unknown
+    readonly id: string;
+    readonly query_key: string;
+    readonly revision: unknown;
+    readonly user_key: string;
+    readonly device_id: string;
+    readonly virtual_library_id: string;
+    readonly normalized_query_json: unknown;
+    readonly source_state_json: unknown;
+    readonly all_sources_exhausted: unknown;
+    readonly state_dependent: unknown;
+    readonly created_at_ms: unknown;
+    readonly expires_at_ms: unknown;
   }
 
   const queryGeneration = (row: QueryGenerationRow): QueryGeneration => ({
@@ -2381,166 +2716,219 @@ const makeRepositories = Effect.gen(function*() {
     allSourcesExhausted: boolean(row.all_sources_exhausted, "all_sources_exhausted"),
     stateDependent: boolean(row.state_dependent, "state_dependent"),
     createdAtMs: integer(row.created_at_ms, "created_at_ms"),
-    expiresAtMs: integer(row.expires_at_ms, "expires_at_ms")
-  })
+    expiresAtMs: integer(row.expires_at_ms, "expires_at_ms"),
+  });
 
   const readQueryGeneration: RepositoriesService["readQueryGeneration"] = (key) =>
     database(
       "readQueryGeneration",
-      sql.unsafe<QueryGenerationRow>("SELECT * FROM query_generations WHERE query_key = ?", [key])
+      sql.unsafe<QueryGenerationRow>("SELECT * FROM query_generations WHERE query_key = ?", [key]),
     ).pipe(
       Effect.flatMap((rows) =>
-        decode("readQueryGeneration", () => (rows[0] ? queryGeneration(rows[0]) : null))
-      )
-    )
+        decode("readQueryGeneration", () => (rows[0] ? queryGeneration(rows[0]) : null)),
+      ),
+    );
 
   interface QueryGenerationItemRow {
-    readonly ordinal: unknown
-    readonly canonical_id: string
-    readonly sort_values_json: unknown
+    readonly ordinal: unknown;
+    readonly canonical_id: string;
+    readonly sort_values_json: unknown;
   }
 
-  const readQueryGenerationItems: RepositoriesService["readQueryGenerationItems"] = (generationId) =>
-    database("readQueryGenerationItems", sql.unsafe<QueryGenerationItemRow>(`
+  const readQueryGenerationItems: RepositoriesService["readQueryGenerationItems"] = (
+    generationId,
+  ) =>
+    database(
+      "readQueryGenerationItems",
+      sql.unsafe<QueryGenerationItemRow>(
+        `
       SELECT ordinal, canonical_id, sort_values_json
       FROM query_generation_items
       WHERE generation_id = ?
       ORDER BY ordinal
-    `, [generationId])).pipe(Effect.flatMap((rows) => decode("readQueryGenerationItems", () => rows.map((row) => ({
-      ordinal: integer(row.ordinal, "ordinal"),
-      canonicalId: row.canonical_id,
-      sortValues: json(row.sort_values_json, "sort_values_json")
-    })))))
+    `,
+        [generationId],
+      ),
+    ).pipe(
+      Effect.flatMap((rows) =>
+        decode("readQueryGenerationItems", () =>
+          rows.map((row) => ({
+            ordinal: integer(row.ordinal, "ordinal"),
+            canonicalId: row.canonical_id,
+            sortValues: json(row.sort_values_json, "sort_values_json"),
+          })),
+        ),
+      ),
+    );
 
   const appendQueryGenerationItems: RepositoriesService["appendQueryGenerationItems"] = (input) => {
     if (input.items.length > DB_BATCH_SIZE) {
-      return Effect.fail(new RepositoryError({
-        operation: "appendQueryGenerationItems",
-        message: `at most ${DB_BATCH_SIZE} items may be appended atomically`
-      }))
+      return Effect.fail(
+        new RepositoryError({
+          operation: "appendQueryGenerationItems",
+          message: `at most ${DB_BATCH_SIZE} items may be appended atomically`,
+        }),
+      );
     }
-    const requiredRevision = input.expected?.id === input.generation.id
-      ? input.expected.revision + 1
-      : 0
+    const requiredRevision =
+      input.expected?.id === input.generation.id ? input.expected.revision + 1 : 0;
     if (input.generation.revision !== requiredRevision) {
-      return Effect.fail(new RepositoryError({
-        operation: "appendQueryGenerationItems",
-        message: `generation revision must be ${requiredRevision}`
-      }))
+      return Effect.fail(
+        new RepositoryError({
+          operation: "appendQueryGenerationItems",
+          message: `generation revision must be ${requiredRevision}`,
+        }),
+      );
     }
-    return database("appendQueryGenerationItems", Effect.gen(function*() {
-      const generation = input.generation
-      const current = yield* sql.unsafe<QueryGenerationRow>(
-        "SELECT * FROM query_generations WHERE query_key = ?",
-        [generation.queryKey]
-      )
-      const matchesExpected = input.expected === null
-        ? current.length === 0
-        : current[0]?.id === input.expected.id && integer(current[0].revision, "revision") === input.expected.revision
-      if (!matchesExpected) return false
+    return database(
+      "appendQueryGenerationItems",
+      Effect.gen(function* () {
+        const generation = input.generation;
+        const current = yield* sql.unsafe<QueryGenerationRow>(
+          "SELECT * FROM query_generations WHERE query_key = ?",
+          [generation.queryKey],
+        );
+        const matchesExpected =
+          input.expected === null
+            ? current.length === 0
+            : current[0]?.id === input.expected.id &&
+              integer(current[0].revision, "revision") === input.expected.revision;
+        if (!matchesExpected) return false;
 
-      const assertExpected = input.expected === null
-        ? sql.unsafe(`
+        const assertExpected =
+          input.expected === null
+            ? sql.unsafe(
+                `
             INSERT INTO schema_migrations(version, name, applied_at_ms)
             SELECT 1, 'd1-query-cas', 0
             WHERE EXISTS (SELECT 1 FROM query_generations WHERE query_key = ?)
-          `, [generation.queryKey])
-        : sql.unsafe(`
+          `,
+                [generation.queryKey],
+              )
+            : sql.unsafe(
+                `
             INSERT INTO schema_migrations(version, name, applied_at_ms)
             SELECT 1, 'd1-query-cas', 0
             WHERE NOT EXISTS (
               SELECT 1 FROM query_generations
               WHERE query_key = ? AND id = ? AND revision = ?
             )
-          `, [generation.queryKey, input.expected.id, input.expected.revision])
+          `,
+                [generation.queryKey, input.expected.id, input.expected.revision],
+              );
 
-      const insert = sql.unsafe(`
+        const insert = sql.unsafe(
+          `
         INSERT INTO query_generations (
           id, query_key, revision, user_key, device_id, virtual_library_id,
           normalized_query_json, source_state_json, all_sources_exhausted,
           state_dependent, created_at_ms, expires_at_ms
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `, [
-        generation.id,
-        generation.queryKey,
-        generation.revision,
-        generation.userKey,
-        generation.deviceId,
-        generation.virtualLibraryId,
-        canonicalJson(generation.normalizedQuery),
-        canonicalJson(generation.sourceState),
-        generation.allSourcesExhausted ? 1 : 0,
-        generation.stateDependent ? 1 : 0,
-        generation.createdAtMs,
-        generation.expiresAtMs
-      ])
-      const mutate = input.expected === null
-        ? [insert]
-        : input.expected.id === generation.id
-          ? [sql.unsafe(`
+      `,
+          [
+            generation.id,
+            generation.queryKey,
+            generation.revision,
+            generation.userKey,
+            generation.deviceId,
+            generation.virtualLibraryId,
+            canonicalJson(generation.normalizedQuery),
+            canonicalJson(generation.sourceState),
+            generation.allSourcesExhausted ? 1 : 0,
+            generation.stateDependent ? 1 : 0,
+            generation.createdAtMs,
+            generation.expiresAtMs,
+          ],
+        );
+        const mutate =
+          input.expected === null
+            ? [insert]
+            : input.expected.id === generation.id
+              ? [
+                  sql.unsafe(
+                    `
               UPDATE query_generations
               SET revision = ?, normalized_query_json = ?, source_state_json = ?,
                   all_sources_exhausted = ?, state_dependent = ?, expires_at_ms = ?
               WHERE query_key = ? AND id = ? AND revision = ?
-            `, [
-              generation.revision,
-              canonicalJson(generation.normalizedQuery),
-              canonicalJson(generation.sourceState),
-              generation.allSourcesExhausted ? 1 : 0,
-              generation.stateDependent ? 1 : 0,
-              generation.expiresAtMs,
-              generation.queryKey,
-              input.expected.id,
-              input.expected.revision
-            ])]
-          : [
-              sql.unsafe(
-                "DELETE FROM query_generations WHERE query_key = ? AND id = ? AND revision = ?",
-                [generation.queryKey, input.expected.id, input.expected.revision]
-              ),
-              insert
-            ]
+            `,
+                    [
+                      generation.revision,
+                      canonicalJson(generation.normalizedQuery),
+                      canonicalJson(generation.sourceState),
+                      generation.allSourcesExhausted ? 1 : 0,
+                      generation.stateDependent ? 1 : 0,
+                      generation.expiresAtMs,
+                      generation.queryKey,
+                      input.expected.id,
+                      input.expected.revision,
+                    ],
+                  ),
+                ]
+              : [
+                  sql.unsafe(
+                    "DELETE FROM query_generations WHERE query_key = ? AND id = ? AND revision = ?",
+                    [generation.queryKey, input.expected.id, input.expected.revision],
+                  ),
+                  insert,
+                ];
 
-      const batch = sql.batch([
-        assertExpected,
-        ...mutate,
-        ...input.items.map((item) => sql.unsafe(`
+        const batch = sql.batch([
+          assertExpected,
+          ...mutate,
+          ...input.items.map((item) =>
+            sql.unsafe(
+              `
           INSERT INTO query_generation_items (
             generation_id, ordinal, canonical_id, sort_values_json
           ) VALUES (?, ?, ?, ?)
           ON CONFLICT(generation_id, canonical_id) DO NOTHING
-        `, [generation.id, item.ordinal, item.canonicalId, canonicalJson(item.sortValues)])),
-        sql.unsafe(`
+        `,
+              [generation.id, item.ordinal, item.canonicalId, canonicalJson(item.sortValues)],
+            ),
+          ),
+          sql.unsafe(
+            `
           INSERT INTO schema_migrations(version, name, applied_at_ms)
           SELECT 1, 'd1-query-commit', 0
           WHERE NOT EXISTS (
             SELECT 1 FROM query_generations
             WHERE query_key = ? AND id = ? AND revision = ?
           )
-        `, [generation.queryKey, generation.id, generation.revision])
-      ])
-      return yield* batch.pipe(Effect.as(true), Effect.catch((cause) =>
-        sql.unsafe<QueryGenerationRow>(
-          "SELECT * FROM query_generations WHERE query_key = ?",
-          [generation.queryKey]
-        ).pipe(Effect.flatMap((latest) => {
-          const stillExpected = input.expected === null
-            ? latest.length === 0
-            : latest[0]?.id === input.expected.id &&
-              integer(latest[0].revision, "revision") === input.expected.revision
-          return stillExpected ? Effect.fail(cause) : Effect.succeed(false)
-        }))
-      ))
-    }))
-  }
+        `,
+            [generation.queryKey, generation.id, generation.revision],
+          ),
+        ]);
+        return yield* batch.pipe(
+          Effect.as(true),
+          Effect.catch((cause) =>
+            sql
+              .unsafe<QueryGenerationRow>("SELECT * FROM query_generations WHERE query_key = ?", [
+                generation.queryKey,
+              ])
+              .pipe(
+                Effect.flatMap((latest) => {
+                  const stillExpected =
+                    input.expected === null
+                      ? latest.length === 0
+                      : latest[0]?.id === input.expected.id &&
+                        integer(latest[0].revision, "revision") === input.expected.revision;
+                  return stillExpected ? Effect.fail(cause) : Effect.succeed(false);
+                }),
+              ),
+          ),
+        );
+      }),
+    );
+  };
 
   interface MetadataProjectionRow {
-    readonly source_item_id: string
-    readonly projection_key: string
-    readonly payload_json: unknown
-    readonly fresh_until_ms: unknown
-    readonly stale_until_ms: unknown
-    readonly updated_at_ms: unknown
+    readonly source_item_id: string;
+    readonly projection_key: string;
+    readonly payload_json: unknown;
+    readonly fresh_until_ms: unknown;
+    readonly stale_until_ms: unknown;
+    readonly updated_at_ms: unknown;
   }
 
   const metadataProjection = (row: MetadataProjectionRow): MetadataProjection => ({
@@ -2549,24 +2937,33 @@ const makeRepositories = Effect.gen(function*() {
     payload: json(row.payload_json, "payload_json"),
     freshUntilMs: integer(row.fresh_until_ms, "fresh_until_ms"),
     staleUntilMs: integer(row.stale_until_ms, "stale_until_ms"),
-    updatedAtMs: integer(row.updated_at_ms, "updated_at_ms")
-  })
+    updatedAtMs: integer(row.updated_at_ms, "updated_at_ms"),
+  });
 
-  const readMetadataProjection: RepositoriesService["readMetadataProjection"] = (sourceItemId, projectionKey) =>
-    database("readMetadataProjection", sql.unsafe<MetadataProjectionRow>(`
+  const readMetadataProjection: RepositoriesService["readMetadataProjection"] = (
+    sourceItemId,
+    projectionKey,
+  ) =>
+    database(
+      "readMetadataProjection",
+      sql.unsafe<MetadataProjectionRow>(
+        `
       SELECT * FROM source_metadata_cache
       WHERE source_item_id = ? AND projection_key = ?
     `,
-        [sourceItemId, projectionKey]
-      )
+        [sourceItemId, projectionKey],
+      ),
     ).pipe(
       Effect.flatMap((rows) =>
-        decode("readMetadataProjection", () => (rows[0] ? metadataProjection(rows[0]) : null))
-      )
-    )
+        decode("readMetadataProjection", () => (rows[0] ? metadataProjection(rows[0]) : null)),
+      ),
+    );
 
   const writeMetadataProjection: RepositoriesService["writeMetadataProjection"] = (input) =>
-    database("writeMetadataProjection", sql.unsafe(`
+    database(
+      "writeMetadataProjection",
+      sql.unsafe(
+        `
       INSERT INTO source_metadata_cache (
         source_item_id, projection_key, payload_json,
         fresh_until_ms, stale_until_ms, updated_at_ms
@@ -2576,18 +2973,25 @@ const makeRepositories = Effect.gen(function*() {
         fresh_until_ms = excluded.fresh_until_ms,
         stale_until_ms = excluded.stale_until_ms,
         updated_at_ms = excluded.updated_at_ms
-    `, [
-      input.sourceItemId,
-      input.projectionKey,
-      canonicalJson(input.payload),
-      input.freshUntilMs,
-      input.staleUntilMs,
-      input.updatedAtMs
-    ])).pipe(Effect.asVoid)
+    `,
+        [
+          input.sourceItemId,
+          input.projectionKey,
+          canonicalJson(input.payload),
+          input.freshUntilMs,
+          input.staleUntilMs,
+          input.updatedAtMs,
+        ],
+      ),
+    ).pipe(Effect.asVoid);
 
   const suppressDetailProjections: RepositoriesService["suppressDetailProjections"] = (
-    input: DetailProjectionSuppression
-  ) => database("suppressDetailProjections", sql.unsafe(`
+    input: DetailProjectionSuppression,
+  ) =>
+    database(
+      "suppressDetailProjections",
+      sql.unsafe(
+        `
     UPDATE source_metadata_cache
     SET payload_json = ?, fresh_until_ms = ?, stale_until_ms = ?, updated_at_ms = ?
     WHERE projection_key = 'detail'
@@ -2598,32 +3002,37 @@ const makeRepositories = Effect.gen(function*() {
           AND server_generation = ?
           AND source_library_id = ?
       )
-  `, [
-    canonicalJson({ suppressed: true }),
-    input.observedAtMs,
-    input.observedAtMs,
-    input.observedAtMs,
-    input.canonicalId,
-    input.serverId,
-    input.serverGeneration,
-    input.sourceLibraryId
-  ])).pipe(Effect.asVoid)
+  `,
+        [
+          canonicalJson({ suppressed: true }),
+          input.observedAtMs,
+          input.observedAtMs,
+          input.observedAtMs,
+          input.canonicalId,
+          input.serverId,
+          input.serverGeneration,
+          input.sourceLibraryId,
+        ],
+      ),
+    ).pipe(Effect.asVoid);
 
   const mergeCanonicalMetadata: RepositoriesService["mergeCanonicalMetadata"] = (
     canonicalId,
     sourceItemId,
     metadata,
-    updatedAtMs
+    updatedAtMs,
   ) => {
-    const attempt = (remaining: number): Effect.Effect<void, RepositoryError> => database(
-      "mergeCanonicalMetadata",
-      Effect.gen(function*() {
-        const rows = yield* sql.unsafe<CanonicalRow>(
-          "SELECT * FROM canonical_items WHERE id = ?",
-          [canonicalId]
-        )
-        if (!rows[0]) return
-        const primary = yield* sql.unsafe<{ readonly id: string }>(`
+    const attempt = (remaining: number): Effect.Effect<void, RepositoryError> =>
+      database(
+        "mergeCanonicalMetadata",
+        Effect.gen(function* () {
+          const rows = yield* sql.unsafe<CanonicalRow>(
+            "SELECT * FROM canonical_items WHERE id = ?",
+            [canonicalId],
+          );
+          if (!rows[0]) return;
+          const primary = yield* sql.unsafe<{ readonly id: string }>(
+            `
           SELECT item.id
           FROM source_items item
           WHERE item.canonical_id = ?
@@ -2639,50 +3048,70 @@ const makeRepositories = Effect.gen(function*() {
               AND server.generation = item.server_generation
           ), 2147483647), item.server_id, item.upstream_item_id, item.id
           LIMIT 1
-        `, [canonicalId])
-        const encodedCurrent = String(rows[0].display_metadata_json)
-        const current = json(encodedCurrent, "display_metadata_json")
-        const merged = primary[0]?.id === sourceItemId
-          ? mergeProjectionJson(current, metadata)
-          : mergeMissingJson(current, metadata)
-        const updated = yield* sql.unsafe<{ readonly id: string }>(`
+        `,
+            [canonicalId],
+          );
+          const encodedCurrent = String(rows[0].display_metadata_json);
+          const current = json(encodedCurrent, "display_metadata_json");
+          const merged =
+            primary[0]?.id === sourceItemId
+              ? mergeProjectionJson(current, metadata)
+              : mergeMissingJson(current, metadata);
+          const updated = yield* sql.unsafe<{ readonly id: string }>(
+            `
           UPDATE canonical_items
           SET display_metadata_json = ?, updated_at_ms = MAX(updated_at_ms, ?)
           WHERE id = ? AND display_metadata_json = ?
           RETURNING id
-        `, [canonicalJson(merged), updatedAtMs, canonicalId, encodedCurrent])
-        if (updated[0]) return
-        if (remaining === 0) {
-          return yield* Effect.fail(failure(
-            "mergeCanonicalMetadata",
-            "metadata changed during every compare-and-swap attempt"
-          ))
-        }
-        return yield* attempt(remaining - 1)
-      })
-    )
-    return attempt(8)
-  }
+        `,
+            [canonicalJson(merged), updatedAtMs, canonicalId, encodedCurrent],
+          );
+          if (updated[0]) return;
+          if (remaining === 0) {
+            return yield* Effect.fail(
+              failure(
+                "mergeCanonicalMetadata",
+                "metadata changed during every compare-and-swap attempt",
+              ),
+            );
+          }
+          return yield* attempt(remaining - 1);
+        }),
+      );
+    return attempt(8);
+  };
 
   const readCatalogItems: RepositoriesService["readCatalogItems"] = (canonicalIds, usableAtMs) => {
-    const ids = [...new Set(canonicalIds)].slice(0, DB_BATCH_SIZE)
-    if (ids.length === 0) return Effect.succeed([])
-    const placeholders = ids.map(() => "?").join(", ")
-    return database("readCatalogItems", Effect.gen(function*() {
-      const canonicals = yield* sql.unsafe<CanonicalRow>(`
+    const ids = [...new Set(canonicalIds)].slice(0, DB_BATCH_SIZE);
+    if (ids.length === 0) return Effect.succeed([]);
+    const placeholders = ids.map(() => "?").join(", ");
+    return database(
+      "readCatalogItems",
+      Effect.gen(function* () {
+        const canonicals = yield* sql.unsafe<CanonicalRow>(
+          `
         SELECT * FROM canonical_items WHERE id IN (${placeholders})
-      `, ids)
-      const claims = yield* sql.unsafe<IdentityClaimRow>(`
+      `,
+          ids,
+        );
+        const claims = yield* sql.unsafe<IdentityClaimRow>(
+          `
         SELECT * FROM identity_claims
         WHERE canonical_id IN (${placeholders}) AND state = 'exact'
         ORDER BY canonical_id, namespace
-      `, ids)
-      const sources = yield* sql.unsafe<SourceItemRow>(`
+      `,
+          ids,
+        );
+        const sources = yield* sql.unsafe<SourceItemRow>(
+          `
         SELECT * FROM source_items
         WHERE canonical_id IN (${placeholders})
         ORDER BY canonical_id, server_id, upstream_item_id
-      `, ids)
-      const versions = yield* sql.unsafe<MediaVersionRow & { readonly canonical_id: string }>(`
+      `,
+          ids,
+        );
+        const versions = yield* sql.unsafe<MediaVersionRow & { readonly canonical_id: string }>(
+          `
         SELECT version.*, item.canonical_id
         FROM source_media_versions version
         JOIN source_items item ON item.id = version.source_item_id
@@ -2716,30 +3145,48 @@ const makeRepositories = Effect.gen(function*() {
             AND binding.source_library_id = item.source_library_id
             AND binding.enabled = 1 AND library.enabled = 1
         ), 2147483647), item.server_id, item.upstream_item_id, version.upstream_media_source_id
-      `, [...ids, usableAtMs ?? null, usableAtMs ?? null])
-      const states = yield* sql.unsafe<UserStateRow>(`
+      `,
+          [...ids, usableAtMs ?? null, usableAtMs ?? null],
+        );
+        const states = yield* sql.unsafe<UserStateRow>(
+          `
         SELECT * FROM user_state WHERE canonical_id IN (${placeholders})
-      `, ids)
-      return yield* decode("readCatalogItems", () => {
-        const byId = new Map(canonicals.map((row) => [row.id, row]))
-        return canonicalIds.flatMap((id): ReadonlyArray<CatalogItemRecord> => {
-          const row = byId.get(id)
-          if (!row) return []
-          const state = states.find((candidate) => candidate.canonical_id === id)
-          return [{
-            canonical: canonicalItem(row),
-            claims: claims.filter((candidate) => candidate.canonical_id === id).map(identityClaim),
-            sourceItems: sources.filter((candidate) => candidate.canonical_id === id).map(sourceItem),
-            mediaVersions: versions.filter((candidate) => candidate.canonical_id === id).map(mediaVersion),
-            userState: state ? userState(state) : null
-          }]
-        })
-      })
-    }))
-  }
+      `,
+          ids,
+        );
+        return yield* decode("readCatalogItems", () => {
+          const byId = new Map(canonicals.map((row) => [row.id, row]));
+          return canonicalIds.flatMap((id): ReadonlyArray<CatalogItemRecord> => {
+            const row = byId.get(id);
+            if (!row) return [];
+            const state = states.find((candidate) => candidate.canonical_id === id);
+            return [
+              {
+                canonical: canonicalItem(row),
+                claims: claims
+                  .filter((candidate) => candidate.canonical_id === id)
+                  .map(identityClaim),
+                sourceItems: sources
+                  .filter((candidate) => candidate.canonical_id === id)
+                  .map(sourceItem),
+                mediaVersions: versions
+                  .filter((candidate) => candidate.canonical_id === id)
+                  .map(mediaVersion),
+                userState: state ? userState(state) : null,
+              },
+            ];
+          });
+        });
+      }),
+    );
+  };
 
-  const resolveEligibleSourcesForCanonical: RepositoriesService["resolveEligibleSourcesForCanonical"] = (canonicalId) =>
-    database("resolveEligibleSourcesForCanonical", sql.unsafe<EligibleSourceRow>(`
+  const resolveEligibleSourcesForCanonical: RepositoriesService["resolveEligibleSourcesForCanonical"] =
+    (canonicalId) =>
+      database(
+        "resolveEligibleSourcesForCanonical",
+        sql.unsafe<EligibleSourceRow>(
+          `
       SELECT DISTINCT
         target.virtual_library_id,
         target.server_id,
@@ -2788,30 +3235,37 @@ const makeRepositories = Effect.gen(function*() {
         AND (server.verified_catalog_id IS NOT NULL OR server.verified_base_url IS NOT NULL)
       ORDER BY target.source_order, target.server_id, target.source_library_id, endpoint.endpoint_order
     `,
-          [canonicalId]
-        )
+          [canonicalId],
+        ),
       ).pipe(
         Effect.flatMap((rows) =>
-          decode("resolveEligibleSourcesForCanonical", () => eligibleSources(rows))
-        )
-      )
+          decode("resolveEligibleSourcesForCanonical", () => eligibleSources(rows)),
+        ),
+      );
 
-  const listStateMemberCanonicalIds: RepositoriesService["listStateMemberCanonicalIds"] = (input) => {
-    const predicates = ["binding.virtual_library_id = ?"]
-    const parameters: Array<string | number> = [input.virtualLibraryId]
+  const listStateMemberCanonicalIds: RepositoriesService["listStateMemberCanonicalIds"] = (
+    input,
+  ) => {
+    const predicates = ["binding.virtual_library_id = ?"];
+    const parameters: Array<string | number> = [input.virtualLibraryId];
     if (input.favorite !== undefined) {
-      predicates.push("state.favorite = ?")
-      parameters.push(input.favorite ? 1 : 0)
+      predicates.push("state.favorite = ?");
+      parameters.push(input.favorite ? 1 : 0);
     }
     if (input.resume !== undefined) {
-      predicates.push(input.resume ? "state.position_ticks > 0 AND state.played = 0" : "state.position_ticks = 0")
+      predicates.push(
+        input.resume ? "state.position_ticks > 0 AND state.played = 0" : "state.position_ticks = 0",
+      );
     }
     if (input.played !== undefined) {
-      predicates.push("state.played = ?")
-      parameters.push(input.played ? 1 : 0)
+      predicates.push("state.played = ?");
+      parameters.push(input.played ? 1 : 0);
     }
-    parameters.push(Math.max(0, Math.min(2_000, input.limit)))
-    return database("listStateMemberCanonicalIds", sql.unsafe<{ readonly canonical_id: string }>(`
+    parameters.push(Math.max(0, Math.min(2_000, input.limit)));
+    return database(
+      "listStateMemberCanonicalIds",
+      sql.unsafe<{ readonly canonical_id: string }>(
+        `
       SELECT DISTINCT state.canonical_id
       FROM user_state state
       JOIN source_items item ON item.canonical_id = state.canonical_id
@@ -2825,22 +3279,28 @@ const makeRepositories = Effect.gen(function*() {
         AND server.enabled = 1 AND server.deleted_at_ms IS NULL
       ORDER BY state.canonical_id
       LIMIT ?
-    `, parameters)).pipe(Effect.map((rows) => rows.map(({ canonical_id }) => canonical_id)))
-  }
+    `,
+        parameters,
+      ),
+    ).pipe(Effect.map((rows) => rows.map(({ canonical_id }) => canonical_id)));
+  };
 
-  const invalidateStateDependentQueryGenerations: RepositoriesService["invalidateStateDependentQueryGenerations"] = () =>
-    database(
-      "invalidateStateDependentQueryGenerations",
-      sql.unsafe("DELETE FROM query_generations WHERE state_dependent = 1")
-    ).pipe(Effect.asVoid)
+  const invalidateStateDependentQueryGenerations: RepositoriesService["invalidateStateDependentQueryGenerations"] =
+    () =>
+      database(
+        "invalidateStateDependentQueryGenerations",
+        sql.unsafe("DELETE FROM query_generations WHERE state_dependent = 1"),
+      ).pipe(Effect.asVoid);
 
   type EligibleStateTarget = {
-    readonly id: string
-    readonly server_id: string
-    readonly server_generation: number
-  }
+    readonly id: string;
+    readonly server_id: string;
+    readonly server_generation: number;
+  };
 
-  const readEligibleStateTargets = (canonicalId: string) => sql.unsafe<EligibleStateTarget>(`
+  const readEligibleStateTargets = (canonicalId: string) =>
+    sql.unsafe<EligibleStateTarget>(
+      `
     SELECT DISTINCT item.id, item.server_id, item.server_generation
     FROM source_items item
     JOIN upstream_servers server ON server.id = item.server_id
@@ -2850,14 +3310,18 @@ const makeRepositories = Effect.gen(function*() {
     JOIN virtual_libraries library ON library.id = binding.virtual_library_id
     WHERE ${eligibleTargetSql}
     ORDER BY item.id
-  `, [canonicalId])
+  `,
+      [canonicalId],
+    );
 
   const stateBatchStatements = (
     state: UserStateRecord,
     previousRevision: number,
-    targets: ReadonlyArray<EligibleStateTarget>
-  ) => [
-    sql.unsafe(`
+    targets: ReadonlyArray<EligibleStateTarget>,
+  ) =>
+    [
+      sql.unsafe(
+        `
       INSERT INTO user_state (
         canonical_id, revision, played, favorite, play_count, position_ticks,
         last_played_version_id, updated_at_ms
@@ -2871,18 +3335,21 @@ const makeRepositories = Effect.gen(function*() {
         last_played_version_id = excluded.last_played_version_id,
         updated_at_ms = excluded.updated_at_ms
       WHERE user_state.revision = ?
-    `, [
-      state.canonicalId,
-      state.revision,
-      state.played ? 1 : 0,
-      state.favorite ? 1 : 0,
-      state.playCount,
-      state.positionTicks,
-      state.lastPlayedVersionId,
-      state.updatedAtMs,
-      previousRevision
-    ]),
-    sql.unsafe(`
+    `,
+        [
+          state.canonicalId,
+          state.revision,
+          state.played ? 1 : 0,
+          state.favorite ? 1 : 0,
+          state.playCount,
+          state.positionTicks,
+          state.lastPlayedVersionId,
+          state.updatedAtMs,
+          previousRevision,
+        ],
+      ),
+      sql.unsafe(
+        `
       UPDATE state_outbox
       SET eligible = 0, lease_owner = NULL, lease_expires_at_ms = NULL, updated_at_ms = ?
       WHERE canonical_id = ? AND eligible = 1 AND NOT EXISTS (
@@ -2895,9 +3362,12 @@ const makeRepositories = Effect.gen(function*() {
         JOIN virtual_libraries library ON library.id = binding.virtual_library_id
         WHERE item.id = state_outbox.source_item_id AND ${eligibleTargetSql}
       )
-    `, [state.updatedAtMs, state.canonicalId, state.canonicalId]),
-    ...targets.map((target) => upsertOutboxTarget(target, state, state.updatedAtMs)),
-    sql.unsafe(`
+    `,
+        [state.updatedAtMs, state.canonicalId, state.canonicalId],
+      ),
+      ...targets.map((target) => upsertOutboxTarget(target, state, state.updatedAtMs)),
+      sql.unsafe(
+        `
       INSERT INTO schema_migrations(version, name, applied_at_ms)
       SELECT 1, 'd1-state-assertion', 0
       WHERE NOT EXISTS (
@@ -2906,17 +3376,19 @@ const makeRepositories = Effect.gen(function*() {
           AND play_count = ? AND position_ticks = ?
           AND last_played_version_id IS ? AND updated_at_ms = ?
       )
-    `, [
-      state.canonicalId,
-      state.revision,
-      state.played ? 1 : 0,
-      state.favorite ? 1 : 0,
-      state.playCount,
-      state.positionTicks,
-      state.lastPlayedVersionId,
-      state.updatedAtMs
-    ])
-  ] as const
+    `,
+        [
+          state.canonicalId,
+          state.revision,
+          state.played ? 1 : 0,
+          state.favorite ? 1 : 0,
+          state.playCount,
+          state.positionTicks,
+          state.lastPlayedVersionId,
+          state.updatedAtMs,
+        ],
+      ),
+    ] as const;
 
   const writeUserStateAndTargets: RepositoriesService["writeUserStateAndTargets"] = (input) =>
     database(
@@ -2924,9 +3396,9 @@ const makeRepositories = Effect.gen(function*() {
       Effect.gen(function* () {
         const previousRows = yield* sql.unsafe<UserStateRow>(
           "SELECT * FROM user_state WHERE canonical_id = ?",
-          [input.canonicalId]
-        )
-        const previous = previousRows[0] ? userState(previousRows[0]) : null
+          [input.canonicalId],
+        );
+        const previous = previousRows[0] ? userState(previousRows[0]) : null;
         const state: UserStateRecord = {
           canonicalId: input.canonicalId,
           revision: (previous?.revision ?? 0) + 1,
@@ -2938,8 +3410,8 @@ const makeRepositories = Effect.gen(function*() {
             "lastPlayedVersionId" in input.patch
               ? (input.patch.lastPlayedVersionId ?? null)
               : (previous?.lastPlayedVersionId ?? null),
-          updatedAtMs: input.updatedAtMs
-        }
+          updatedAtMs: input.updatedAtMs,
+        };
         if (
           !Number.isSafeInteger(state.updatedAtMs) ||
           !Number.isSafeInteger(state.playCount) ||
@@ -2951,79 +3423,90 @@ const makeRepositories = Effect.gen(function*() {
           (state.lastPlayedVersionId !== null && typeof state.lastPlayedVersionId !== "string")
         )
           return yield* Effect.fail(
-            failure("writeUserStateAndTargets", "invalid desired user state")
-          )
+            failure("writeUserStateAndTargets", "invalid desired user state"),
+          );
 
-      const targets = yield* readEligibleStateTargets(state.canonicalId)
-      yield* sql.batch(stateBatchStatements(state, previous?.revision ?? 0, targets))
-      return state
-    }))
+        const targets = yield* readEligibleStateTargets(state.canonicalId);
+        yield* sql.batch(stateBatchStatements(state, previous?.revision ?? 0, targets));
+        return state;
+      }),
+    );
 
   interface PlaybackSessionRow {
-    readonly id: string
-    readonly canonical_id: string
-    readonly version_id: string
-    readonly started_at_ms: unknown
-    readonly last_event_at_ms: unknown
-    readonly last_position_ticks: unknown
-    readonly stop_applied: unknown
-    readonly state_revision: unknown
+    readonly id: string;
+    readonly canonical_id: string;
+    readonly version_id: string;
+    readonly started_at_ms: unknown;
+    readonly last_event_at_ms: unknown;
+    readonly last_position_ticks: unknown;
+    readonly stop_applied: unknown;
+    readonly state_revision: unknown;
   }
 
   interface PlaybackWatermarkRow {
-    readonly started_at_ms: unknown
-    readonly session_id: string
+    readonly started_at_ms: unknown;
+    readonly session_id: string;
   }
 
-  const recordPlaybackEventAndTargets: RepositoriesService["recordPlaybackEventAndTargets"] = (input) =>
-    database("recordPlaybackEventAndTargets", Effect.gen(function*() {
-      if (
-        input.localSessionId.length === 0 || input.canonicalId.length === 0 || input.versionId.length === 0 ||
-        !Number.isSafeInteger(input.positionTicks) || input.positionTicks < 0 ||
-        !Number.isSafeInteger(input.occurredAtMs)
-      ) return yield* Effect.fail(failure("recordPlaybackEventAndTargets", "invalid playback event"))
-
-      const sessions = yield* sql.unsafe<PlaybackSessionRow>(
-        "SELECT * FROM playback_sessions WHERE id = ?",
-        [input.localSessionId]
-      )
-      const session = sessions[0]
-
-      if (input.kind === "start") {
-        const watermarks = yield* sql.unsafe<PlaybackWatermarkRow>(
-          "SELECT started_at_ms, session_id FROM playback_watermarks WHERE canonical_id = ?",
-          [input.canonicalId]
-        )
-        const watermark = watermarks[0]
-        const watermarkStartedAtMs = watermark
-          ? integer(watermark.started_at_ms, "started_at_ms")
-          : null
-        const staleWatermark = watermark !== undefined && watermarkStartedAtMs !== null && (
-          watermarkStartedAtMs > input.occurredAtMs ||
-          (watermarkStartedAtMs === input.occurredAtMs && watermark.session_id >= input.localSessionId)
-        )
+  const recordPlaybackEventAndTargets: RepositoriesService["recordPlaybackEventAndTargets"] = (
+    input,
+  ) =>
+    database(
+      "recordPlaybackEventAndTargets",
+      Effect.gen(function* () {
         if (
-          session ||
-          staleWatermark
-        ) return null
-        const previousRows = yield* sql.unsafe<UserStateRow>(
-          "SELECT * FROM user_state WHERE canonical_id = ?",
-          [input.canonicalId]
+          input.localSessionId.length === 0 ||
+          input.canonicalId.length === 0 ||
+          input.versionId.length === 0 ||
+          !Number.isSafeInteger(input.positionTicks) ||
+          input.positionTicks < 0 ||
+          !Number.isSafeInteger(input.occurredAtMs)
         )
-        const previous = previousRows[0] ? userState(previousRows[0]) : null
-        const state: UserStateRecord = {
-          canonicalId: input.canonicalId,
-          revision: (previous?.revision ?? 0) + 1,
-          played: false,
-          favorite: previous?.favorite ?? false,
-          playCount: previous?.playCount ?? 0,
-          positionTicks: input.positionTicks,
-          lastPlayedVersionId: input.versionId,
-          updatedAtMs: input.occurredAtMs
-        }
-        const targets = yield* readEligibleStateTargets(state.canonicalId)
-        yield* sql.batch([
-          sql.unsafe(`
+          return yield* Effect.fail(
+            failure("recordPlaybackEventAndTargets", "invalid playback event"),
+          );
+
+        const sessions = yield* sql.unsafe<PlaybackSessionRow>(
+          "SELECT * FROM playback_sessions WHERE id = ?",
+          [input.localSessionId],
+        );
+        const session = sessions[0];
+
+        if (input.kind === "start") {
+          const watermarks = yield* sql.unsafe<PlaybackWatermarkRow>(
+            "SELECT started_at_ms, session_id FROM playback_watermarks WHERE canonical_id = ?",
+            [input.canonicalId],
+          );
+          const watermark = watermarks[0];
+          const watermarkStartedAtMs = watermark
+            ? integer(watermark.started_at_ms, "started_at_ms")
+            : null;
+          const staleWatermark =
+            watermark !== undefined &&
+            watermarkStartedAtMs !== null &&
+            (watermarkStartedAtMs > input.occurredAtMs ||
+              (watermarkStartedAtMs === input.occurredAtMs &&
+                watermark.session_id >= input.localSessionId));
+          if (session || staleWatermark) return null;
+          const previousRows = yield* sql.unsafe<UserStateRow>(
+            "SELECT * FROM user_state WHERE canonical_id = ?",
+            [input.canonicalId],
+          );
+          const previous = previousRows[0] ? userState(previousRows[0]) : null;
+          const state: UserStateRecord = {
+            canonicalId: input.canonicalId,
+            revision: (previous?.revision ?? 0) + 1,
+            played: false,
+            favorite: previous?.favorite ?? false,
+            playCount: previous?.playCount ?? 0,
+            positionTicks: input.positionTicks,
+            lastPlayedVersionId: input.versionId,
+            updatedAtMs: input.occurredAtMs,
+          };
+          const targets = yield* readEligibleStateTargets(state.canonicalId);
+          yield* sql.batch([
+            sql.unsafe(
+              `
             INSERT INTO schema_migrations(version, name, applied_at_ms)
             SELECT 1, 'd1-playback-start-cas', 0
             WHERE EXISTS (SELECT 1 FROM playback_sessions WHERE id = ?)
@@ -3033,29 +3516,35 @@ const makeRepositories = Effect.gen(function*() {
                    started_at_ms > ? OR (started_at_ms = ? AND session_id >= ?)
                  )
                )
-          `, [
-            input.localSessionId,
-            input.canonicalId,
-            input.occurredAtMs,
-            input.occurredAtMs,
-            input.localSessionId
-          ]),
-          ...stateBatchStatements(state, previous?.revision ?? 0, targets),
-          sql.unsafe(`
+          `,
+              [
+                input.localSessionId,
+                input.canonicalId,
+                input.occurredAtMs,
+                input.occurredAtMs,
+                input.localSessionId,
+              ],
+            ),
+            ...stateBatchStatements(state, previous?.revision ?? 0, targets),
+            sql.unsafe(
+              `
             INSERT INTO playback_sessions (
               id, canonical_id, version_id, started_at_ms, last_event_at_ms,
               last_position_ticks, stop_applied, state_revision
             ) VALUES (?, ?, ?, ?, ?, ?, 0, ?)
-          `, [
-            input.localSessionId,
-            input.canonicalId,
-            input.versionId,
-            input.occurredAtMs,
-            input.occurredAtMs,
-            input.positionTicks,
-            state.revision
-          ]),
-          sql.unsafe(`
+          `,
+              [
+                input.localSessionId,
+                input.canonicalId,
+                input.versionId,
+                input.occurredAtMs,
+                input.occurredAtMs,
+                input.positionTicks,
+                state.revision,
+              ],
+            ),
+            sql.unsafe(
+              `
             INSERT INTO playback_watermarks (canonical_id, started_at_ms, session_id)
             VALUES (?, ?, ?)
             ON CONFLICT(canonical_id) DO UPDATE SET
@@ -3064,52 +3553,63 @@ const makeRepositories = Effect.gen(function*() {
             WHERE playback_watermarks.started_at_ms < excluded.started_at_ms
                OR (playback_watermarks.started_at_ms = excluded.started_at_ms
                  AND playback_watermarks.session_id < excluded.session_id)
-          `, [input.canonicalId, input.occurredAtMs, input.localSessionId]),
-          sql.unsafe(`
+          `,
+              [input.canonicalId, input.occurredAtMs, input.localSessionId],
+            ),
+            sql.unsafe(
+              `
             INSERT INTO schema_migrations(version, name, applied_at_ms)
             SELECT 1, 'd1-playback-start-commit', 0
             WHERE NOT EXISTS (
               SELECT 1 FROM playback_sessions
               WHERE id = ? AND canonical_id = ? AND state_revision = ?
             )
-          `, [input.localSessionId, input.canonicalId, state.revision])
-        ])
-        return state
-      }
+          `,
+              [input.localSessionId, input.canonicalId, state.revision],
+            ),
+          ]);
+          return state;
+        }
 
-      const latestRows = yield* sql.unsafe<PlaybackSessionRow>(`
+        const latestRows = yield* sql.unsafe<PlaybackSessionRow>(
+          `
         SELECT * FROM playback_sessions
         WHERE canonical_id = ?
         ORDER BY started_at_ms DESC, id DESC
         LIMIT 1
-      `, [input.canonicalId])
-      const latest = latestRows[0]
-      if (
-        !session || session.canonical_id !== input.canonicalId ||
-        (latest && latest.id !== session.id) ||
-        boolean(session.stop_applied, "stop_applied") ||
-        input.occurredAtMs < integer(session.last_event_at_ms, "last_event_at_ms")
-      ) return null
+      `,
+          [input.canonicalId],
+        );
+        const latest = latestRows[0];
+        if (
+          !session ||
+          session.canonical_id !== input.canonicalId ||
+          (latest && latest.id !== session.id) ||
+          boolean(session.stop_applied, "stop_applied") ||
+          input.occurredAtMs < integer(session.last_event_at_ms, "last_event_at_ms")
+        )
+          return null;
 
-      const currentRows = yield* sql.unsafe<UserStateRow>(
-        "SELECT * FROM user_state WHERE canonical_id = ?",
-        [input.canonicalId]
-      )
-      const current = currentRows[0] ? userState(currentRows[0]) : null
-      const played = input.kind === "stop" ? input.played : false
-      const state: UserStateRecord = {
-        canonicalId: input.canonicalId,
-        revision: (current?.revision ?? 0) + 1,
-        played,
-        favorite: current?.favorite ?? false,
-        playCount: (current?.playCount ?? 0) + (input.kind === "stop" && played ? 1 : 0),
-        positionTicks: played ? 0 : input.positionTicks,
-        lastPlayedVersionId: input.versionId,
-        updatedAtMs: input.occurredAtMs
-      }
-      const targets = yield* readEligibleStateTargets(state.canonicalId)
-      yield* sql.batch([
-        sql.unsafe(`
+        const currentRows = yield* sql.unsafe<UserStateRow>(
+          "SELECT * FROM user_state WHERE canonical_id = ?",
+          [input.canonicalId],
+        );
+        const current = currentRows[0] ? userState(currentRows[0]) : null;
+        const played = input.kind === "stop" ? input.played : false;
+        const state: UserStateRecord = {
+          canonicalId: input.canonicalId,
+          revision: (current?.revision ?? 0) + 1,
+          played,
+          favorite: current?.favorite ?? false,
+          playCount: (current?.playCount ?? 0) + (input.kind === "stop" && played ? 1 : 0),
+          positionTicks: played ? 0 : input.positionTicks,
+          lastPlayedVersionId: input.versionId,
+          updatedAtMs: input.occurredAtMs,
+        };
+        const targets = yield* readEligibleStateTargets(state.canonicalId);
+        yield* sql.batch([
+          sql.unsafe(
+            `
           INSERT INTO schema_migrations(version, name, applied_at_ms)
           SELECT 1, 'd1-playback-event-cas', 0
           WHERE NOT EXISTS (
@@ -3123,48 +3623,57 @@ const makeRepositories = Effect.gen(function*() {
                     OR (latest.started_at_ms = session.started_at_ms AND latest.id > session.id))
               )
           )
-        `, [input.localSessionId, input.canonicalId, input.versionId, input.occurredAtMs]),
-        ...stateBatchStatements(state, current?.revision ?? 0, targets),
-        sql.unsafe(`
+        `,
+            [input.localSessionId, input.canonicalId, input.versionId, input.occurredAtMs],
+          ),
+          ...stateBatchStatements(state, current?.revision ?? 0, targets),
+          sql.unsafe(
+            `
           UPDATE playback_sessions
           SET last_event_at_ms = ?, last_position_ticks = ?, stop_applied = ?, state_revision = ?
           WHERE id = ? AND canonical_id = ? AND version_id = ?
             AND stop_applied = 0 AND last_event_at_ms <= ?
-        `, [
-          input.occurredAtMs,
-          input.positionTicks,
-          input.kind === "stop" ? 1 : 0,
-          state.revision,
-          input.localSessionId,
-          input.canonicalId,
-          input.versionId,
-          input.occurredAtMs
-        ]),
-        sql.unsafe(`
+        `,
+            [
+              input.occurredAtMs,
+              input.positionTicks,
+              input.kind === "stop" ? 1 : 0,
+              state.revision,
+              input.localSessionId,
+              input.canonicalId,
+              input.versionId,
+              input.occurredAtMs,
+            ],
+          ),
+          sql.unsafe(
+            `
           INSERT INTO schema_migrations(version, name, applied_at_ms)
           SELECT 1, 'd1-playback-event-commit', 0
           WHERE NOT EXISTS (
             SELECT 1 FROM playback_sessions
             WHERE id = ? AND state_revision = ? AND last_event_at_ms = ?
           )
-        `, [input.localSessionId, state.revision, input.occurredAtMs])
-      ])
-      return state
-    }))
+        `,
+            [input.localSessionId, state.revision, input.occurredAtMs],
+          ),
+        ]);
+        return state;
+      }),
+    );
 
   interface OutboxRow {
-    readonly target_id: string
-    readonly canonical_id: string
-    readonly source_item_id: string
-    readonly upstream_item_id: string
-    readonly upstream_user_id: string
-    readonly server_id: string
-    readonly server_generation: unknown
-    readonly desired_revision: unknown
-    readonly payload_json: unknown
-    readonly attempt_count: unknown
-    readonly lease_owner: string
-    readonly lease_expires_at_ms: unknown
+    readonly target_id: string;
+    readonly canonical_id: string;
+    readonly source_item_id: string;
+    readonly upstream_item_id: string;
+    readonly upstream_user_id: string;
+    readonly server_id: string;
+    readonly server_generation: unknown;
+    readonly desired_revision: unknown;
+    readonly payload_json: unknown;
+    readonly attempt_count: unknown;
+    readonly lease_owner: string;
+    readonly lease_expires_at_ms: unknown;
   }
 
   const outboxClaim = (row: OutboxRow): OutboxClaim => ({
@@ -3179,15 +3688,18 @@ const makeRepositories = Effect.gen(function*() {
     payload: desiredUserState(row.payload_json),
     attemptCount: integer(row.attempt_count, "attempt_count"),
     leaseOwner: row.lease_owner,
-    leaseExpiresAtMs: integer(row.lease_expires_at_ms, "lease_expires_at_ms")
-  })
+    leaseExpiresAtMs: integer(row.lease_expires_at_ms, "lease_expires_at_ms"),
+  });
 
   const claimOutboxTargets: RepositoriesService["claimOutboxTargets"] = (input) => {
     if (!Number.isSafeInteger(input.nowMs) || input.leaseOwner.length === 0) {
-      return Effect.fail(failure("claimOutboxTargets", "invalid claim request"))
+      return Effect.fail(failure("claimOutboxTargets", "invalid claim request"));
     }
-    return database("claimOutboxTargets", Effect.gen(function*() {
-      yield* sql.unsafe(`
+    return database(
+      "claimOutboxTargets",
+      Effect.gen(function* () {
+        yield* sql.unsafe(
+          `
         UPDATE state_outbox
         SET uncertain_since_ms = CASE
               WHEN dispatched_at_ms IS NULL THEN uncertain_since_ms
@@ -3213,8 +3725,11 @@ const makeRepositories = Effect.gen(function*() {
           ORDER BY lease_expires_at_ms, target_id
           LIMIT ${OUTBOX_BATCH_SIZE}
         )
-      `, [input.nowMs, input.nowMs, input.nowMs, input.nowMs, input.nowMs])
-      const candidates = yield* sql.unsafe<{ target_id: string }>(`
+      `,
+          [input.nowMs, input.nowMs, input.nowMs, input.nowMs, input.nowMs],
+        );
+        const candidates = yield* sql.unsafe<{ target_id: string }>(
+          `
         SELECT outbox.target_id
         FROM state_outbox outbox
         WHERE outbox.eligible = 1
@@ -3237,9 +3752,14 @@ const makeRepositories = Effect.gen(function*() {
           )
         ORDER BY next_attempt_at_ms, outbox.target_id
         LIMIT ?
-      `, [input.nowMs, OUTBOX_BATCH_SIZE])
-      if (candidates.length === 0) return []
-      const batches = yield* sql.batch(candidates.map((candidate) => sql.unsafe<OutboxRow>(`
+      `,
+          [input.nowMs, OUTBOX_BATCH_SIZE],
+        );
+        if (candidates.length === 0) return [];
+        const batches = yield* sql.batch(
+          candidates.map((candidate) =>
+            sql.unsafe<OutboxRow>(
+              `
         UPDATE state_outbox
         SET lease_owner = ?, lease_expires_at_ms = ?, dispatched_at_ms = NULL,
             attempt_count = attempt_count + 1
@@ -3267,22 +3787,26 @@ const makeRepositories = Effect.gen(function*() {
           (SELECT upstream_item_id FROM source_items WHERE id = source_item_id) AS upstream_item_id,
           (SELECT upstream_user_id FROM upstream_servers WHERE id = server_id) AS upstream_user_id,
           desired_revision, payload_json, attempt_count, lease_owner, lease_expires_at_ms
-      `, [
-        input.leaseOwner,
-        input.nowMs + OUTBOX_LEASE_MS,
-        candidate.target_id,
-        input.nowMs
-      ])))
-      const claimed: Array<OutboxClaim> = []
-      for (const rows of batches) {
-        if (rows[0]) claimed.push(yield* decode("claimOutboxTargets", () => outboxClaim(rows[0]!)))
-      }
-      return claimed
-    }))
-  }
+      `,
+              [input.leaseOwner, input.nowMs + OUTBOX_LEASE_MS, candidate.target_id, input.nowMs],
+            ),
+          ),
+        );
+        const claimed: Array<OutboxClaim> = [];
+        for (const rows of batches) {
+          if (rows[0])
+            claimed.push(yield* decode("claimOutboxTargets", () => outboxClaim(rows[0]!)));
+        }
+        return claimed;
+      }),
+    );
+  };
 
   const markOutboxDispatched: RepositoriesService["markOutboxDispatched"] = (input) =>
-    database("markOutboxDispatched", sql.unsafe<{ target_id: string }>(`
+    database(
+      "markOutboxDispatched",
+      sql.unsafe<{ target_id: string }>(
+        `
       UPDATE state_outbox
       SET dispatched_at_ms = ?, updated_at_ms = ?
       WHERE target_id = ?
@@ -3299,19 +3823,25 @@ const makeRepositories = Effect.gen(function*() {
             AND server.deleted_at_ms IS NULL
         )
       RETURNING target_id
-    `, [
-      input.dispatchedAtMs,
-      input.dispatchedAtMs,
-      input.targetId,
-      input.desiredRevision,
-      input.serverGeneration,
-      input.leaseOwner,
-      input.dispatchedAtMs,
-      input.serverGeneration
-    ])).pipe(Effect.map((rows) => rows.length === 1))
+    `,
+        [
+          input.dispatchedAtMs,
+          input.dispatchedAtMs,
+          input.targetId,
+          input.desiredRevision,
+          input.serverGeneration,
+          input.leaseOwner,
+          input.dispatchedAtMs,
+          input.serverGeneration,
+        ],
+      ),
+    ).pipe(Effect.map((rows) => rows.length === 1));
 
   const acknowledgeOutboxTarget: RepositoriesService["acknowledgeOutboxTarget"] = (input) =>
-    database("acknowledgeOutboxTarget", sql.unsafe<{ target_id: string }>(`
+    database(
+      "acknowledgeOutboxTarget",
+      sql.unsafe<{ target_id: string }>(
+        `
       UPDATE state_outbox
       SET delivered_revision = ?,
           lease_owner = NULL,
@@ -3339,20 +3869,26 @@ const makeRepositories = Effect.gen(function*() {
             AND server.deleted_at_ms IS NULL
         )
       RETURNING target_id
-    `, [
-      input.desiredRevision,
-      input.acknowledgedAtMs + UNCERTAINTY_REAPPLY_MS,
-      input.acknowledgedAtMs,
-      input.targetId,
-      input.desiredRevision,
-      input.serverGeneration,
-      input.leaseOwner,
-      input.acknowledgedAtMs,
-      input.serverGeneration
-    ])).pipe(Effect.map((rows) => rows.length === 1))
+    `,
+        [
+          input.desiredRevision,
+          input.acknowledgedAtMs + UNCERTAINTY_REAPPLY_MS,
+          input.acknowledgedAtMs,
+          input.targetId,
+          input.desiredRevision,
+          input.serverGeneration,
+          input.leaseOwner,
+          input.acknowledgedAtMs,
+          input.serverGeneration,
+        ],
+      ),
+    ).pipe(Effect.map((rows) => rows.length === 1));
 
   const markOutboxUncertain: RepositoriesService["markOutboxUncertain"] = (input) =>
-    database("markOutboxUncertain", sql.unsafe(`
+    database(
+      "markOutboxUncertain",
+      sql.unsafe(
+        `
       UPDATE state_outbox
       SET uncertain_since_ms = COALESCE(uncertain_since_ms, ?),
           last_failure_code = ?,
@@ -3363,19 +3899,25 @@ const makeRepositories = Effect.gen(function*() {
           END,
           updated_at_ms = ?
       WHERE target_id = ? AND desired_revision >= ?
-    `, [
-      input.uncertainAtMs,
-      input.code,
-      input.uncertainAtMs,
-      input.uncertainAtMs,
-      input.nextAttemptAtMs,
-      input.uncertainAtMs,
-      input.targetId,
-      input.desiredRevision
-    ])).pipe(Effect.asVoid)
+    `,
+        [
+          input.uncertainAtMs,
+          input.code,
+          input.uncertainAtMs,
+          input.uncertainAtMs,
+          input.nextAttemptAtMs,
+          input.uncertainAtMs,
+          input.targetId,
+          input.desiredRevision,
+        ],
+      ),
+    ).pipe(Effect.asVoid);
 
   const recordOutboxFailure: RepositoriesService["recordOutboxFailure"] = (input) =>
-    database("recordOutboxFailure", sql.unsafe<{ target_id: string }>(`
+    database(
+      "recordOutboxFailure",
+      sql.unsafe<{ target_id: string }>(
+        `
       UPDATE state_outbox
       SET permanent_failure_code = CASE WHEN ? THEN ? ELSE NULL END,
           last_failure_code = ?,
@@ -3391,33 +3933,47 @@ const makeRepositories = Effect.gen(function*() {
         AND lease_owner = ?
         AND lease_expires_at_ms > ?
       RETURNING target_id
-    `, [
-      input.permanent ? 1 : 0,
-      input.code,
-      input.code,
-      input.failedAtMs,
-      input.nextAttemptAtMs,
-      input.failedAtMs,
-      input.targetId,
-      input.desiredRevision,
-      input.serverGeneration,
-      input.leaseOwner,
-      input.failedAtMs
-    ])).pipe(Effect.map((rows) => rows.length === 1))
+    `,
+        [
+          input.permanent ? 1 : 0,
+          input.code,
+          input.code,
+          input.failedAtMs,
+          input.nextAttemptAtMs,
+          input.failedAtMs,
+          input.targetId,
+          input.desiredRevision,
+          input.serverGeneration,
+          input.leaseOwner,
+          input.failedAtMs,
+        ],
+      ),
+    ).pipe(Effect.map((rows) => rows.length === 1));
 
   const runMaintenanceBatch: RepositoriesService["runMaintenanceBatch"] = (nowMs) =>
-    database("runMaintenanceBatch", Effect.gen(function*() {
-      const remove = (table: string, predicate: string, parameters: ReadonlyArray<number> = [nowMs]) =>
-        sql.unsafe<{ rowid: number }>(`
+    database(
+      "runMaintenanceBatch",
+      Effect.gen(function* () {
+        const remove = (
+          table: string,
+          predicate: string,
+          parameters: ReadonlyArray<number> = [nowMs],
+        ) =>
+          sql.unsafe<{ rowid: number }>(
+            `
         DELETE FROM ${table}
         WHERE rowid IN (SELECT rowid FROM ${table} WHERE ${predicate} LIMIT 100)
         RETURNING rowid
-      `, parameters)
-      const missing = yield* sql.unsafe<UserStateRow & {
-        readonly target_id: string
-        readonly server_id: string
-        readonly server_generation: number
-      }>(`
+      `,
+            parameters,
+          );
+        const missing = yield* sql.unsafe<
+          UserStateRow & {
+            readonly target_id: string;
+            readonly server_id: string;
+            readonly server_generation: number;
+          }
+        >(`
         SELECT state.*, item.id AS target_id, item.server_id, item.server_generation
         FROM user_state state
         JOIN source_items item ON item.canonical_id = state.canonical_id
@@ -3432,23 +3988,20 @@ const makeRepositories = Effect.gen(function*() {
           AND (outbox.target_id IS NULL OR outbox.eligible = 0 OR outbox.desired_revision <> state.revision)
         ORDER BY item.id
         LIMIT 100
-      `)
-      const results = yield* sql.batch([
-        remove("dashboard_sessions", "expires_at_ms <= ?"),
-        remove("emby_tokens", "expires_at_ms <= ?"),
-        remove(
-          "auth_rate_limits",
-          "(blocked_until_ms IS NOT NULL AND blocked_until_ms <= ?) OR (blocked_until_ms IS NULL AND window_started_at_ms <= ?)",
-          [nowMs, nowMs - AUTH_RATE_WINDOW_MS]
-        ),
-        remove(
-          "playback_sessions",
-          "last_event_at_ms <= ?",
-          [nowMs - 24 * 60 * 60_000]
-        ),
-        remove("query_generations", "expires_at_ms <= ?"),
-        remove("source_metadata_cache", "stale_until_ms <= ?"),
-        sql.unsafe<{ target_id: string }>(`
+      `);
+        const results = yield* sql.batch([
+          remove("dashboard_sessions", "expires_at_ms <= ?"),
+          remove("emby_tokens", "expires_at_ms <= ?"),
+          remove(
+            "auth_rate_limits",
+            "(blocked_until_ms IS NOT NULL AND blocked_until_ms <= ?) OR (blocked_until_ms IS NULL AND window_started_at_ms <= ?)",
+            [nowMs, nowMs - AUTH_RATE_WINDOW_MS],
+          ),
+          remove("playback_sessions", "last_event_at_ms <= ?", [nowMs - 24 * 60 * 60_000]),
+          remove("query_generations", "expires_at_ms <= ?"),
+          remove("source_metadata_cache", "stale_until_ms <= ?"),
+          sql.unsafe<{ target_id: string }>(
+            `
           UPDATE state_outbox
           SET uncertain_since_ms = CASE
                 WHEN dispatched_at_ms IS NULL THEN uncertain_since_ms
@@ -3474,8 +4027,11 @@ const makeRepositories = Effect.gen(function*() {
             LIMIT 100
           )
           RETURNING target_id
-        `, [nowMs, nowMs, nowMs, nowMs, nowMs]),
-        sql.unsafe<{ target_id: string }>(`
+        `,
+            [nowMs, nowMs, nowMs, nowMs, nowMs],
+          ),
+          sql.unsafe<{ target_id: string }>(
+            `
           UPDATE state_outbox
           SET eligible = 0, lease_owner = NULL, lease_expires_at_ms = NULL, updated_at_ms = ?
           WHERE target_id IN (
@@ -3496,79 +4052,98 @@ const makeRepositories = Effect.gen(function*() {
             LIMIT 100
           )
           RETURNING target_id
-        `, [nowMs]),
-        ...missing.map((row) => upsertOutboxTarget({
-          id: row.target_id,
-          server_id: row.server_id,
-          server_generation: row.server_generation
-        }, userState(row), nowMs)),
-        sql.unsafe(`
+        `,
+            [nowMs],
+          ),
+          ...missing.map((row) =>
+            upsertOutboxTarget(
+              {
+                id: row.target_id,
+                server_id: row.server_id,
+                server_generation: row.server_generation,
+              },
+              userState(row),
+              nowMs,
+            ),
+          ),
+          sql.unsafe(
+            `
           INSERT INTO maintenance_status (singleton, last_run_at_ms)
           VALUES (1, ?)
           ON CONFLICT(singleton) DO UPDATE SET
             last_run_at_ms = MAX(maintenance_status.last_run_at_ms, excluded.last_run_at_ms)
-        `, [nowMs])
-      ])
-      return {
-        expiredDashboardSessions: results[0]!.length,
-        expiredEmbyTokens: results[1]!.length,
-        expiredRateLimits: results[2]!.length,
-        expiredPlaybackSessions: results[3]!.length,
-        expiredQueryGenerations: results[4]!.length,
-        expiredMetadataCacheRows: results[5]!.length,
-        releasedOutboxLeases: results[6]!.length,
-        cancelledOutboxTargets: results[7]!.length,
-        createdOutboxTargets: missing.length
-      } satisfies MaintenanceResult
-    }))
+        `,
+            [nowMs],
+          ),
+        ]);
+        return {
+          expiredDashboardSessions: results[0]!.length,
+          expiredEmbyTokens: results[1]!.length,
+          expiredRateLimits: results[2]!.length,
+          expiredPlaybackSessions: results[3]!.length,
+          expiredQueryGenerations: results[4]!.length,
+          expiredMetadataCacheRows: results[5]!.length,
+          releasedOutboxLeases: results[6]!.length,
+          cancelledOutboxTargets: results[7]!.length,
+          createdOutboxTargets: missing.length,
+        } satisfies MaintenanceResult;
+      }),
+    );
 
   const readSystemStatus: RepositoriesService["readSystemStatus"] = () =>
-    database("readSystemStatus", Effect.gen(function*() {
-      const cache = yield* sql.unsafe<{ count: number }>("SELECT COUNT(*) AS count FROM source_metadata_cache")
-      const maintenance = yield* sql.unsafe<{ last_run_at_ms: number }>(
-        "SELECT last_run_at_ms FROM maintenance_status WHERE singleton = 1"
-      )
-      const outbox = yield* sql.unsafe<{
-        pending: number
-        failed: number
-        uncertain: number
-      }>(`
+    database(
+      "readSystemStatus",
+      Effect.gen(function* () {
+        const cache = yield* sql.unsafe<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM source_metadata_cache",
+        );
+        const maintenance = yield* sql.unsafe<{ last_run_at_ms: number }>(
+          "SELECT last_run_at_ms FROM maintenance_status WHERE singleton = 1",
+        );
+        const outbox = yield* sql.unsafe<{
+          pending: number;
+          failed: number;
+          uncertain: number;
+        }>(`
         SELECT
           SUM(CASE WHEN eligible = 1 AND permanent_failure_code IS NULL AND delivered_revision < desired_revision THEN 1 ELSE 0 END) AS pending,
           SUM(CASE WHEN last_failure_code IS NOT NULL OR permanent_failure_code IS NOT NULL THEN 1 ELSE 0 END) AS failed,
           SUM(CASE WHEN uncertain_since_ms IS NOT NULL THEN 1 ELSE 0 END) AS uncertain
         FROM state_outbox
-      `)
-      const upstream = yield* sql.unsafe<{ health: string; count: number }>(`
+      `);
+        const upstream = yield* sql.unsafe<{ health: string; count: number }>(`
         SELECT health, COUNT(*) AS count
         FROM upstream_servers
         WHERE deleted_at_ms IS NULL
         GROUP BY health
-      `)
-      const counts = new Map(upstream.map((row) => [row.health, integer(row.count, "count")]))
-      return {
-        database: "healthy" as const,
-        cacheEntries: integer(cache[0]?.count ?? 0, "cache count"),
-        maintenanceLastRunAtMs: maintenance[0]?.last_run_at_ms ?? null,
-        outboxPending: integer(outbox[0]?.pending ?? 0, "outbox pending"),
-        outboxFailed: integer(outbox[0]?.failed ?? 0, "outbox failed"),
-        outboxUncertain: integer(outbox[0]?.uncertain ?? 0, "outbox uncertain"),
-        upstreamHealthy: counts.get("healthy") ?? 0,
-        upstreamDegraded: counts.get("degraded") ?? 0,
-        upstreamUnknown: counts.get("unknown") ?? 0
-      }
-    }))
+      `);
+        const counts = new Map(upstream.map((row) => [row.health, integer(row.count, "count")]));
+        return {
+          database: "healthy" as const,
+          cacheEntries: integer(cache[0]?.count ?? 0, "cache count"),
+          maintenanceLastRunAtMs: maintenance[0]?.last_run_at_ms ?? null,
+          outboxPending: integer(outbox[0]?.pending ?? 0, "outbox pending"),
+          outboxFailed: integer(outbox[0]?.failed ?? 0, "outbox failed"),
+          outboxUncertain: integer(outbox[0]?.uncertain ?? 0, "outbox uncertain"),
+          upstreamHealthy: counts.get("healthy") ?? 0,
+          upstreamDegraded: counts.get("degraded") ?? 0,
+          upstreamUnknown: counts.get("unknown") ?? 0,
+        };
+      }),
+    );
 
   const listOutboxFailures: RepositoriesService["listOutboxFailures"] = () =>
-    database("listOutboxFailures", sql.unsafe<{
-      readonly server_id: string
-      readonly code: string
-      readonly failed_at_ms: unknown
-      readonly attempt_count: unknown
-      readonly next_attempt_at_ms: unknown | null
-      readonly uncertain_since_ms: unknown | null
-      readonly permanent_failure_code: string | null
-    }>(`
+    database(
+      "listOutboxFailures",
+      sql.unsafe<{
+        readonly server_id: string;
+        readonly code: string;
+        readonly failed_at_ms: unknown;
+        readonly attempt_count: unknown;
+        readonly next_attempt_at_ms: unknown | null;
+        readonly uncertain_since_ms: unknown | null;
+        readonly permanent_failure_code: string | null;
+      }>(`
       SELECT server_id,
         COALESCE(permanent_failure_code, last_failure_code, 'delivery_uncertain') AS code,
         COALESCE(last_failure_at_ms, uncertain_since_ms, updated_at_ms) AS failed_at_ms,
@@ -3582,18 +4157,27 @@ const makeRepositories = Effect.gen(function*() {
         OR uncertain_since_ms IS NOT NULL
       ORDER BY failed_at_ms DESC, target_id
       LIMIT 100
-    `)).pipe(Effect.flatMap((rows) => decode("listOutboxFailures", () => rows.map((row) => ({
-      serverId: decodeServerId(row.server_id),
-      code: row.code,
-      failedAtMs: integer(row.failed_at_ms, "failed_at_ms"),
-      attemptCount: integer(row.attempt_count, "attempt_count"),
-      nextAttemptAtMs: row.permanent_failure_code === null
-        ? integer(row.next_attempt_at_ms, "next_attempt_at_ms")
-        : null,
-      uncertainSinceMs: row.uncertain_since_ms === null
-        ? null
-        : integer(row.uncertain_since_ms, "uncertain_since_ms")
-    })))))
+    `),
+    ).pipe(
+      Effect.flatMap((rows) =>
+        decode("listOutboxFailures", () =>
+          rows.map((row) => ({
+            serverId: decodeServerId(row.server_id),
+            code: row.code,
+            failedAtMs: integer(row.failed_at_ms, "failed_at_ms"),
+            attemptCount: integer(row.attempt_count, "attempt_count"),
+            nextAttemptAtMs:
+              row.permanent_failure_code === null
+                ? integer(row.next_attempt_at_ms, "next_attempt_at_ms")
+                : null,
+            uncertainSinceMs:
+              row.uncertain_since_ms === null
+                ? null
+                : integer(row.uncertain_since_ms, "uncertain_since_ms"),
+          })),
+        ),
+      ),
+    );
 
   return Repositories.of({
     claimUser,
@@ -3648,12 +4232,13 @@ const makeRepositories = Effect.gen(function*() {
     runMaintenanceBatch,
     readSystemStatus,
     listOutboxFailures,
-    drivemby
-  })
-})
+    drivemby,
+  });
+});
 
 export const makeD1RepositoriesLayer = (
-  db: D1Client.D1ClientConfig["db"]
-): Layer.Layer<Repositories> => Layer.effect(Repositories, makeRepositories).pipe(
-  Layer.provide(D1Client.layer({ db }).pipe(Layer.orDie))
-)
+  db: D1Client.D1ClientConfig["db"],
+): Layer.Layer<Repositories> =>
+  Layer.effect(Repositories, makeRepositories).pipe(
+    Layer.provide(D1Client.layer({ db }).pipe(Layer.orDie)),
+  );
