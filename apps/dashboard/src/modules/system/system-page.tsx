@@ -48,6 +48,57 @@ export const SystemPage = () => {
     }
   };
 
+  const renderMetadata = () => {
+    if (metadata.isPending) {
+      return <Skeleton aria-label={m.metadata_loading()} className="h-36" />;
+    }
+    if (metadata.isError || !metadata.data) {
+      return (
+        <div role="alert" className="space-y-2">
+          <p className="text-destructive text-sm">{m.metadata_load_failed()}</p>
+          <Button variant="outline" onClick={() => void metadata.refetch()}>
+            {m.retry()}
+          </Button>
+        </div>
+      );
+    }
+    return <MetadataProviders settings={metadata.data} onEdit={setProvider} />;
+  };
+
+  const renderStatus = () => {
+    if (status.isPending) {
+      return <Skeleton aria-label={m.system_status_loading()} className="h-48" />;
+    }
+    if (status.isError || !status.data) {
+      return (
+        <div role="alert" className="space-y-2">
+          <p className="text-destructive text-sm">{m.system_status_failed()}</p>
+          <Button variant="outline" onClick={() => void status.refetch()}>
+            {m.retry()}
+          </Button>
+        </div>
+      );
+    }
+    return <SystemStatus status={status.data} />;
+  };
+
+  const renderFailures = () => {
+    if (failures.isPending) {
+      return <Skeleton aria-label={m.outbox_failures_loading()} className="h-24" />;
+    }
+    if (failures.isError) {
+      return (
+        <div role="alert" className="space-y-2">
+          <p className="text-destructive text-sm">{m.outbox_failures_load_failed()}</p>
+          <Button variant="outline" onClick={() => void failures.refetch()}>
+            {m.retry()}
+          </Button>
+        </div>
+      );
+    }
+    return <OutboxFailures failures={failures.data ?? []} />;
+  };
+
   return (
     <div className="max-w-5xl space-y-8">
       <header className="space-y-2">
@@ -61,18 +112,7 @@ export const SystemPage = () => {
         <h2 id="metadata-providers-title" className="font-heading text-xl font-medium">
           {m.metadata_providers_title()}
         </h2>
-        {metadata.isPending ? (
-          <Skeleton aria-label={m.metadata_loading()} className="h-36" />
-        ) : metadata.isError || !metadata.data ? (
-          <div role="alert" className="space-y-2">
-            <p className="text-destructive text-sm">{m.metadata_load_failed()}</p>
-            <Button variant="outline" onClick={() => void metadata.refetch()}>
-              {m.retry()}
-            </Button>
-          </div>
-        ) : (
-          <MetadataProviders settings={metadata.data} onEdit={setProvider} />
-        )}
+        {renderMetadata()}
       </section>
 
       <Separator />
@@ -97,18 +137,7 @@ export const SystemPage = () => {
         <h2 id="runtime-status-title" className="font-heading text-xl font-medium">
           {m.runtime_status_title()}
         </h2>
-        {status.isPending ? (
-          <Skeleton aria-label={m.system_status_loading()} className="h-48" />
-        ) : status.isError || !status.data ? (
-          <div role="alert" className="space-y-2">
-            <p className="text-destructive text-sm">{m.system_status_failed()}</p>
-            <Button variant="outline" onClick={() => void status.refetch()}>
-              {m.retry()}
-            </Button>
-          </div>
-        ) : (
-          <SystemStatus status={status.data} />
-        )}
+        {renderStatus()}
       </section>
 
       <Separator />
@@ -130,20 +159,7 @@ export const SystemPage = () => {
           <summary className="focus-visible:ring-ring cursor-pointer rounded-md py-2 text-sm font-medium outline-none focus-visible:ring-2">
             {m.outbox_failures_title()}
           </summary>
-          <div className="pt-3">
-            {failures.isPending ? (
-              <Skeleton aria-label={m.outbox_failures_loading()} className="h-24" />
-            ) : failures.isError ? (
-              <div role="alert" className="space-y-2">
-                <p className="text-destructive text-sm">{m.outbox_failures_load_failed()}</p>
-                <Button variant="outline" onClick={() => void failures.refetch()}>
-                  {m.retry()}
-                </Button>
-              </div>
-            ) : (
-              <OutboxFailures failures={failures.data ?? []} />
-            )}
-          </div>
+          <div className="pt-3">{renderFailures()}</div>
         </details>
       </section>
 

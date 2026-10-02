@@ -170,11 +170,13 @@ describe("federated pagination generations", () => {
   it("allows a provisional count to fall and then returns a stable terminal empty page", async () => {
     const { layer } = await setup((path) => {
       const start = Number(new URL(path, "https://local").searchParams.get("StartIndex"));
-      return start === 0
-        ? { Items: [movie("1", "A"), movie("2", "B")], TotalRecordCount: 6 }
-        : start === 2
-          ? { Items: [movie("1", "A"), movie("2", "B")], TotalRecordCount: 4 }
-          : { Items: [], TotalRecordCount: 2 };
+      if (start === 0) {
+        return { Items: [movie("1", "A"), movie("2", "B")], TotalRecordCount: 6 };
+      }
+      if (start === 2) {
+        return { Items: [movie("1", "A"), movie("2", "B")], TotalRecordCount: 4 };
+      }
+      return { Items: [], TotalRecordCount: 2 };
     });
     await Effect.runPromise(
       Effect.gen(function* () {

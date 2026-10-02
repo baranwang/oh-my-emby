@@ -26,9 +26,15 @@ const state = {
   updatedAtMs: 1,
 };
 
+const mediaItemType = (id: string): CanonicalItemView["itemType"] => {
+  if (id.startsWith("series")) return "Series";
+  if (id.startsWith("episode")) return "Episode";
+  return "Movie";
+};
+
 const media = (id: string): CanonicalItemView => ({
   id,
-  itemType: id.startsWith("series") ? "Series" : id.startsWith("episode") ? "Episode" : "Movie",
+  itemType: mediaItemType(id),
   displayMetadata: {
     Name: id,
     ParentIndexNumber: id === "episode-special" ? 0 : 1,

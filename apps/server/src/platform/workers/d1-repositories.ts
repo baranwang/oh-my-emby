@@ -1999,19 +1999,25 @@ const makeRepositories = Effect.gen(function* () {
                 canonicalRows.map(({ id }) => id),
               );
 
+        const claimIdentityStates: string[] = [];
+        if (
+          clusterClaims.some(
+            ({ namespace, state }) => state === "exact" && providerNamespaces.has(namespace),
+          )
+        ) {
+          claimIdentityStates.push("exact");
+        } else if (
+          clusterClaims.some(
+            ({ namespace, state }) => state === "exact" && namespace.startsWith("fallback:"),
+          )
+        ) {
+          claimIdentityStates.push("fallback");
+        }
         const stateRank = { "source-exclusive": 0, fallback: 1, exact: 2 } as const;
         const retainedIdentityState = [
           identityState,
           ...canonicalRows.map(({ identity_state }) => identity_state),
-          ...(clusterClaims.some(
-            ({ namespace, state }) => state === "exact" && providerNamespaces.has(namespace),
-          )
-            ? ["exact"]
-            : clusterClaims.some(
-                  ({ namespace, state }) => state === "exact" && namespace.startsWith("fallback:"),
-                )
-              ? ["fallback"]
-              : []),
+          ...claimIdentityStates,
         ].reduce((retained, state) =>
           (stateRank[state as keyof typeof stateRank] ?? -1) >
           (stateRank[retained as keyof typeof stateRank] ?? -1)
@@ -2840,38 +2846,40 @@ const makeRepositories = Effect.gen(function* () {
             generation.expiresAtMs,
           ],
         );
-        const mutate =
-          input.expected === null
-            ? [insert]
-            : input.expected.id === generation.id
-              ? [
-                  sql.unsafe(
-                    `
+        let mutate = [insert];
+        if (input.expected !== null) {
+          if (input.expected.id === generation.id) {
+            mutate = [
+              sql.unsafe(
+                `
               UPDATE query_generations
               SET revision = ?, normalized_query_json = ?, source_state_json = ?,
                   all_sources_exhausted = ?, state_dependent = ?, expires_at_ms = ?
               WHERE query_key = ? AND id = ? AND revision = ?
             `,
-                    [
-                      generation.revision,
-                      canonicalJson(generation.normalizedQuery),
-                      canonicalJson(generation.sourceState),
-                      generation.allSourcesExhausted ? 1 : 0,
-                      generation.stateDependent ? 1 : 0,
-                      generation.expiresAtMs,
-                      generation.queryKey,
-                      input.expected.id,
-                      input.expected.revision,
-                    ],
-                  ),
-                ]
-              : [
-                  sql.unsafe(
-                    "DELETE FROM query_generations WHERE query_key = ? AND id = ? AND revision = ?",
-                    [generation.queryKey, input.expected.id, input.expected.revision],
-                  ),
-                  insert,
-                ];
+                [
+                  generation.revision,
+                  canonicalJson(generation.normalizedQuery),
+                  canonicalJson(generation.sourceState),
+                  generation.allSourcesExhausted ? 1 : 0,
+                  generation.stateDependent ? 1 : 0,
+                  generation.expiresAtMs,
+                  generation.queryKey,
+                  input.expected.id,
+                  input.expected.revision,
+                ],
+              ),
+            ];
+          } else {
+            mutate = [
+              sql.unsafe(
+                "DELETE FROM query_generations WHERE query_key = ? AND id = ? AND revision = ?",
+                [generation.queryKey, input.expected.id, input.expected.revision],
+              ),
+              insert,
+            ];
+          }
+        }
 
         const batch = sql.batch([
           assertExpected,

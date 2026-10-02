@@ -39,6 +39,9 @@ export const LibrariesPage = ({
   const groups = useSourceLibraryGroups(servers.data ?? [], creating);
   const create = useCreateLibrary();
   const open = creating || selectedId !== undefined;
+  let listState: "pending" | "error" | "success" = "success";
+  if (libraries.isPending) listState = "pending";
+  else if (libraries.isError) listState = "error";
 
   const renderDrawerContent = () => {
     if (!creating) {
@@ -93,7 +96,7 @@ export const LibrariesPage = ({
         )}
       </header>
       <LibraryList
-        state={libraries.isPending ? "pending" : libraries.isError ? "error" : "success"}
+        state={listState}
         libraries={libraries.data ?? []}
         onRetry={() => void libraries.refetch()}
         onCreate={onCreate}

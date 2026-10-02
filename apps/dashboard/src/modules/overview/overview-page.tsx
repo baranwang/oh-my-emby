@@ -20,6 +20,12 @@ const hasUsableSource = (library: VirtualLibraryView, servers: ReadonlyArray<Ser
     return source.enabled && server?.enabled === true && server.health === "healthy";
   });
 
+const serverExceptionLabel = (server: ServerView) => {
+  if (server.verifiedCatalogId === null) return m.overview_server_unverified();
+  if (server.health === "degraded") return m.status_degraded();
+  return m.status_unknown();
+};
+
 const ActionLink = ({
   children,
   to,
@@ -86,28 +92,34 @@ export const OverviewPage = () => {
     failureData.length > 0 || systemData.outboxFailed > 0 || systemData.outboxUncertain > 0;
   const hasExceptions =
     serverExceptions.length > 0 || libraryExceptions.length > 0 || hasSyncException;
-  const setupState =
-    serverData.length === 0 ? (
-      <SetupState
-        icon={ServerIcon}
-        title={m.overview_setup_server_title()}
-        description={m.overview_setup_server_description()}
-      >
-        <Button nativeButton={false} render={<Link to="/servers" search={{ new: true }} />}>
-          {m.add_server()}
-        </Button>
-      </SetupState>
-    ) : libraryData.length === 0 ? (
-      <SetupState
-        icon={LibraryIcon}
-        title={m.overview_setup_library_title()}
-        description={m.overview_setup_library_description()}
-      >
-        <Button nativeButton={false} render={<Link to="/libraries" search={{ new: true }} />}>
-          {m.add_library()}
-        </Button>
-      </SetupState>
-    ) : null;
+  const renderSetupState = () => {
+    if (serverData.length === 0)
+      return (
+        <SetupState
+          icon={ServerIcon}
+          title={m.overview_setup_server_title()}
+          description={m.overview_setup_server_description()}
+        >
+          <Button nativeButton={false} render={<Link to="/servers" search={{ new: true }} />}>
+            {m.add_server()}
+          </Button>
+        </SetupState>
+      );
+    if (libraryData.length === 0)
+      return (
+        <SetupState
+          icon={LibraryIcon}
+          title={m.overview_setup_library_title()}
+          description={m.overview_setup_library_description()}
+        >
+          <Button nativeButton={false} render={<Link to="/libraries" search={{ new: true }} />}>
+            {m.add_library()}
+          </Button>
+        </SetupState>
+      );
+    return null;
+  };
+  const setupState = renderSetupState();
 
   if (setupState && !hasExceptions) return <OverviewFrame>{setupState}</OverviewFrame>;
 
@@ -159,13 +171,7 @@ export const OverviewPage = () => {
                   {m.overview_server_attention_title()}
                 </p>
               </div>
-              <Badge variant="destructive">
-                {server.verifiedCatalogId === null
-                  ? m.overview_server_unverified()
-                  : server.health === "degraded"
-                    ? m.status_degraded()
-                    : m.status_unknown()}
-              </Badge>
+              <Badge variant="destructive">{serverExceptionLabel(server)}</Badge>
               <Button
                 nativeButton={false}
                 render={<Link to="/servers/$id" params={{ id: server.id }} />}

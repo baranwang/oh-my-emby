@@ -71,9 +71,9 @@ const connection = {
 const sources = [{ id: "source-1", serverId: "server-1", name: "Movies", mediaType: "movies" }];
 const savedServerFetch = async (request: RequestInfo | URL) => {
   const pathname = new URL(request instanceof Request ? request.url : request.toString()).pathname;
-  return json(
-    pathname.endsWith("/test") ? connection : pathname.endsWith("/libraries") ? sources : server,
-  );
+  if (pathname.endsWith("/test")) return json(connection);
+  if (pathname.endsWith("/libraries")) return json(sources);
+  return json(server);
 };
 
 afterEach(() => {

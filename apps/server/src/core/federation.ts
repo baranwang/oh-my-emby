@@ -458,12 +458,9 @@ const parseItem = (value: unknown): Record<string, JsonValue> => {
 const exactClaim = (
   record: CatalogItemRecord,
 ): { namespace: ProviderNamespace; value: string } | null => {
-  const priority =
-    record.canonical.itemType === "Movie"
-      ? ["tmdb:movie", "imdb:title"]
-      : record.canonical.itemType === "Series"
-        ? ["tmdb:tv", "imdb:title"]
-        : ["imdb:title"];
+  let priority = ["imdb:title"];
+  if (record.canonical.itemType === "Movie") priority = ["tmdb:movie", "imdb:title"];
+  else if (record.canonical.itemType === "Series") priority = ["tmdb:tv", "imdb:title"];
   for (const namespace of priority) {
     const claim = record.claims.find(
       (entry) => entry.namespace === namespace && entry.state === "exact",
@@ -481,11 +478,13 @@ const matchesClaim = (
   claim: { namespace: ProviderNamespace; value: string },
 ) => {
   const ids = providerIds(item);
-  return claim.namespace === "tmdb:movie"
-    ? ids.tmdbMovie === claim.value && item.Type === "Movie"
-    : claim.namespace === "tmdb:tv"
-      ? ids.tmdbTv === claim.value && item.Type === "Series"
-      : ids.imdbTitle === claim.value;
+  if (claim.namespace === "tmdb:movie") {
+    return ids.tmdbMovie === claim.value && item.Type === "Movie";
+  }
+  if (claim.namespace === "tmdb:tv") {
+    return ids.tmdbTv === claim.value && item.Type === "Series";
+  }
+  return ids.imdbTitle === claim.value;
 };
 
 const view = (

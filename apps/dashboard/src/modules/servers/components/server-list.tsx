@@ -23,19 +23,23 @@ type ServerListProps = {
   readonly onCreate: () => void;
 };
 
-const healthLabel = (health: ServerView["health"]) =>
-  health === "healthy"
-    ? m.status_healthy()
-    : health === "degraded"
-      ? m.status_degraded()
-      : m.status_unknown();
+const healthLabel = (health: ServerView["health"]) => {
+  if (health === "healthy") return m.status_healthy();
+  if (health === "degraded") return m.status_degraded();
+  return m.status_unknown();
+};
 
-const policyLabel = (policy: ServerView["userAgentPolicy"]) =>
-  policy === "fixed"
-    ? m.server_user_agent_fixed()
-    : policy === "client-preferred"
-      ? m.server_user_agent_client_preferred()
-      : m.server_user_agent_passthrough();
+const healthVariant = (health: ServerView["health"]): "secondary" | "destructive" | "outline" => {
+  if (health === "healthy") return "secondary";
+  if (health === "degraded") return "destructive";
+  return "outline";
+};
+
+const policyLabel = (policy: ServerView["userAgentPolicy"]) => {
+  if (policy === "fixed") return m.server_user_agent_fixed();
+  if (policy === "client-preferred") return m.server_user_agent_client_preferred();
+  return m.server_user_agent_passthrough();
+};
 
 export const ServerList = ({ state, servers, onRetry, onCreate }: ServerListProps) => {
   if (state === "pending") {
@@ -71,17 +75,7 @@ export const ServerList = ({ state, servers, onRetry, onCreate }: ServerListProp
                 <span className="block truncate">{server.endpoints[0]?.displayUrl}</span>
               </CardDescription>
               <CardAction>
-                <Badge
-                  variant={
-                    server.health === "healthy"
-                      ? "secondary"
-                      : server.health === "degraded"
-                        ? "destructive"
-                        : "outline"
-                  }
-                >
-                  {healthLabel(server.health)}
-                </Badge>
+                <Badge variant={healthVariant(server.health)}>{healthLabel(server.health)}</Badge>
               </CardAction>
             </CardHeader>
             <CardContent className="mt-auto">

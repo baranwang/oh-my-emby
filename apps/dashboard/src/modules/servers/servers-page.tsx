@@ -60,6 +60,21 @@ export const ServersPage = ({
   const servers = useServers();
   const [footerContainer, setFooterContainer] = useState<HTMLDivElement | null>(null);
   const open = creating || selectedId !== undefined;
+  let listState: "pending" | "error" | "success" = "success";
+  if (servers.isPending) listState = "pending";
+  else if (servers.isError) listState = "error";
+
+  const renderDrawerContent = () => {
+    if (creating) {
+      return <CreateServerForm footerContainer={footerContainer} onClose={onClose} />;
+    }
+    if (selectedId) {
+      return (
+        <ServerDetailPage id={selectedId} onClose={onClose} footerContainer={footerContainer} />
+      );
+    }
+    return null;
+  };
 
   return (
     <div className="max-w-7xl space-y-8">
@@ -70,7 +85,7 @@ export const ServersPage = ({
         </p>
       </header>
       <ServerList
-        state={servers.isPending ? "pending" : servers.isError ? "error" : "success"}
+        state={listState}
         servers={servers.data ?? []}
         onRetry={() => void servers.refetch()}
         onCreate={onCreate}
@@ -88,17 +103,7 @@ export const ServersPage = ({
             <DrawerDescription>{m.servers_description()}</DrawerDescription>
           </DrawerHeader>
           <ScrollArea className="min-h-0 flex-1">
-            <div className="p-4">
-              {creating ? (
-                <CreateServerForm footerContainer={footerContainer} onClose={onClose} />
-              ) : selectedId ? (
-                <ServerDetailPage
-                  id={selectedId}
-                  onClose={onClose}
-                  footerContainer={footerContainer}
-                />
-              ) : null}
-            </div>
+            <div className="p-4">{renderDrawerContent()}</div>
           </ScrollArea>
           <DrawerFooter ref={setFooterContainer} />
         </DrawerContent>

@@ -108,16 +108,11 @@ describe("exact canonical identity", () => {
   const resolvePair = async (left: SourceItemCandidate, right: SourceItemCandidate) => {
     const first = await resolve(left);
     const second = await resolve(right);
-    return {
-      first,
-      second,
-      decision:
-        second.sourceItem.quarantineReason !== null
-          ? "quarantined"
-          : first.canonical.id === second.canonical.id
-            ? "merged"
-            : "separate",
-    };
+    let decision = "quarantined";
+    if (second.sourceItem.quarantineReason === null) {
+      decision = first.canonical.id === second.canonical.id ? "merged" : "separate";
+    }
+    return { first, second, decision };
   };
 
   beforeEach(async () => {

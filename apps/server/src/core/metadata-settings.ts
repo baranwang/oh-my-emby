@@ -86,18 +86,17 @@ export const makeMetadataSettingsLayer: Layer.Layer<MetadataSettings, never, Rep
           const settings = providers.map((provider) => {
             const previous = current.find(({ id }) => id === provider.id)!;
             const credential = applySecret(previous.credential, provider.credential);
+            let status: MetadataProviderSetting["status"] = "unconfigured";
+            if (credential !== null) {
+              status = previous.status === "degraded" ? "degraded" : "ready";
+            }
             return {
               id: provider.id,
               enabled: provider.enabled,
               order: provider.order,
               language: provider.language,
               credential,
-              status:
-                credential === null
-                  ? ("unconfigured" as const)
-                  : previous.status === "degraded"
-                    ? ("degraded" as const)
-                    : ("ready" as const),
+              status,
               updatedAtMs: nowMs,
             };
           }) as [MetadataProviderSetting, MetadataProviderSetting];

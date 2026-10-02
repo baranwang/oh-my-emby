@@ -6,6 +6,7 @@ import { InvalidCredentials } from "../core/errors.js";
 import type {
   CanonicalItemView,
   CatalogFilter,
+  FederatedPage,
   FederatedQuery,
   FederationService,
   SortTerm,
@@ -234,8 +235,10 @@ const logRequest = (
   );
 };
 
-const number = (value: string | null): number | undefined =>
-  value === null ? undefined : value.trim() === "" ? Number.NaN : Number(value);
+const number = (value: string | null): number | undefined => {
+  if (value === null) return undefined;
+  return value.trim() === "" ? Number.NaN : Number(value);
+};
 
 const booleanQuery = (value: string | null): boolean | undefined => {
   if (value === null || value.trim() === "") return undefined;
@@ -335,8 +338,9 @@ const pathSegment = (value: string): Effect.Effect<string, InvalidEmbyRequest> =
   });
 
 const normalizedPath = (pathname: string): string => {
-  let path =
-    pathname === "/emby" ? "/" : pathname.startsWith("/emby/") ? pathname.slice(5) : pathname;
+  let path = pathname;
+  if (pathname === "/emby") path = "/";
+  else if (pathname.startsWith("/emby/")) path = pathname.slice(5);
   if (
     path === "/api/me" ||
     path.startsWith("/api/me/") ||
@@ -1253,11 +1257,14 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
           : {}),
         ...(clientUserAgent === undefined ? {} : { clientUserAgent }),
       };
-      const page = studios
-        ? yield* services.federation.studios(input)
-        : decoded.SearchTerm
-          ? yield* services.federation.search({ ...input, searchTerm: decoded.SearchTerm })
-          : yield* services.federation.list(input);
+      let page: FederatedPage;
+      if (studios) {
+        page = yield* services.federation.studios(input);
+      } else if (decoded.SearchTerm) {
+        page = yield* services.federation.search({ ...input, searchTerm: decoded.SearchTerm });
+      } else {
+        page = yield* services.federation.list(input);
+      }
       const hidden =
         resumeItems && services.compat !== undefined
           ? yield* services.compat.hiddenIds()

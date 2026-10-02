@@ -183,17 +183,16 @@ describe("Federation", () => {
   };
 
   it("merges enabled libraries without duplicate items across page boundaries", async () => {
-    const layer = await setup(3, (serverId) =>
-      Effect.succeed({
-        Items:
-          serverId === "server-0"
-            ? [item("10", "Alpha"), item("20", "Shared")]
-            : serverId === "server-1"
-              ? [item("20", "Shared"), item("30", "Zulu")]
-              : [item("40", "Hidden")],
+    const layer = await setup(3, (serverId) => {
+      let items: Array<ReturnType<typeof item>>;
+      if (serverId === "server-0") items = [item("10", "Alpha"), item("20", "Shared")];
+      else if (serverId === "server-1") items = [item("20", "Shared"), item("30", "Zulu")];
+      else items = [item("40", "Hidden")];
+      return Effect.succeed({
+        Items: items,
         TotalRecordCount: serverId === "server-2" ? 1 : 2,
-      }),
-    );
+      });
+    });
     await Effect.runPromise(
       Effect.gen(function* () {
         const repo = yield* Repositories;

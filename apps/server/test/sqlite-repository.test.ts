@@ -111,17 +111,19 @@ const makeHarness = async (): Promise<RepositoryHarness> => {
       );
     },
     failNext: async (operation) => {
-      const trigger =
-        operation === "state_outbox_insert"
-          ? `CREATE TRIGGER fail_state_outbox_insert BEFORE INSERT ON state_outbox
-          BEGIN SELECT RAISE(ABORT, 'injected state_outbox_insert failure'); END;`
-          : operation === "server_endpoint_insert"
-            ? `CREATE TRIGGER fail_server_endpoint_insert BEFORE INSERT ON upstream_server_endpoints
-            WHEN NEW.id = 'endpoint-trigger-failure'
-            BEGIN SELECT RAISE(ABORT, 'injected server endpoint failure'); END;`
-            : `CREATE TRIGGER fail_metadata_setting_write BEFORE INSERT ON metadata_provider_settings
-            WHEN NEW.provider_id = 'tmdb' AND NEW.updated_at_ms = 3000
-            BEGIN SELECT RAISE(ABORT, 'injected metadata setting failure'); END;`;
+      let trigger: string;
+      if (operation === "state_outbox_insert") {
+        trigger = `CREATE TRIGGER fail_state_outbox_insert BEFORE INSERT ON state_outbox
+        BEGIN SELECT RAISE(ABORT, 'injected state_outbox_insert failure'); END;`;
+      } else if (operation === "server_endpoint_insert") {
+        trigger = `CREATE TRIGGER fail_server_endpoint_insert BEFORE INSERT ON upstream_server_endpoints
+        WHEN NEW.id = 'endpoint-trigger-failure'
+        BEGIN SELECT RAISE(ABORT, 'injected server endpoint failure'); END;`;
+      } else {
+        trigger = `CREATE TRIGGER fail_metadata_setting_write BEFORE INSERT ON metadata_provider_settings
+        WHEN NEW.provider_id = 'tmdb' AND NEW.updated_at_ms = 3000
+        BEGIN SELECT RAISE(ABORT, 'injected metadata setting failure'); END;`;
+      }
       withDatabase(filename, (database) => database.exec(trigger));
     },
     getUserState: async (canonicalId: string) =>

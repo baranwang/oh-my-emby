@@ -152,14 +152,16 @@ const normalizedEndpoints = (
 const endpointOrder = (endpoints: ReadonlyArray<UpstreamEndpoint>): string =>
   endpoints.map((endpoint) => normalizeUpstreamBaseUrl(endpointUrl(endpoint).href)).join("\0");
 
-const aggregateHealth = (endpoints: ReadonlyArray<UpstreamEndpoint>): UpstreamServer["health"] =>
-  endpoints.some(({ health }) => health === "healthy")
-    ? "healthy"
-    : endpoints.some(
-          ({ health, verifiedCatalogId }) => health === "degraded" || verifiedCatalogId !== null,
-        )
-      ? "degraded"
-      : "unknown";
+const aggregateHealth = (endpoints: ReadonlyArray<UpstreamEndpoint>): UpstreamServer["health"] => {
+  if (endpoints.some(({ health }) => health === "healthy")) return "healthy";
+  if (
+    endpoints.some(
+      ({ health, verifiedCatalogId }) => health === "degraded" || verifiedCatalogId !== null,
+    )
+  )
+    return "degraded";
+  return "unknown";
+};
 
 export const makeServerServiceLayer: Layer.Layer<
   ServerService,

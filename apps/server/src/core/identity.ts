@@ -187,6 +187,14 @@ const prepare = async (candidate: SourceItemCandidate): Promise<PreparedIdentity
     })),
   );
   const parentRequired = candidate.itemType === "Season" || candidate.itemType === "Episode";
+  let sourceExclusiveReason: "parent-unresolved" | null = null;
+  if (parentRequired && candidate.canonicalSeriesId && fallback === null && claims.length === 0) {
+    if (!candidate.numberingConflict && !((candidate.combinedEpisodeNumbers?.length ?? 0) > 1)) {
+      sourceExclusiveReason = "parent-unresolved";
+    }
+  } else if (parentRequired && !candidate.canonicalSeriesId) {
+    sourceExclusiveReason = "parent-unresolved";
+  }
   return {
     ...candidate,
     claims,
@@ -194,14 +202,7 @@ const prepare = async (candidate: SourceItemCandidate): Promise<PreparedIdentity
     sourceItemId,
     sourceExclusiveCanonicalId,
     proposedCanonicalId,
-    sourceExclusiveReason:
-      parentRequired && candidate.canonicalSeriesId && fallback === null && claims.length === 0
-        ? candidate.numberingConflict || (candidate.combinedEpisodeNumbers?.length ?? 0) > 1
-          ? null
-          : "parent-unresolved"
-        : parentRequired && !candidate.canonicalSeriesId
-          ? "parent-unresolved"
-          : null,
+    sourceExclusiveReason,
     mediaVersions,
     observedAtMs,
   };

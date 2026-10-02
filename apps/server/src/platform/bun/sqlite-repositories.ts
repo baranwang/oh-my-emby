@@ -1994,20 +1994,25 @@ const makeRepositories = Effect.gen(function* () {
                   canonicalRows.map(({ id }) => id),
                 );
 
+          const claimIdentityStates: string[] = [];
+          if (
+            clusterClaims.some(
+              ({ namespace, state }) => state === "exact" && providerNamespaces.has(namespace),
+            )
+          ) {
+            claimIdentityStates.push("exact");
+          } else if (
+            clusterClaims.some(
+              ({ namespace, state }) => state === "exact" && namespace.startsWith("fallback:"),
+            )
+          ) {
+            claimIdentityStates.push("fallback");
+          }
           const stateRank = { "source-exclusive": 0, fallback: 1, exact: 2 } as const;
           const retainedIdentityState = [
             identityState,
             ...canonicalRows.map(({ identity_state }) => identity_state),
-            ...(clusterClaims.some(
-              ({ namespace, state }) => state === "exact" && providerNamespaces.has(namespace),
-            )
-              ? ["exact"]
-              : clusterClaims.some(
-                    ({ namespace, state }) =>
-                      state === "exact" && namespace.startsWith("fallback:"),
-                  )
-                ? ["fallback"]
-                : []),
+            ...claimIdentityStates,
           ].reduce((retained, state) =>
             (stateRank[state as keyof typeof stateRank] ?? -1) >
             (stateRank[retained as keyof typeof stateRank] ?? -1)
