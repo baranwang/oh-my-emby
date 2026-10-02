@@ -138,6 +138,139 @@ const send = (app: ReturnType<typeof makeEmbyHandler>, request: Request) =>
   Effect.runPromise(app(request));
 
 describe("Drivemby compatible routes", () => {
+  it.each([
+    ["/emby/Users/owner/Items", "Movie", 1, 2802],
+    ["/Users/owner/Items", "Series", 1, 4385],
+    ["/Items", "Movie", 0, 2802],
+    ["/emby/Items", "Series", 0, 4385],
+    ["/Items", "Episode", 0, 147618],
+    ["/Items", "Movie,Series,Movie", 0, 7187],
+  ])(
+    "returns whole-server totals for a client count probe at %s (%s, limit %s)",
+    async (path, type, limit, total) => {
+      const base = services();
+      const calls: Array<string> = [];
+      const app = makeEmbyHandler({
+        ...base,
+        federation: {
+          ...base.federation,
+          counts: (agent) => {
+            calls.push(`counts:${agent}`);
+            return Effect.succeed({ MovieCount: 2802, SeriesCount: 4385, EpisodeCount: 147618 });
+          },
+          list: () => {
+            calls.push("list");
+            return Effect.succeed({
+              ...emptyPage,
+              items: [media("movie-1")],
+              totalRecordCount: 2,
+              exhausted: false,
+            });
+          },
+        },
+      });
+      const response = await send(
+        app,
+        get(
+          `${path}?Recursive=true&IncludeItemTypes=${type}&Limit=${limit}&EnableTotalRecordCount=true&Fields=ProviderIds&SortBy=SortName&EnableImages=false`,
+          { ...auth, "user-agent": "SenPlayer/6.2.2" },
+        ),
+      );
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.TotalRecordCount).toBe(total);
+      expect(body.StartIndex).toBe(0);
+      expect(body.Items).toHaveLength(limit);
+      expect(calls.filter((call) => call.startsWith("counts:"))).toEqual([
+        "counts:SenPlayer/6.2.2",
+      ]);
+      expect(calls.includes("list")).toBe(limit === 1);
+    },
+  );
+
+  it.each([
+    "ParentId=library-1",
+    "Filters=IsFavorite",
+    "SearchTerm=movie",
+    "Studios=studio",
+    "IsWatchlisted=true",
+    "IsWatchlisted=false",
+    "StartIndex=1",
+    "Limit=30",
+    "Recursive=false",
+    "EnableTotalRecordCount=false",
+    "IncludeItemTypes=Season",
+    "IncludeItemTypes=Movie,Video",
+    "ExcludeItemIds=movie-1",
+  ])("keeps scoped or filtered query totals when %s", async (restriction) => {
+    const base = services();
+    let countCalls = 0;
+    const page = { ...emptyPage, totalRecordCount: 2 };
+    const app = makeEmbyHandler({
+      ...base,
+      federation: {
+        ...base.federation,
+        counts: () => {
+          countCalls++;
+          return Effect.succeed({ MovieCount: 2802, SeriesCount: 4385, EpisodeCount: 147618 });
+        },
+        list: () => Effect.succeed(page),
+        search: () => Effect.succeed(page),
+      },
+    });
+    const parameters = new URLSearchParams({
+      Recursive: "true",
+      IncludeItemTypes: "Movie",
+      Limit: "1",
+    });
+    for (const [key, value] of new URLSearchParams(restriction)) parameters.set(key, value);
+    const response = await send(app, get(`/Users/owner/Items?${parameters}`));
+    expect(response.status).toBe(200);
+    expect((await response.json()).TotalRecordCount).toBe(2);
+    expect(countCalls).toBe(0);
+  });
+
+  it.each(["UserId", "userId"])(
+    "accepts the %s count-probe identity and rejects other users",
+    async (key) => {
+      const base = services();
+      let countCalls = 0;
+      const app = makeEmbyHandler({
+        ...base,
+        federation: {
+          ...base.federation,
+          counts: () => {
+            countCalls++;
+            return Effect.succeed({ MovieCount: 2802, SeriesCount: 4385, EpisodeCount: 147618 });
+          },
+        },
+      });
+      const path = `/Items?Recursive=true&IncludeItemTypes=Movie&Limit=0&${key}=`;
+      const valid = await send(app, get(`${path}owner`));
+      expect(valid.status).toBe(200);
+      expect((await valid.json()).TotalRecordCount).toBe(2802);
+      expect((await send(app, get(`${path}other-user`))).status).toBe(403);
+      expect((await send(app, new Request(`https://local.example${path}owner`))).status).toBe(401);
+      expect(countCalls).toBe(1);
+    },
+  );
+
+  it("fails a client count probe instead of exposing a pagination estimate when counts are unavailable", async () => {
+    const base = services();
+    const app = makeEmbyHandler({
+      ...base,
+      federation: {
+        ...base.federation,
+        counts: () => Effect.fail(new FederationUnavailable({ sourceIds: ["server-1"] })),
+      },
+    });
+    const response = await send(
+      app,
+      get("/Users/owner/Items?Recursive=true&IncludeItemTypes=Movie&Limit=1"),
+    );
+    expect(response.status).toBe(503);
+  });
+
   it("advertises the project icon in user profiles and serves it as the primary avatar", async () => {
     const app = makeEmbyHandler(services());
     const profile = await send(app, get("/emby/Users/owner"));

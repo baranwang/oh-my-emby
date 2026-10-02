@@ -623,6 +623,47 @@ const query = (
   };
 };
 
+const countProbeParameters = new Set([
+  "UserId",
+  "userId",
+  "api_key",
+  "apiKey",
+  "X-Emby-Token",
+  "StartIndex",
+  "Limit",
+  "Recursive",
+  "IncludeItemTypes",
+  "EnableTotalRecordCount",
+  "Fields",
+  "SortBy",
+  "SortOrder",
+  "EnableImageTypes",
+  "EnableImages",
+  "ImageTypeLimit",
+  "EnableUserData",
+]);
+
+// Server cards request one item (or none) and read TotalRecordCount as a whole-server statistic.
+// A federated page's has-more estimate must not be used as that statistic.
+const countProbeKeys = (url: URL, input: FederatedQuery) => {
+  if (
+    input.virtualLibraryId !== null ||
+    input.startIndex !== 0 ||
+    input.limit > 1 ||
+    url.searchParams.get("Recursive")?.toLowerCase() !== "true" ||
+    url.searchParams.get("EnableTotalRecordCount")?.toLowerCase() === "false" ||
+    [...url.searchParams.keys()].some((key) => !countProbeParameters.has(key)) ||
+    input.itemTypes.length === 0 ||
+    input.itemTypes.some((type) => !["Movie", "Series", "Episode"].includes(type))
+  )
+    return null;
+  return input.itemTypes.map((type) => {
+    if (type === "Movie") return "MovieCount" as const;
+    if (type === "Series") return "SeriesCount" as const;
+    return "EpisodeCount" as const;
+  });
+};
+
 const principalFor = (services: EmbyServices, request: Request, url: URL) => {
   const value = token(request, url);
   return value
@@ -1257,8 +1298,27 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
           : {}),
         ...(clientUserAgent === undefined ? {} : { clientUserAgent }),
       };
+      const probeKeys = !resumeItems && !studios ? countProbeKeys(url, input) : null;
+      let probeTotal: number | undefined;
+      if (probeKeys !== null) {
+        if (services.federation.counts === undefined) {
+          return yield* Effect.fail(new FederationUnavailable({ sourceIds: [] }));
+        }
+        const counts = yield* services.federation.counts(clientUserAgent);
+        probeTotal = probeKeys.reduce((total, key) => total + counts[key], 0);
+        if (!Number.isSafeInteger(probeTotal)) {
+          return yield* Effect.fail(new FederationUnavailable({ sourceIds: [] }));
+        }
+      }
       let page: FederatedPage;
-      if (studios) {
+      if (probeTotal !== undefined && input.limit === 0) {
+        page = {
+          items: [],
+          totalRecordCount: probeTotal,
+          exhausted: true,
+          incompleteSourceIds: [],
+        };
+      } else if (studios) {
         page = yield* services.federation.studios(input);
       } else if (decoded.SearchTerm) {
         page = yield* services.federation.search({ ...input, searchTerm: decoded.SearchTerm });
@@ -1286,7 +1346,7 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
             ? itemDto(item, services.config.serverId)
             : paintItem(services, itemDto(item, services.config.serverId), flags),
         ),
-        TotalRecordCount: page.totalRecordCount - (page.items.length - items.length),
+        TotalRecordCount: probeTotal ?? page.totalRecordCount - (page.items.length - items.length),
         StartIndex: input.startIndex,
       });
     }
