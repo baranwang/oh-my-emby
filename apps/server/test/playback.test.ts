@@ -187,7 +187,9 @@ const makeFixture = (
         clientUserAgents.push(resolved.clientUserAgent);
         return Effect.succeed(
           new URL(
-            `https://cdn.example.com/${new URL(resolved.url).searchParams.get("MediaSourceId")}`,
+            new URL(resolved.url).pathname.includes("/Images/")
+              ? "https://image.tmdb.org/t/p/w780/episode.jpg"
+              : `https://cdn.example.com/${new URL(resolved.url).searchParams.get("MediaSourceId")}`,
           ),
         );
       },
@@ -683,21 +685,22 @@ describe("playback decisions", () => {
     );
   });
 
-  it("redirects source-item images when the platform marks them client-usable", async () => {
+  it("resolves source-item artwork to the CDN before redirecting the client", async () => {
     const fixture = makeFixture({ versions: [], clientUsable: true });
     const playback = await fixture.run(Playback);
 
-    await expect(
-      Effect.runPromise(
-        playback.resolveImage({
-          canonicalId: "movie-1",
-          imageType: "Primary",
-        }),
-      ),
-    ).resolves.toMatchObject({
-      _tag: "Redirect",
-      location: new URL("https://a.example.com/Items/item-a/Images/Primary?api_key=token-a"),
-    });
+    const decision = await Effect.runPromise(
+      playback.resolveImage({
+        canonicalId: "movie-1",
+        imageType: "Primary",
+        clientUserAgent: "Rex-Standard/0.5.0",
+      }),
+    );
+    expect(decision._tag).toBe("Redirect");
+    expect(decision._tag === "Redirect" && decision.location.href).toBe(
+      "https://image.tmdb.org/t/p/w780/episode.jpg",
+    );
+    expect(fixture.clientUserAgents).toEqual(["Rex-Standard/0.5.0"]);
   });
 
   it("distinguishes omitted and zero image indexes and includes registration generation in cache keys", async () => {
@@ -753,20 +756,21 @@ describe("playback decisions", () => {
     expect(boundaryCalls).toBe(1);
   });
 
-  it("redirects auxiliary resources only when platform composition marks them client-usable", async () => {
+  it("resolves media-version artwork to the CDN before redirecting the client", async () => {
     const fixture = makeFixture({ clientUsable: true });
     const playback = await fixture.run(Playback);
 
-    await expect(
-      Effect.runPromise(
-        playback.resolveImage({
-          canonicalId: "movie-1",
-          imageType: "Primary",
-        }),
-      ),
-    ).resolves.toMatchObject({
-      _tag: "Redirect",
-      location: new URL("https://a.example.com/Items/item-a/Images/Primary?api_key=token-a"),
-    });
+    const decision = await Effect.runPromise(
+      playback.resolveImage({
+        canonicalId: "movie-1",
+        imageType: "Primary",
+        clientUserAgent: "Rex-Standard/0.5.0",
+      }),
+    );
+    expect(decision._tag).toBe("Redirect");
+    expect(decision._tag === "Redirect" && decision.location.href).toBe(
+      "https://image.tmdb.org/t/p/w780/episode.jpg",
+    );
+    expect(fixture.clientUserAgents).toEqual(["Rex-Standard/0.5.0"]);
   });
 });

@@ -530,7 +530,19 @@ export const makePlaybackLayer = (
                 url: attempted.success.resolved,
               })
             ) {
-              return { _tag: "Redirect", location: attempted.success.resolved };
+              // Resolve the upstream Emby hop here: client credentials can override
+              // its api_key when a client follows the cross-origin redirect itself.
+              const location = yield* upstream
+                .resolvePlaybackRedirect({
+                  serverId: attempted.success.source.serverId,
+                  generation: attempted.success.source.serverGeneration,
+                  url: attempted.success.resolved.href,
+                  ...(input.clientUserAgent === undefined
+                    ? {}
+                    : { clientUserAgent: input.clientUserAgent }),
+                })
+                .pipe(Effect.mapError(() => new ResourceUnavailable()));
+              return { _tag: "Redirect", location };
             }
             return {
               _tag: "Proxy",
@@ -581,7 +593,19 @@ export const makePlaybackLayer = (
                 url: attempted.success.url,
               })
             ) {
-              return { _tag: "Redirect", location: attempted.success.url };
+              // Resolve the upstream Emby hop here: client credentials can override
+              // its api_key when a client follows the cross-origin redirect itself.
+              const location = yield* upstream
+                .resolvePlaybackRedirect({
+                  serverId: attempted.success.source.serverId,
+                  generation: attempted.success.source.serverGeneration,
+                  url: attempted.success.url.href,
+                  ...(input.clientUserAgent === undefined
+                    ? {}
+                    : { clientUserAgent: input.clientUserAgent }),
+                })
+                .pipe(Effect.mapError(() => new ResourceUnavailable()));
+              return { _tag: "Redirect", location };
             }
             return {
               _tag: "Proxy",
