@@ -5,7 +5,7 @@ import {
   VirtualLibraryView as VirtualLibraryViewSchema,
 } from "@oh-my-emby/contracts";
 import { Effect, Layer, Result, Schema } from "effect";
-import type { Statement } from "effect/unstable/sql/Statement";
+import type { Statement } from "effect/sql/Statement";
 
 import {
   AUTH_RATE_WINDOW_MS,

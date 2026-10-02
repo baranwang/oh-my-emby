@@ -1,7 +1,7 @@
 import type { QueryClient } from "@tanstack/react-query";
 import { queryOptions } from "@tanstack/react-query";
 import { Effect, Result } from "effect";
-import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
+import * as FetchHttpClient from "effect/http/FetchHttpClient";
 
 import { apiClient } from "@/lib/api-client";
 import { protectedQueryFamilies, queryKeys } from "@/lib/query-keys";

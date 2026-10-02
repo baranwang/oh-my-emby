@@ -1,7 +1,7 @@
 import { DashboardApi } from "@oh-my-emby/contracts";
 import { Effect } from "effect";
-import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
-import * as HttpApiClient from "effect/unstable/httpapi/HttpApiClient";
+import * as FetchHttpClient from "effect/http/FetchHttpClient";
+import * as HttpApiClient from "effect/http-api/HttpApiClient";
 
 const baseUrl = globalThis.location?.origin ?? "http://localhost";
 

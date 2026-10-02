@@ -3,10 +3,10 @@ import { dirname, join, resolve } from "node:path";
 import { mkdir } from "node:fs/promises";
 import { Effect, Layer, ManagedRuntime, Option } from "effect";
 import { configure, getConsoleSink } from "@logtape/logtape";
-import * as HttpRouter from "effect/unstable/http/HttpRouter";
-import * as HttpServer from "effect/unstable/http/HttpServer";
-import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
-import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
+import * as HttpRouter from "effect/http/HttpRouter";
+import * as HttpServer from "effect/http/HttpServer";
+import * as HttpServerRequest from "effect/http/HttpServerRequest";
+import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 
 import { DashboardApi } from "@oh-my-emby/contracts";
 import { ApplicationServices, routeApplication } from "../../api/application.js";

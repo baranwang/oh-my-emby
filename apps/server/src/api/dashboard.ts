@@ -1,11 +1,11 @@
 import { DashboardApi } from "@oh-my-emby/contracts";
 import { Effect, Layer, Option, Result } from "effect";
-import * as HttpServerError from "effect/unstable/http/HttpServerError";
-import * as HttpServerRequestModule from "effect/unstable/http/HttpServerRequest";
-import type { HttpServerRequest } from "effect/unstable/http/HttpServerRequest";
-import * as HttpServerRespondable from "effect/unstable/http/HttpServerRespondable";
-import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
-import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
+import * as HttpServerError from "effect/http/HttpServerError";
+import * as HttpServerRequestModule from "effect/http/HttpServerRequest";
+import type { HttpServerRequest } from "effect/http/HttpServerRequest";
+import * as HttpServerRespondable from "effect/http/HttpServerRespondable";
+import * as HttpServerResponse from "effect/http/HttpServerResponse";
+import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 
 import { Auth, type AuthService, type DashboardSession } from "../core/auth.js";
 import { InvalidCredentials } from "../core/errors.js";

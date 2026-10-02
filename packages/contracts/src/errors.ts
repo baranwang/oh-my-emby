@@ -1,5 +1,5 @@
 import { Schema } from "effect";
-import { HttpApiSchema } from "effect/unstable/httpapi";
+import { HttpApiSchema } from "effect/http-api";
 import { RequestId, ServerId } from "./schemas.js";
 
 export const Unauthorized = Schema.TaggedStruct("Unauthorized", {}).pipe(HttpApiSchema.status(401));

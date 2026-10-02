@@ -4,15 +4,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { Context, Effect, Layer, Result } from "effect";
-import * as HttpClient from "effect/unstable/http/HttpClient";
-import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
-import * as HttpRouter from "effect/unstable/http/HttpRouter";
-import * as HttpServer from "effect/unstable/http/HttpServer";
-import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
-import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
-import * as Cookies from "effect/unstable/http/Cookies";
-import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
-import * as HttpApiClient from "effect/unstable/httpapi/HttpApiClient";
+import * as HttpClient from "effect/http/HttpClient";
+import * as HttpClientRequest from "effect/http/HttpClientRequest";
+import * as HttpRouter from "effect/http/HttpRouter";
+import * as HttpServer from "effect/http/HttpServer";
+import * as HttpServerRequest from "effect/http/HttpServerRequest";
+import * as HttpServerResponse from "effect/http/HttpServerResponse";
+import * as Cookies from "effect/http/Cookies";
+import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
+import * as HttpApiClient from "effect/http-api/HttpApiClient";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { DashboardApi } from "@oh-my-emby/contracts";
@@ -50,7 +50,7 @@ const placeholderGroups = Layer.effectContext(
           uninterruptible: false,
         };
         handlers.set(endpointIdentifier, handler);
-        routes.push(HttpApiBuilder.handlerToRoute(group, handler, services));
+        routes.push(HttpApiBuilder.handlerToRoute(DashboardApi, group, handler, services));
       }
       context = Context.add(context, group, { handlers, routes });
     }
