@@ -6,6 +6,7 @@ import { Federation, type CanonicalItemView } from "../src/core/federation.js";
 import { MetadataProviders } from "../src/core/metadata-providers.js";
 import type { EligibleSource, SourceItemRecord, SourceMediaVersion } from "../src/core/model.js";
 import { Playback, makePlaybackLayer, serveRegisteredResource } from "../src/core/playback.js";
+import type { CachedResource, CountedResource } from "../src/core/resource-cache.js";
 import { Repositories, type CatalogItemRecord } from "../src/core/repositories.js";
 import { UpstreamClient, makeUpstreamClientLayer } from "../src/core/upstream-client.js";
 
@@ -96,6 +97,8 @@ const makeFixture = (
     externalImage?: URL | null;
     imageAfterRefresh?: URL;
     resourceRequest?: () => Effect.Effect<Response, any>;
+    fetchArtwork?: typeof fetch;
+    imageRedirect?: URL;
   } = {},
 ) => {
   const sourceA = source("a", "source-a", "item-a");
@@ -188,7 +191,7 @@ const makeFixture = (
         return Effect.succeed(
           new URL(
             new URL(resolved.url).pathname.includes("/Images/")
-              ? "https://image.tmdb.org/t/p/w780/episode.jpg"
+              ? (options.imageRedirect?.href ?? "https://image.tmdb.org/t/p/w780/episode.jpg")
               : `https://cdn.example.com/${new URL(resolved.url).searchParams.get("MediaSourceId")}`,
           ),
         );
@@ -208,6 +211,7 @@ const makeFixture = (
   );
   const layer = makePlaybackLayer({
     sessionId: () => "play-session",
+    ...(options.fetchArtwork === undefined ? {} : { fetchArtwork: options.fetchArtwork }),
     isClientUsableResource: () => options.clientUsable ?? false,
   }).pipe(Layer.provide(Layer.mergeAll(repositories, federation, upstream, metadataProviders)));
   const run = <A>(effect: Effect.Effect<A, any, Playback>) =>
@@ -605,6 +609,238 @@ describe("playback decisions", () => {
     expect(decision._tag === "Proxy" && decision.request.url.href).toBe(
       "https://a.example.com/Items/item-a/Images/Primary/0?api_key=token-a",
     );
+  });
+
+  it.each(["Infuse-Direct/8.5.6", " infuse-library/8.5.6 "])(
+    "serves cached CDN artwork as image bytes for %s",
+    async (clientUserAgent) => {
+      const requests: Request[] = [];
+      const fixture = makeFixture({
+        externalImage: new URL("https://image.tmdb.org/t/p/w780/poster.jpg"),
+        fetchArtwork: (async (request: Request) => {
+          requests.push(request);
+          return new Response("poster", { headers: { "content-type": "image/jpeg" } });
+        }) as typeof fetch,
+      });
+      const playback = await fixture.run(Playback);
+      const decision = await Effect.runPromise(
+        playback.resolveImage({
+          canonicalId: "movie-1",
+          imageType: "Primary",
+          clientUserAgent,
+        }),
+      );
+      expect(decision._tag).toBe("Proxy");
+      if (decision._tag !== "Proxy") throw new Error("expected local image delivery");
+      const response = await Effect.runPromise(serveRegisteredResource(decision.request, {}));
+      expect(response.status).toBe(200);
+      expect(response.headers.get("location")).toBeNull();
+      expect(response.headers.get("content-type")).toBe("image/jpeg");
+      expect(await response.text()).toBe("poster");
+      expect(requests).toHaveLength(1);
+      expect(requests[0]!.url).toBe("https://image.tmdb.org/t/p/w780/poster.jpg");
+      expect(requests[0]!.redirect).toBe("manual");
+      expect(requests[0]!.headers.has("authorization")).toBe(false);
+      expect(requests[0]!.headers.has("x-emby-token")).toBe(false);
+    },
+  );
+
+  it.each([true, false])(
+    "serves upstream CDN artwork locally for Infuse (versions: %s)",
+    async (hasVersions) => {
+      const fixture = makeFixture({
+        ...(hasVersions ? {} : { versions: [] }),
+        clientUsable: true,
+        fetchArtwork: (async () =>
+          new Response("episode", {
+            headers: { "content-type": "image/jpeg" },
+          })) as typeof fetch,
+      });
+      const playback = await fixture.run(Playback);
+      const decision = await Effect.runPromise(
+        playback.resolveImage({
+          canonicalId: "movie-1",
+          imageType: "Primary",
+          clientUserAgent: "Infuse-Direct/8.5.6",
+        }),
+      );
+      expect(decision._tag).toBe("Proxy");
+      if (decision._tag !== "Proxy") throw new Error("expected local image delivery");
+      const response = await Effect.runPromise(serveRegisteredResource(decision.request, {}));
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe("episode");
+    },
+  );
+
+  it("serves a registered upstream image that has no CDN redirect for Infuse", async () => {
+    const fixture = makeFixture({
+      clientUsable: true,
+      imageRedirect: new URL("https://a.example.com/Items/item-a/Images/Primary?api_key=token-a"),
+      fetchArtwork: (async (request: Request) => {
+        expect(request.url).toBe(
+          "https://a.example.com/Items/item-a/Images/Primary?api_key=token-a",
+        );
+        expect(request.headers.get("user-agent")).toBe("test");
+        expect(request.headers.has("authorization")).toBe(false);
+        return new Response("upstream-image", { headers: { "content-type": "image/jpeg" } });
+      }) as typeof fetch,
+    });
+    const playback = await fixture.run(Playback);
+    const decision = await Effect.runPromise(
+      playback.resolveImage({
+        canonicalId: "movie-1",
+        imageType: "Primary",
+        clientUserAgent: "Infuse-Direct/8.5.6",
+      }),
+    );
+    expect(decision._tag).toBe("Proxy");
+    if (decision._tag !== "Proxy") throw new Error("expected local image delivery");
+    const response = await Effect.runPromise(serveRegisteredResource(decision.request, {}));
+    expect(await response.text()).toBe("upstream-image");
+  });
+
+  it.each(["http://127.0.0.1/private", "https://image.tmdb.org.evil.example/poster.jpg"])(
+    "rejects an untrusted artwork destination %s before fetching",
+    async (url) => {
+      let fetched = false;
+      const fixture = makeFixture({
+        externalImage: new URL(url),
+        fetchArtwork: (async () => {
+          fetched = true;
+          return new Response();
+        }) as typeof fetch,
+      });
+      const playback = await fixture.run(Playback);
+      await expect(
+        Effect.runPromise(
+          playback.resolveImage({
+            canonicalId: "movie-1",
+            imageType: "Primary",
+            clientUserAgent: "Infuse-Direct/8.5.6",
+          }),
+        ),
+      ).rejects.toMatchObject({ _tag: "ResourceRejected" });
+      expect(fetched).toBe(false);
+    },
+  );
+
+  it("aborts a pending Infuse artwork fetch at the delivery deadline", async () => {
+    let aborted = false;
+    const fixture = makeFixture({
+      externalImage: new URL("https://image.tmdb.org/t/p/w780/poster.jpg"),
+      fetchArtwork: ((request: Request) =>
+        new Promise<Response>((resolve, reject) => {
+          const timer = setTimeout(
+            () =>
+              resolve(
+                new Response("poster", {
+                  headers: { "content-type": "image/jpeg" },
+                }),
+              ),
+            100,
+          );
+          request.signal.addEventListener(
+            "abort",
+            () => {
+              aborted = true;
+              clearTimeout(timer);
+              reject(new Error("aborted"));
+            },
+            { once: true },
+          );
+        })) as typeof fetch,
+    });
+    const playback = await fixture.run(Playback);
+    const decision = await Effect.runPromise(
+      playback.resolveImage({
+        canonicalId: "movie-1",
+        imageType: "Primary",
+        clientUserAgent: "Infuse-Direct/8.5.6",
+      }),
+    );
+    if (decision._tag !== "Proxy") throw new Error("expected local image delivery");
+    await expect(
+      Effect.runPromise(serveRegisteredResource(decision.request, { deadlineMs: 10 })),
+    ).rejects.toMatchObject({ _tag: "ResourceTimeout" });
+    expect(aborted).toBe(true);
+  });
+
+  it("serves the verified backup image endpoint returned by redirect resolution", async () => {
+    const upstreamSource = eligible("a", 0);
+    const backup = {
+      ...upstreamSource.endpoints[0]!,
+      id: "backup",
+      host: "backup.example.com",
+      path: "/emby",
+      displayUrl: "https://backup.example.com/emby",
+      order: 1,
+    };
+    const fixture = makeFixture({
+      sources: [source("a", "source-a", "item-a")],
+      eligible: [{ ...upstreamSource, endpoints: [...upstreamSource.endpoints, backup] }],
+      clientUsable: true,
+      imageRedirect: new URL(
+        "https://backup.example.com/emby/Items/item-a/Images/Primary?api_key=token-a",
+      ),
+      fetchArtwork: (async () =>
+        new Response("backup-image", {
+          headers: { "content-type": "image/jpeg" },
+        })) as typeof fetch,
+    });
+    const playback = await fixture.run(Playback);
+    const decision = await Effect.runPromise(
+      playback.resolveImage({
+        canonicalId: "movie-1",
+        imageType: "Primary",
+        clientUserAgent: "Infuse-Direct/8.5.6",
+      }),
+    );
+    if (decision._tag !== "Proxy") throw new Error("expected local image delivery");
+    const response = await Effect.runPromise(serveRegisteredResource(decision.request, {}));
+    expect(await response.text()).toBe("backup-image");
+  });
+
+  it("does not reuse cached registered artwork after the server generation changes", async () => {
+    const sourceItem = source("a", "source-a", "item-a");
+    const media = version("version-a", sourceItem.id, "media-a");
+    const upstreamSource = eligible("a", 0);
+    const fixture = makeFixture({
+      sources: [sourceItem],
+      versions: [media],
+      eligible: [upstreamSource],
+      clientUsable: true,
+      imageRedirect: new URL("https://a.example.com/Items/item-a/Images/Primary?api_key=token-a"),
+      fetchArtwork: (async () =>
+        new Response(`generation-${upstreamSource.serverGeneration}`, {
+          headers: { "content-type": "image/jpeg" },
+        })) as typeof fetch,
+    });
+    const values = new Map<string, CachedResource>();
+    const cache = {
+      get: (key: string) => Effect.succeed(values.get(key) ?? null),
+      put: (key: string, response: CountedResource, expiresAtMs: number) =>
+        Effect.sync(() => {
+          values.set(key, { ...response, expiresAtMs });
+        }),
+      prune: () => Effect.void,
+    };
+    const playback = await fixture.run(Playback);
+    const read = async () => {
+      const decision = await Effect.runPromise(
+        playback.resolveImage({
+          canonicalId: "movie-1",
+          imageType: "Primary",
+          clientUserAgent: "Infuse-Direct/8.5.6",
+        }),
+      );
+      if (decision._tag !== "Proxy") throw new Error("expected local image delivery");
+      return (await Effect.runPromise(serveRegisteredResource(decision.request, { cache }))).text();
+    };
+    expect(await read()).toBe("generation-1");
+    Object.assign(sourceItem, { serverGeneration: 2 });
+    Object.assign(media, { serverGeneration: 2 });
+    Object.assign(upstreamSource, { serverGeneration: 2 });
+    expect(await read()).toBe("generation-2");
   });
 
   it("redirects validated cached external artwork before trying upstream images", async () => {

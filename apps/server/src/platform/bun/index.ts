@@ -113,6 +113,7 @@ const makeBunCoreLayer = (config: BunRuntimeConfig) => {
   const libraryService = makeLibraryServiceLayer.pipe(Layer.provide(foundation));
   const metadataSettings = makeMetadataSettingsLayer.pipe(Layer.provide(repositories));
   const playback = makePlaybackLayer({
+    fetchArtwork: config.upstreamFetch ?? fetch,
     isClientUsableResource: ({ kind }) => kind === "image",
   }).pipe(Layer.provide(Layer.merge(foundation, federation)));
   const outbox = makeOutboxLayer().pipe(Layer.provide(foundation));

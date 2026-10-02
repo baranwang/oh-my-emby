@@ -65,7 +65,9 @@ export const makeWorkersCoreLayer = (
   const serverService = makeServerServiceLayer.pipe(Layer.provide(foundation));
   const libraryService = makeLibraryServiceLayer.pipe(Layer.provide(foundation));
   const metadataSettings = makeMetadataSettingsLayer.pipe(Layer.provide(repositories));
-  const playback = makePlaybackLayer().pipe(Layer.provide(Layer.merge(foundation, federation)));
+  const playback = makePlaybackLayer({
+    fetchArtwork: dependencies.upstreamFetch ?? fetch,
+  }).pipe(Layer.provide(Layer.merge(foundation, federation)));
   const outbox = makeOutboxLayer().pipe(Layer.provide(foundation));
   return Layer.mergeAll(
     foundation,

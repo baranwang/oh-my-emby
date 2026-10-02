@@ -17,7 +17,7 @@ import {
   type ResourceCacheService,
 } from "./resource-cache.js";
 import { Repositories, type CatalogItemRecord } from "./repositories.js";
-import { UpstreamClient, endpointUrl } from "./upstream-client.js";
+import { UpstreamClient, endpointUrl, effectiveUserAgent } from "./upstream-client.js";
 
 export class PlaybackNotFound extends Schema.TaggedError<PlaybackNotFound>()(
   "PlaybackNotFound",
@@ -113,6 +113,7 @@ export interface PlaybackService {
 export class Playback extends Context.Service<Playback, PlaybackService>()("oh-my-emby/Playback") {}
 
 export interface PlaybackConfig {
+  readonly fetchArtwork?: typeof fetch;
   readonly sessionId?: () => string;
   readonly isClientUsableResource?: (input: {
     readonly kind: "image" | "subtitle";
@@ -320,6 +321,7 @@ export const makePlaybackLayer = (
       const metadataProviders = yield* MetadataProviders;
       const repositories = yield* Repositories;
       const upstream = yield* UpstreamClient;
+      const fetchArtwork = config.fetchArtwork ?? fetch;
       const sessionId = config.sessionId ?? (() => crypto.randomUUID());
       const isClientUsableResource = config.isClientUsableResource ?? (() => false);
 
@@ -479,6 +481,92 @@ export const makePlaybackLayer = (
           return yield* Effect.fail(new PlaybackUnavailable());
         });
 
+      const proxyArtwork = (
+        location: URL,
+        current: CatalogItemRecord,
+        imageType: string,
+        imageIndex?: number,
+        registered?: {
+          readonly url: URL;
+          readonly source: EligibleSource;
+          readonly clientUserAgent?: string;
+        },
+      ): Effect.Effect<ResourceDecision, ResourceRejected> =>
+        Effect.gen(function* () {
+          // The registered URL has already passed source authorization and upstream
+          // destination checks. Otherwise fetch only known artwork CDNs; no redirects.
+          const isRegistered =
+            registered !== undefined &&
+            registered.source.endpoints.some((endpoint) => {
+              if (
+                endpoint.health !== "healthy" ||
+                endpoint.verifiedCatalogId !== registered.source.verifiedCatalogId
+              )
+                return false;
+              const originalBasePath = endpointUrl(
+                eligibleEndpoint(registered.source),
+              ).pathname.replace(/\/+$/, "");
+              const candidate = endpointUrl(endpoint);
+              candidate.pathname =
+                candidate.pathname.replace(/\/+$/, "") +
+                registered.url.pathname.slice(originalBasePath.length);
+              candidate.search = registered.url.search;
+              return location.href === candidate.href;
+            });
+          const isCdn =
+            location.protocol === "https:" &&
+            ["image.tmdb.org", "walter-r2.trakt.tv"].includes(location.hostname) &&
+            location.port === "" &&
+            location.username === "" &&
+            location.password === "";
+          if (!isRegistered && !isCdn) return yield* Effect.fail(new ResourceRejected());
+          const source = registered?.source ?? current.sourceItems[0];
+          const registrationKey = isRegistered
+            ? `${registered!.source.serverId}:${registered!.source.serverGeneration}:${effectiveUserAgent(registered!.source, registered!.clientUserAgent)}`
+            : "cdn";
+          return {
+            _tag: "Proxy" as const,
+            request: {
+              key: `image:infuse-v1:${current.canonical.id}:${imageType}:${imageIndex ?? "default"}:${registrationKey}:${location.href}`,
+              kind: "image" as const,
+              serverId: source?.serverId ?? "external-artwork",
+              generation: source?.serverGeneration ?? 0,
+              url: location,
+              maxBytes: MAX_IMAGE_BYTES,
+              acceptedMimeTypes: imageMimeTypes,
+              open: () =>
+                Effect.acquireRelease(
+                  Effect.tryPromise({
+                    try: (signal) =>
+                      fetchArtwork(
+                        new Request(location, {
+                          redirect: "manual",
+                          signal,
+                          headers: {
+                            accept: "image/jpeg, image/png",
+                            ...(isRegistered
+                              ? {
+                                  "user-agent": effectiveUserAgent(
+                                    registered!.source,
+                                    registered!.clientUserAgent,
+                                  ),
+                                }
+                              : {}),
+                          },
+                        }),
+                      ),
+                    catch: () => new ResourceUnavailable(),
+                  }),
+                  (response) =>
+                    response.body === null
+                      ? Effect.void
+                      : Effect.promise(() => response.body!.cancel()).pipe(Effect.ignore),
+                  { interruptible: true },
+                ),
+            },
+          };
+        });
+
       const resolveImage: PlaybackService["resolveImage"] = (input) =>
         Effect.gen(function* () {
           if (
@@ -489,6 +577,7 @@ export const makePlaybackLayer = (
             return yield* Effect.fail(new ResourceRejected());
           }
           const { current, eligibleSources } = yield* record(input.canonicalId, false);
+          const infuse = input.clientUserAgent?.trim().toLowerCase().includes("infuse") ?? false;
           let external = yield* metadataProviders.resolveCachedImage(
             current,
             input.imageType,
@@ -508,7 +597,11 @@ export const makePlaybackLayer = (
               input.imageIndex,
             );
           }
-          if (external !== null) return { _tag: "Redirect", location: external };
+          if (external !== null) {
+            return infuse
+              ? yield* proxyArtwork(external, current, input.imageType, input.imageIndex)
+              : { _tag: "Redirect", location: external };
+          }
           for (const version of orderedVersions(current, eligibleSources)) {
             const attempted = yield* Effect.result(
               versionRegistration(current, eligibleSources, version, (source, item) =>
@@ -524,6 +617,7 @@ export const makePlaybackLayer = (
             );
             if (attempted._tag === "Failure") continue;
             if (
+              infuse ||
               isClientUsableResource({
                 kind: "image",
                 serverId: attempted.success.source.serverId,
@@ -542,7 +636,15 @@ export const makePlaybackLayer = (
                     : { clientUserAgent: input.clientUserAgent }),
                 })
                 .pipe(Effect.mapError(() => new ResourceUnavailable()));
-              return { _tag: "Redirect", location };
+              return infuse
+                ? yield* proxyArtwork(location, current, input.imageType, input.imageIndex, {
+                    url: attempted.success.resolved,
+                    source: attempted.success.source,
+                    ...(input.clientUserAgent === undefined
+                      ? {}
+                      : { clientUserAgent: input.clientUserAgent }),
+                  })
+                : { _tag: "Redirect", location };
             }
             return {
               _tag: "Proxy",
@@ -587,6 +689,7 @@ export const makePlaybackLayer = (
             );
             if (attempted._tag === "Failure") continue;
             if (
+              infuse ||
               isClientUsableResource({
                 kind: "image",
                 serverId: attempted.success.source.serverId,
@@ -605,7 +708,15 @@ export const makePlaybackLayer = (
                     : { clientUserAgent: input.clientUserAgent }),
                 })
                 .pipe(Effect.mapError(() => new ResourceUnavailable()));
-              return { _tag: "Redirect", location };
+              return infuse
+                ? yield* proxyArtwork(location, current, input.imageType, input.imageIndex, {
+                    url: attempted.success.url,
+                    source: attempted.success.source,
+                    ...(input.clientUserAgent === undefined
+                      ? {}
+                      : { clientUserAgent: input.clientUserAgent }),
+                  })
+                : { _tag: "Redirect", location };
             }
             return {
               _tag: "Proxy",
