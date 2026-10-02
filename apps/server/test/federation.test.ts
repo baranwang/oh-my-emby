@@ -1953,6 +1953,35 @@ describe("Federation", () => {
     expect(peak).toBeLessThanOrEqual(MAX_FANOUT_CONCURRENCY);
   });
 
+  it("loads known movie resources when exact discovery times out without a usable detail cache", async () => {
+    let directCalls = 0;
+    const layer = await setup(1, (serverId, path, _replayPath, clientUserAgent) => {
+      if (path.includes("AnyProviderIdEquals=")) {
+        return Effect.fail(new UpstreamTimeout({ serverId }));
+      }
+      if (path.includes("/Users/user-0/Items/movie-10")) {
+        directCalls++;
+        expect(clientUserAgent).toBe("Rex-Standard/0.5.0");
+        return Effect.succeed(
+          item("movie-10", "Movie", {
+            MediaSources: [{ Id: "source-a", Name: "A" }],
+          }),
+        );
+      }
+      return Effect.succeed({ Items: [item("movie-10")], TotalRecordCount: 1 });
+    });
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const federation = yield* Federation;
+        const page = yield* federation.list(query());
+        const detailed = yield* federation.detail(page.items[0]!.id, "Rex-Standard/0.5.0");
+        expect(detailed?.mediaVersions.map(({ label }) => label)).toEqual(["[Server 0] A"]);
+        expect(detailed?.incompleteSourceIds).toEqual(["server-0"]);
+      }).pipe(Effect.provide(layer)),
+    );
+    expect(directCalls).toBe(1);
+  });
+
   it("exact-enriches a mapped item that has no current media versions and caches the positive result", async () => {
     let exactCalls = 0;
     const layer = await setup(1, (_serverId, path) => {

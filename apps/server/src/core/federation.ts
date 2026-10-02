@@ -1303,6 +1303,7 @@ export const makeFederationLayer = (
                                   replayPath: (refreshedUserId) =>
                                     directItemPath(refreshedUserId, known.upstreamItemId),
                                   method: "GET",
+                                  ...(clientUserAgent === undefined ? {} : { clientUserAgent }),
                                 },
                                 Schema.Unknown,
                               )
@@ -1387,6 +1388,17 @@ export const makeFederationLayer = (
                   if (attempted.failure instanceof RepositoryError)
                     return yield* Effect.fail(attempted.failure);
                   if (transient(attempted.failure)) {
+                    // Discovery can time out even when a known item's direct endpoint
+                    // is healthy. Fill missing detail resources without discarding
+                    // still-usable cached versions on a transient discovery failure.
+                    const hasUsableVersions = currentRecord.mediaVersions.some((version) =>
+                      knownSourceItems.some((known) => known.id === version.sourceItemId),
+                    );
+                    if (!hasUsableVersions && knownSourceItems.length > 0) {
+                      const refreshed = yield* refreshKnownItems();
+                      if (refreshed === "found") yield* cacheExactResult(true, now());
+                      if (refreshed === "invalid") yield* suppressStaleVersions(now());
+                    }
                     incomplete.add(source.serverId);
                     return;
                   }
