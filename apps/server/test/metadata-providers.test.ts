@@ -39,6 +39,15 @@ const record = (itemType: "Movie" | "Series" = "Movie"): CatalogItemRecord => ({
   userState: null,
 });
 
+// IMDb adapter cases deliberately omit TMDB claims to exercise the fallback path.
+const imdbRecord = (itemType: "Movie" | "Series" = "Movie"): CatalogItemRecord => {
+  const original = record(itemType);
+  return {
+    ...original,
+    claims: original.claims.filter((claim) => claim.namespace === "imdb:title"),
+  };
+};
+
 const settings = (
   order: readonly ["tmdb" | "trakt", "tmdb" | "trakt"] = ["tmdb", "trakt"],
 ): [MetadataProviderSetting, MetadataProviderSetting] =>
@@ -126,6 +135,70 @@ const fixture = (options: {
 };
 
 describe("MetadataProviders", () => {
+  it.each(["Movie", "Series"] as const)(
+    "prefers the typed TMDB ID over IMDb for %s",
+    async (itemType) => {
+      const requests: Array<Request> = [];
+      const test = fixture({
+        fetch: async (input, init) => {
+          requests.push(new Request(input, init));
+          return Response.json({
+            id: 20526,
+            title: "Movie",
+            name: "Series",
+            poster_path: "/poster.jpg",
+          });
+        },
+      });
+      await test.run(
+        Effect.gen(function* () {
+          yield* (yield* MetadataProviders).refresh(record(itemType));
+        }),
+      );
+      expect(new URL(requests[0]!.url).pathname).toBe(
+        itemType === "Movie" ? "/3/movie/20526" : "/3/tv/20526",
+      );
+      expect(requests.some((request) => new URL(request.url).pathname.includes("/find/"))).toBe(
+        false,
+      );
+      expect(new URL(requests[1]!.url).pathname).toBe(
+        itemType === "Movie" ? "/movies/tt1104001" : "/shows/tt1104001",
+      );
+    },
+  );
+
+  it.each(["missing", "invalid", "ambiguous", "wrong-type"])(
+    "falls back to IMDb when the TMDB identity is %s",
+    async (reason) => {
+      const original = record();
+      const claims = original.claims.filter((claim) => claim.namespace !== "tmdb:movie");
+      if (reason !== "missing")
+        claims.push({
+          ...original.claims[1]!,
+          value: reason === "invalid" ? "invalid" : "20526",
+          state: reason === "ambiguous" ? "ambiguous" : "exact",
+          namespace: reason === "wrong-type" ? "tmdb:tv" : "tmdb:movie",
+        });
+      const requests: Array<Request> = [];
+      const test = fixture({
+        fetch: async (input, init) => {
+          const request = new Request(input, init);
+          requests.push(request);
+          return request.url.includes("themoviedb")
+            ? Response.json({ movie_results: [], tv_results: [] })
+            : new Response(null, { status: 404 });
+        },
+      });
+      await test.run(
+        Effect.gen(function* () {
+          yield* (yield* MetadataProviders).refresh({ ...original, claims });
+        }),
+      );
+      expect(new URL(requests[0]!.url).pathname).toBe("/3/find/tt1104001");
+      expect(test.writes[0]?.identityNamespace).toBe("imdb:title");
+    },
+  );
+
   it.each(["Movie", "Series"])(
     "loads TMDB artwork using a typed %s ID when IMDb is absent",
     async (itemType) => {
@@ -250,7 +323,7 @@ describe("MetadataProviders", () => {
     };
     const test = fixture({ fetch, providerSettings: settings(["trakt", "tmdb"]) });
 
-    const original = record();
+    const original = imdbRecord();
     const enriched = await test.run(
       Effect.gen(function* () {
         return yield* (yield* MetadataProviders).refresh(original);
@@ -290,7 +363,7 @@ describe("MetadataProviders", () => {
           : new Response(null, { status: 404 });
       },
     });
-    const original = record();
+    const original = imdbRecord();
 
     const before = await test.run(
       Effect.gen(function* () {
@@ -334,7 +407,7 @@ describe("MetadataProviders", () => {
       },
       maxResponseBytes: 80,
     });
-    const original = record();
+    const original = imdbRecord();
 
     const fallback = await test.run(
       Effect.gen(function* () {
@@ -375,7 +448,7 @@ describe("MetadataProviders", () => {
 
     await test.run(
       Effect.gen(function* () {
-        yield* (yield* MetadataProviders).refresh(record());
+        yield* (yield* MetadataProviders).refresh(imdbRecord());
       }),
     );
     expect(test.settings[0]).toMatchObject({
@@ -397,7 +470,7 @@ describe("MetadataProviders", () => {
         return Response.json({ title: "Wrong", ids: { imdb: "slug-like" } });
       },
     });
-    const original = record();
+    const original = imdbRecord();
     const malformed: CatalogItemRecord = {
       ...original,
       claims: original.claims.map((claim) =>
@@ -429,7 +502,7 @@ describe("MetadataProviders", () => {
 
     const result = await test.run(
       Effect.gen(function* () {
-        return yield* (yield* MetadataProviders).refresh(record());
+        return yield* (yield* MetadataProviders).refresh(imdbRecord());
       }),
     );
     expect(result.canonical.displayMetadata).toMatchObject({ Name: "Upstream title" });
@@ -456,7 +529,7 @@ describe("MetadataProviders", () => {
       fetch: ((input: RequestInfo | URL) => fetchTmdb(new Request(input))) as typeof fetch,
       deadlineMs: 5,
     });
-    const original = record();
+    const original = imdbRecord();
 
     const fallback = await test.run(
       Effect.gen(function* () {
@@ -499,7 +572,7 @@ describe("MetadataProviders", () => {
 
     const fallback = await test.run(
       Effect.gen(function* () {
-        return yield* (yield* MetadataProviders).refresh(record());
+        return yield* (yield* MetadataProviders).refresh(imdbRecord());
       }),
     );
     expect(fallback.canonical.displayMetadata).toMatchObject({ Name: "Upstream title" });
@@ -533,7 +606,7 @@ describe("MetadataProviders", () => {
               tv_results: [],
             }),
     });
-    const original = record();
+    const original = imdbRecord();
     await test.run(
       Effect.gen(function* () {
         yield* (yield* MetadataProviders).refresh(original);
@@ -581,7 +654,7 @@ describe("MetadataProviders", () => {
 
     const image = await test.run(
       Effect.gen(function* () {
-        return yield* (yield* MetadataProviders).resolveCachedImage(record(), "Primary");
+        return yield* (yield* MetadataProviders).resolveCachedImage(imdbRecord(), "Primary");
       }),
     );
     expect(image).toBeNull();
@@ -594,7 +667,7 @@ describe("MetadataProviders", () => {
       providerSettings: configured,
       fetch: async () => Effect.die("unused") as never,
     });
-    const original = record();
+    const original = imdbRecord();
     const injected: CatalogItemRecord = {
       ...original,
       canonical: {
@@ -631,7 +704,7 @@ describe("MetadataProviders", () => {
     await test.run(
       Effect.gen(function* () {
         const providers = yield* MetadataProviders;
-        yield* providers.refresh(record("Series"));
+        yield* providers.refresh(imdbRecord("Series"));
       }),
     );
     expect(urls).toEqual([

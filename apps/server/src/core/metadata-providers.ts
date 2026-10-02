@@ -366,20 +366,24 @@ export const makeMetadataProvidersLayer = (
       const identity = (record: CatalogItemRecord, providerId: ProviderId) => {
         if (record.canonical.itemType !== "Movie" && record.canonical.itemType !== "Series")
           return null;
-        const claim = record.claims.find(
+        if (providerId === "tmdb") {
+          const namespace = record.canonical.itemType === "Movie" ? "tmdb:movie" : "tmdb:tv";
+          const tmdb = record.claims.find(
+            (claim) => claim.namespace === namespace && claim.state === "exact",
+          );
+          if (
+            tmdb !== undefined &&
+            /^[1-9]\d*$/.test(tmdb.value) &&
+            Number.isSafeInteger(Number(tmdb.value))
+          ) {
+            return { namespace, value: tmdb.value };
+          }
+        }
+        const imdb = record.claims.find(
           ({ namespace, state }) => namespace === "imdb:title" && state === "exact",
         );
-        if (claim !== undefined && /^tt\d+$/.test(claim.value))
-          return { namespace: claim.namespace, value: claim.value };
-        if (providerId !== "tmdb") return null;
-        const namespace = record.canonical.itemType === "Movie" ? "tmdb:movie" : "tmdb:tv";
-        const tmdb = record.claims.find(
-          (claim) => claim.namespace === namespace && claim.state === "exact",
-        );
-        return tmdb !== undefined &&
-          /^[1-9]\d*$/.test(tmdb.value) &&
-          Number.isSafeInteger(Number(tmdb.value))
-          ? { namespace, value: tmdb.value }
+        return imdb !== undefined && /^tt\d+$/.test(imdb.value)
+          ? { namespace: imdb.namespace, value: imdb.value }
           : null;
       };
 
