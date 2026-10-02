@@ -146,16 +146,23 @@ describe("Drivemby compatible routes", () => {
       PrimaryImageAspectRatio?: number;
     };
     expect(user.PrimaryImageTag).toEqual(expect.any(String));
-    expect(user.PrimaryImageTag).not.toBe("");
+    expect(user.PrimaryImageTag).toBe("ohmyemby-logo-png-v1");
     expect(user.PrimaryImageAspectRatio).toBe(1);
     const avatar = await send(
       app,
       get(`/emby/Users/owner/Images/Primary?tag=${user.PrimaryImageTag}`),
     );
     expect(avatar.status).toBe(200);
-    expect(avatar.headers.get("content-type")).toBe("image/svg+xml");
-    await expect(avatar.text()).resolves.toBe(
-      (await Bun.file(new URL("../../../assets/brand/logo.svg", import.meta.url)).text()).trim(),
+    expect(avatar.headers.get("content-type")).toBe("image/png");
+    const bytes = new Uint8Array(await avatar.arrayBuffer());
+    expect(Array.from(bytes.slice(0, 8))).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
+    const dimensions = new DataView(bytes.buffer);
+    expect(dimensions.getUint32(16)).toBe(512);
+    expect(dimensions.getUint32(20)).toBe(512);
+    expect(bytes).toEqual(
+      new Uint8Array(
+        await Bun.file(new URL("../../../assets/brand/logo.png", import.meta.url)).arrayBuffer(),
+      ),
     );
   });
 
@@ -290,7 +297,7 @@ describe("Drivemby compatible routes", () => {
     });
 
     const avatar = await send(app, get("/Users/owner/Images/Primary"));
-    expect(avatar.headers.get("content-type")).toBe("image/svg+xml");
+    expect(avatar.headers.get("content-type")).toBe("image/png");
     expect((await avatar.arrayBuffer()).byteLength).toBeGreaterThan(0);
     const head = await send(
       app,
@@ -300,7 +307,8 @@ describe("Drivemby compatible routes", () => {
       }),
     );
     expect(head.status).toBe(200);
-    expect(head.headers.get("content-type")).toBe("image/svg+xml");
+    expect(head.headers.get("content-type")).toBe("image/png");
+    expect(head.headers.get("content-length")).toBe(avatar.headers.get("content-length"));
     expect((await head.arrayBuffer()).byteLength).toBe(0);
     expect((await send(app, get("/Users/owner/Images/Backdrop"))).status).toBe(404);
     expect((await send(app, get("/Users/other/Images/Primary"))).status).toBe(403);
