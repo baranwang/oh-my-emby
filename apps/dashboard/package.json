@@ -19,7 +19,7 @@
     "@tanstack/react-router": "^1.170.38",
     "class-variance-authority": "^0.7.1",
     "cn": "^0.3.0",
-    "effect": "4.0.0-rc.112",
+    "effect": "4.0.0",
     "lucide-react": "^1.47.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",

@@ -13,12 +13,12 @@
     "test:workers": "vitest run --config vitest.config.workers.ts"
   },
   "dependencies": {
-    "@effect/platform-bun": "4.0.0-rc.112",
-    "@effect/sql-d1": "4.0.0-rc.112",
-    "@effect/sql-sqlite-bun": "4.0.0-rc.112",
+    "@effect/platform-bun": "4.0.0",
+    "@effect/sql-d1": "4.0.0",
+    "@effect/sql-sqlite-bun": "4.0.0",
     "@logtape/logtape": "2.3.6",
     "@oh-my-emby/contracts": "workspace:*",
-    "effect": "4.0.0-rc.112"
+    "effect": "4.0.0"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "0.22.0",

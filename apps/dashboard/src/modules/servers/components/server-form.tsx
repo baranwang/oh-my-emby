@@ -182,6 +182,12 @@ export const ServerForm = ({
     }
   };
 
+  const connectionStatusLabel = () => {
+    if (connectionState === "pending") return m.server_testing_connection();
+    if (connectionState === "success") return m.server_test_reachable();
+    return m.server_test_failed();
+  };
+
   const footer = (
     <>
       {(formError || validationError) && (
@@ -509,15 +515,16 @@ export const ServerForm = ({
                 );
               }}
             />
-            {field.state.meta.errors.length > 0 ? (
+            {field.state.meta.errors.length > 0 && (
               <p id={`${field.name}-error`} className="text-destructive text-sm">
                 {m.server_password_required()}
               </p>
-            ) : server?.hasPassword ? (
+            )}
+            {field.state.meta.errors.length === 0 && server?.hasPassword && (
               <p id={`${field.name}-hint`} className="text-muted-foreground text-sm">
                 {m.server_password_configured()}
               </p>
-            ) : null}
+            )}
             {server?.hasPassword && (
               <div className="flex flex-wrap gap-2">
                 {!confirmingClear && field.state.value._tag !== "Clear" && (
@@ -652,11 +659,7 @@ export const ServerForm = ({
                 : "text-muted-foreground text-sm"
             }
           >
-            {connectionState === "pending"
-              ? m.server_testing_connection()
-              : connectionState === "success"
-                ? m.server_test_reachable()
-                : m.server_test_failed()}
+            {connectionStatusLabel()}
           </p>
           {connectionResult && (
             <div className="space-y-2">

@@ -16,12 +16,17 @@ import { m } from "@/paraglide/messages.js";
 
 const STALE_HEALTH_MS = 60_000;
 
-const healthLabel = (health: ServerHealthView["health"]) =>
-  health === "healthy"
-    ? m.status_healthy()
-    : health === "degraded"
-      ? m.status_degraded()
-      : m.status_unknown();
+const healthLabel = (health: ServerHealthView["health"]) => {
+  if (health === "healthy") return m.status_healthy();
+  if (health === "degraded") return m.status_degraded();
+  return m.status_unknown();
+};
+
+const freshnessLabel = (lastSuccessAtMs: number | null, nowMs: number) => {
+  if (lastSuccessAtMs === null) return m.health_missing();
+  if (nowMs - lastSuccessAtMs > STALE_HEALTH_MS) return m.health_stale();
+  return m.health_current();
+};
 
 const isNotFound = (error: unknown) =>
   typeof error === "object" && error !== null && "_tag" in error && error._tag === "NotFound";
@@ -44,12 +49,7 @@ export const ServerHealthStatus = ({
     return () => window.clearTimeout(timeoutId);
   }, [health.lastSuccessAtMs, nowMs]);
 
-  const freshness =
-    health.lastSuccessAtMs === null
-      ? m.health_missing()
-      : effectiveNowMs - health.lastSuccessAtMs > STALE_HEALTH_MS
-        ? m.health_stale()
-        : m.health_current();
+  const freshness = freshnessLabel(health.lastSuccessAtMs, effectiveNowMs);
 
   return (
     <div className="space-y-2 rounded-lg border p-4">
@@ -143,23 +143,53 @@ export const ServerDetailPage = ({
     );
   }
 
-  return (
-    <div className="space-y-8">
-      <p className="text-muted-foreground text-sm">
-        {m.server_catalog()}: {server.data.verifiedCatalogId ?? m.server_catalog_unverified()}
-      </p>
-      {health.isPending ? (
-        <Skeleton aria-label={m.server_health_loading()} className="h-28 w-full" />
-      ) : health.isError || !health.data ? (
+  const renderHealth = () => {
+    if (health.isPending) {
+      return <Skeleton aria-label={m.server_health_loading()} className="h-28 w-full" />;
+    }
+    if (health.isError || !health.data) {
+      return (
         <div role="alert" className="border-destructive/40 space-y-2 rounded-lg border p-4">
           <p className="text-destructive text-sm">{m.server_health_failed()}</p>
           <Button variant="outline" onClick={() => void health.refetch()}>
             {m.retry()}
           </Button>
         </div>
-      ) : (
-        <ServerHealthStatus health={health.data} />
-      )}
+      );
+    }
+    return <ServerHealthStatus health={health.data} />;
+  };
+
+  const renderSourceLibraries = () => {
+    if (!eligible) {
+      return (
+        <p className="text-muted-foreground rounded-lg border p-4 text-sm">
+          {m.source_libraries_unavailable()}
+        </p>
+      );
+    }
+    if (sources.isPending) {
+      return <Skeleton aria-label={m.source_libraries_loading()} className="h-24 w-full" />;
+    }
+    if (sources.isError) {
+      return (
+        <div role="alert" className="border-destructive/40 space-y-2 rounded-lg border p-4">
+          <p className="text-destructive text-sm">{m.source_libraries_failed()}</p>
+          <Button variant="outline" onClick={() => void sources.refetch()}>
+            {m.retry()}
+          </Button>
+        </div>
+      );
+    }
+    return <SourceLibraries sources={sources.data ?? []} />;
+  };
+
+  return (
+    <div className="space-y-8">
+      <p className="text-muted-foreground text-sm">
+        {m.server_catalog()}: {server.data.verifiedCatalogId ?? m.server_catalog_unverified()}
+      </p>
+      {renderHealth()}
       <ServerForm
         server={server.data}
         {...(footerContainer ? { footerContainer } : {})}
@@ -170,22 +200,7 @@ export const ServerDetailPage = ({
         }}
         onTestConnection={() => connection.mutateAsync()}
       />
-      {!eligible ? (
-        <p className="text-muted-foreground rounded-lg border p-4 text-sm">
-          {m.source_libraries_unavailable()}
-        </p>
-      ) : sources.isPending ? (
-        <Skeleton aria-label={m.source_libraries_loading()} className="h-24 w-full" />
-      ) : sources.isError ? (
-        <div role="alert" className="border-destructive/40 space-y-2 rounded-lg border p-4">
-          <p className="text-destructive text-sm">{m.source_libraries_failed()}</p>
-          <Button variant="outline" onClick={() => void sources.refetch()}>
-            {m.retry()}
-          </Button>
-        </div>
-      ) : (
-        <SourceLibraries sources={sources.data ?? []} />
-      )}
+      {renderSourceLibraries()}
       <section className="border-t pt-6">
         <Button
           variant="destructive"

@@ -458,12 +458,9 @@ const parseItem = (value: unknown): Record<string, JsonValue> => {
 const exactClaim = (
   record: CatalogItemRecord,
 ): { namespace: ProviderNamespace; value: string } | null => {
-  const priority =
-    record.canonical.itemType === "Movie"
-      ? ["tmdb:movie", "imdb:title"]
-      : record.canonical.itemType === "Series"
-        ? ["tmdb:tv", "imdb:title"]
-        : ["imdb:title"];
+  let priority = ["imdb:title"];
+  if (record.canonical.itemType === "Movie") priority = ["tmdb:movie", "imdb:title"];
+  else if (record.canonical.itemType === "Series") priority = ["tmdb:tv", "imdb:title"];
   for (const namespace of priority) {
     const claim = record.claims.find(
       (entry) => entry.namespace === namespace && entry.state === "exact",
@@ -481,11 +478,13 @@ const matchesClaim = (
   claim: { namespace: ProviderNamespace; value: string },
 ) => {
   const ids = providerIds(item);
-  return claim.namespace === "tmdb:movie"
-    ? ids.tmdbMovie === claim.value && item.Type === "Movie"
-    : claim.namespace === "tmdb:tv"
-      ? ids.tmdbTv === claim.value && item.Type === "Series"
-      : ids.imdbTitle === claim.value;
+  if (claim.namespace === "tmdb:movie") {
+    return ids.tmdbMovie === claim.value && item.Type === "Movie";
+  }
+  if (claim.namespace === "tmdb:tv") {
+    return ids.tmdbTv === claim.value && item.Type === "Series";
+  }
+  return ids.imdbTitle === claim.value;
 };
 
 const view = (
@@ -1225,17 +1224,16 @@ export const makeFederationLayer = (
                         ? ("transient" as const)
                         : ("invalid" as const);
                     }
-                    return refreshed.success.includes("transient")
-                      ? ("transient" as const)
-                      : refreshed.success.includes("found") &&
-                          (refreshed.success.includes("invalid") ||
-                            refreshed.success.includes("missing"))
-                        ? ("partial" as const)
-                        : refreshed.success.includes("invalid")
-                          ? ("invalid" as const)
-                          : refreshed.success.includes("found")
-                            ? ("found" as const)
-                            : ("missing" as const);
+                    if (refreshed.success.includes("transient")) return "transient" as const;
+                    if (
+                      refreshed.success.includes("found") &&
+                      (refreshed.success.includes("invalid") ||
+                        refreshed.success.includes("missing"))
+                    )
+                      return "partial" as const;
+                    if (refreshed.success.includes("invalid")) return "invalid" as const;
+                    if (refreshed.success.includes("found")) return "found" as const;
+                    return "missing" as const;
                   });
                 if (cachedResult === false) {
                   const refreshed = yield* refreshKnownItems();
@@ -1380,12 +1378,12 @@ export const makeFederationLayer = (
             }
             const upstreamSeasonId =
               query.kind === "Episode"
-                ? seasonSources.find(
+                ? (seasonSources.find(
                     (item) =>
                       item.serverId === source.serverId &&
                       item.sourceLibraryId === source.sourceLibraryId,
                   )?.upstreamItemId ??
-                  seasonSources.find((item) => item.serverId === source.serverId)?.upstreamItemId
+                  seasonSources.find((item) => item.serverId === source.serverId)?.upstreamItemId)
                 : undefined;
             if (query.seasonId !== undefined && upstreamSeasonId === undefined) continue;
             if (upstreamSeasonId !== undefined) parameters.set("SeasonId", upstreamSeasonId);
@@ -1446,7 +1444,9 @@ export const makeFederationLayer = (
           }
           items.sort(
             (left, right) =>
-              (metadataNumber(left, "ParentIndexNumber") ?? metadataNumber(left, "IndexNumber") ?? 0) -
+              (metadataNumber(left, "ParentIndexNumber") ??
+                metadataNumber(left, "IndexNumber") ??
+                0) -
                 (metadataNumber(right, "ParentIndexNumber") ??
                   metadataNumber(right, "IndexNumber") ??
                   0) ||
