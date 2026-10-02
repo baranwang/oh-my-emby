@@ -524,11 +524,6 @@ const externalImageTags = (metadata: Readonly<Record<string, JsonValue>>) => {
 
 const itemDto = (item: CanonicalItemView, serverId: string): EmbyItemDtoValue => {
   const metadata = object(item.displayMetadata);
-  const providerIds = Object.fromEntries(
-    Object.entries(object(metadata.ProviderIds ?? null)).flatMap(([provider, value]) =>
-      typeof value === "string" && value.trim().length > 0 ? [[provider, value.trim()]] : [],
-    ),
-  );
   const upstreamImageTags = imageTagTypes(metadata);
   const upstreamBackdrops = backdropImageTags(metadata);
   const external = externalImageTags(metadata);
@@ -547,7 +542,6 @@ const itemDto = (item: CanonicalItemView, serverId: string): EmbyItemDtoValue =>
     Id: item.id,
     ServerId: serverId,
     Type: item.itemType,
-    ...(Object.keys(providerIds).length > 0 ? { ProviderIds: providerIds } : {}),
     ...(Object.keys(imageTags).length > 0 ? { ImageTags: imageTags } : {}),
     ...(backdrops.length > 0 ? { BackdropImageTags: backdrops } : {}),
     ...(Array.isArray(metadata.Genres) &&
