@@ -190,21 +190,19 @@ describe("System settings", () => {
     ];
     expect(choices.map((option) => option.textContent)).toEqual([
       "System default",
-      "Simplified Chinese",
-      "Traditional Chinese (Taiwan)",
-      "Traditional Chinese (Hong Kong)",
-      "Simplified Chinese (Singapore)",
-      "Spanish",
+      "简体中文",
+      "繁體中文（台灣）",
+      "繁體中文（中國香港特別行政區）",
+      "简体中文（新加坡）",
+      "español",
       "English",
-      "Arabic",
-      "Japanese",
-      "Korean",
-      "Russian",
-      "French",
+      "العربية",
+      "日本語",
+      "한국어",
+      "русский",
+      "français",
     ]);
-    await act(async () =>
-      choices.find((option) => option.textContent === "Simplified Chinese")!.click(),
-    );
+    await act(async () => choices.find((option) => option.textContent === "简体中文")!.click());
     const logo = document.body.querySelector('[aria-label="Logo language"]') as HTMLElement;
     await act(async () => {
       logo.focus();

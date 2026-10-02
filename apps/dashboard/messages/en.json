@@ -250,16 +250,5 @@
   "metadata_poster_language": "Poster language",
   "metadata_language_system": "System default",
   "metadata_language_metadata": "Follow metadata language",
-  "metadata_language_original": "Original language",
-  "metadata_language_zh_cn": "Simplified Chinese",
-  "metadata_language_zh_tw": "Traditional Chinese (Taiwan)",
-  "metadata_language_zh_hk": "Traditional Chinese (Hong Kong)",
-  "metadata_language_zh_sg": "Simplified Chinese (Singapore)",
-  "metadata_language_es_es": "Spanish",
-  "metadata_language_en_us": "English",
-  "metadata_language_ar_sa": "Arabic",
-  "metadata_language_ja_jp": "Japanese",
-  "metadata_language_ko_kr": "Korean",
-  "metadata_language_ru_ru": "Russian",
-  "metadata_language_fr_fr": "French"
+  "metadata_language_original": "Original language"
 }
