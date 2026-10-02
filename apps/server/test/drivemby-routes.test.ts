@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { makeEmbyHandler, type EmbyServices } from "../src/api/emby.js";
 import { ApplicationServices, routeApplication } from "../src/api/application.js";
 import { InvalidCredentials } from "../src/core/errors.js";
-import type { CanonicalItemView } from "../src/core/federation.js";
+import { FederationUnavailable, type CanonicalItemView } from "../src/core/federation.js";
 import { makeMemoryDrivembyCompat } from "../src/core/drivemby-compat.js";
 
 const principal = {
@@ -78,6 +78,7 @@ const services = (overrides: Partial<EmbyServices> = {}): EmbyServices => ({
       }),
   },
   federation: {
+    counts: () => Effect.succeed({ MovieCount: 0, SeriesCount: 0, EpisodeCount: 0, ItemCount: 0 }),
     list: () => Effect.succeed(emptyPage),
     search: () => Effect.succeed(emptyPage),
     studios: () => Effect.succeed(emptyPage),
@@ -137,6 +138,78 @@ const send = (app: ReturnType<typeof makeEmbyHandler>, request: Request) =>
   Effect.runPromise(app(request));
 
 describe("Drivemby compatible routes", () => {
+  it("advertises the project icon in user profiles and serves it as the primary avatar", async () => {
+    const app = makeEmbyHandler(services());
+    const profile = await send(app, get("/emby/Users/owner"));
+    const user = (await profile.json()) as {
+      PrimaryImageTag?: string;
+      PrimaryImageAspectRatio?: number;
+    };
+    expect(user.PrimaryImageTag).toEqual(expect.any(String));
+    expect(user.PrimaryImageTag).not.toBe("");
+    expect(user.PrimaryImageAspectRatio).toBe(1);
+    const avatar = await send(
+      app,
+      get(`/emby/Users/owner/Images/Primary?tag=${user.PrimaryImageTag}`),
+    );
+    expect(avatar.status).toBe(200);
+    expect(avatar.headers.get("content-type")).toBe("image/svg+xml");
+    await expect(avatar.text()).resolves.toBe(
+      (await Bun.file(new URL("../../../assets/brand/logo.svg", import.meta.url)).text()).trim(),
+    );
+  });
+
+  it.each(["/Items/Counts", "/emby/Items/Counts?UserId=owner"])(
+    "returns whole-server counts from federation instead of the local cache at %s",
+    async (path) => {
+      const agents: Array<string | undefined> = [];
+      const base = services();
+      const app = makeEmbyHandler({
+        ...base,
+        federation: {
+          ...base.federation,
+          counts: (clientUserAgent) => {
+            agents.push(clientUserAgent);
+            return Effect.succeed({
+              MovieCount: 2802,
+              SeriesCount: 4385,
+              EpisodeCount: 147618,
+              ItemCount: 161033,
+            });
+          },
+        },
+      });
+      const response = await send(app, get(path, { ...auth, "user-agent": "Rex-Standard/0.5.0" }));
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual({
+        MovieCount: 2802,
+        SeriesCount: 4385,
+        EpisodeCount: 147618,
+        ItemCount: 161033,
+      });
+      expect(agents).toEqual(["Rex-Standard/0.5.0"]);
+      expect((await send(app, new Request(`https://local.example${path}`))).status).toBe(401);
+      expect((await send(app, get("/Items/Counts?UserId=other-user"))).status).toBe(403);
+      expect(agents).toHaveLength(1);
+    },
+  );
+
+  it("returns unavailable instead of a misleading zero count when federation fails", async () => {
+    const base = services();
+    const app = makeEmbyHandler({
+      ...base,
+      federation: {
+        ...base.federation,
+        counts: () => Effect.fail(new FederationUnavailable({ sourceIds: ["server-1"] })),
+      },
+    });
+    const response = await send(app, get("/Items/Counts"));
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toEqual({
+      error: { code: "Unavailable", message: "Service unavailable" },
+    });
+  });
+
   it("serves public users and item counts without the shadowing routes", async () => {
     const app = makeEmbyHandler(services());
     const pub = await send(app, new Request("https://local.example/Users/Public"));

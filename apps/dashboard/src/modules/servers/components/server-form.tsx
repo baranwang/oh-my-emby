@@ -13,9 +13,17 @@ import { useForm } from "@tanstack/react-form";
 import { Schema } from "effect";
 import { ArrowDownIcon, ArrowUpIcon, PlusIcon, Trash2Icon } from "lucide-react";
 
-import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { ButtonGroup } from "@/components/ui/button-group";
+import {
+  Combobox,
+  ComboboxContent,
+  ComboboxEmpty,
+  ComboboxInput,
+  ComboboxItem,
+  ComboboxList,
+} from "@/components/ui/combobox";
 import {
   Field,
   FieldContent,
@@ -31,6 +39,7 @@ import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Switch } from "@/components/ui/switch";
 import { ServerDiscoveryError } from "@/modules/servers/services/server-service";
+import { ConnectionFailure } from "@/modules/servers/components/connection-failure";
 import { m } from "@/paraglide/messages.js";
 
 type ServerFormProps = {
@@ -53,6 +62,12 @@ type ServerFormValues = {
 
 const serverValidator = Schema.toStandardSchemaV1(ServerInputSchema);
 const preservePassword: SecretPatch = { _tag: "Preserve" };
+const userAgentPresets = [
+  "Infuse-Direct/8.5.6",
+  "Rex-Standard/0.5.0",
+  "SenPlayer/6.2.2",
+  "VidHub/3.0.0",
+];
 const emptyEndpoint = (): ServerEndpointInput => ({
   protocol: "http",
   host: "",
@@ -97,12 +112,13 @@ export const ServerForm = ({
 }: ServerFormProps) => {
   const formId = useId();
   const [formError, setFormError] = useState<string | null>(null);
+  const [formFailureCause, setFormFailureCause] = useState<unknown>(null);
   const [validationError, setValidationError] = useState(false);
   const [connectionState, setConnectionState] = useState<"idle" | "pending" | "success" | "error">(
     "idle",
   );
   const [connectionResult, setConnectionResult] = useState<ConnectionTestView | null>(null);
-  const [connectionDetail, setConnectionDetail] = useState<string | null>(null);
+  const [connectionError, setConnectionError] = useState<unknown>(null);
   const [confirmingClear, setConfirmingClear] = useState(false);
   const formErrorRef = useRef<HTMLDivElement>(null);
   const defaultValues: ServerFormValues = {
@@ -117,7 +133,7 @@ export const ServerForm = ({
     username: server?.username ?? "",
     password: preservePassword,
     userAgentPolicy: server?.userAgentPolicy ?? "client-preferred",
-    userAgent: server?.userAgent ?? m.server_default_user_agent(),
+    userAgent: server ? server.userAgent : m.server_default_user_agent(),
     enabled: server?.enabled ?? true,
   };
   const form = useForm({
@@ -125,11 +141,13 @@ export const ServerForm = ({
     validators: { onSubmit: serverValidator as never },
     onSubmitInvalid: () => {
       setFormError(null);
+      setFormFailureCause(null);
       setValidationError(true);
     },
     onSubmit: async ({ value }) => {
       setValidationError(false);
       setFormError(null);
+      setFormFailureCause(null);
       try {
         const input = await Schema.decodeUnknownPromise(ServerInputSchema)(value);
         await onSave(input);
@@ -140,15 +158,8 @@ export const ServerForm = ({
             error.stage === "connection"
               ? m.server_saved_connection_failed()
               : m.server_saved_libraries_failed();
-          const cause = error.cause;
-          const detail =
-            typeof cause === "object" &&
-            cause !== null &&
-            "detail" in cause &&
-            typeof cause.detail === "string"
-              ? cause.detail
-              : "";
-          setFormError(detail ? `${message} ${detail}` : message);
+          setFormError(message);
+          setFormFailureCause(error.cause);
         } else {
           setFormError(m.server_save_failed());
         }
@@ -164,20 +175,13 @@ export const ServerForm = ({
     if (!onTestConnection) return;
     setConnectionState("pending");
     setConnectionResult(null);
-    setConnectionDetail(null);
+    setConnectionError(null);
     try {
       const result = await onTestConnection();
       setConnectionResult(result);
       setConnectionState(result.reachable ? "success" : "error");
     } catch (error) {
-      setConnectionDetail(
-        typeof error === "object" &&
-          error !== null &&
-          "detail" in error &&
-          typeof error.detail === "string"
-          ? error.detail
-          : null,
-      );
+      setConnectionError(error);
       setConnectionState("error");
     }
   };
@@ -192,7 +196,12 @@ export const ServerForm = ({
     <>
       {(formError || validationError) && (
         <Alert id="server-form-error" ref={formErrorRef} tabIndex={-1} variant="destructive">
-          <AlertDescription>{formError ?? m.server_validation_failed()}</AlertDescription>
+          <AlertTitle>{formError ?? m.server_validation_failed()}</AlertTitle>
+          {formFailureCause !== null && (
+            <AlertDescription>
+              <ConnectionFailure error={formFailureCause} />
+            </AlertDescription>
+          )}
         </Alert>
       )}
       <div className="flex flex-col gap-2 md:flex-row-reverse">
@@ -433,12 +442,6 @@ export const ServerForm = ({
                     <form.Field name={`${prefix}.protocol`}>
                       {(field) => (
                         <Field orientation="horizontal">
-                          <FieldContent>
-                            <FieldLabel htmlFor={field.name}>
-                              <span className="sr-only">{label} </span>
-                              {m.server_endpoint_https()}
-                            </FieldLabel>
-                          </FieldContent>
                           <Switch
                             id={field.name}
                             checked={field.state.value === "https"}
@@ -447,6 +450,12 @@ export const ServerForm = ({
                               field.handleChange(checked ? "https" : "http")
                             }
                           />
+                          <FieldContent>
+                            <FieldLabel htmlFor={field.name}>
+                              <span className="sr-only">{label} </span>
+                              {m.server_endpoint_https()}
+                            </FieldLabel>
+                          </FieldContent>
                         </Field>
                       )}
                     </form.Field>
@@ -609,15 +618,40 @@ export const ServerForm = ({
                 return (
                   <div className="space-y-2">
                     <Label htmlFor={field.name}>{label}</Label>
-                    <Input
-                      id={field.name}
-                      name={field.name}
-                      value={field.state.value ?? ""}
-                      aria-invalid={invalid}
-                      aria-describedby={invalid ? `${field.name}-error` : undefined}
-                      onBlur={field.handleBlur}
-                      onChange={(event) => field.handleChange(event.target.value || null)}
-                    />
+                    <Combobox
+                      key={policy}
+                      items={userAgentPresets}
+                      defaultValue={field.state.value}
+                      inputValue={field.state.value ?? ""}
+                      onValueChange={(value) => field.handleChange(value || null)}
+                      onInputValueChange={(value, details) => {
+                        if (details.reason === "input-change") {
+                          field.handleChange(value || null);
+                        } else {
+                          // Keep free-form values when the combobox restores its selected label.
+                          details.cancel();
+                        }
+                      }}
+                    >
+                      <ComboboxInput
+                        id={field.name}
+                        name={field.name}
+                        placeholder={m.server_user_agent_placeholder()}
+                        aria-invalid={invalid}
+                        aria-describedby={invalid ? `${field.name}-error` : undefined}
+                        onBlur={field.handleBlur}
+                      />
+                      <ComboboxContent>
+                        <ComboboxEmpty>{m.server_user_agent_custom_hint()}</ComboboxEmpty>
+                        <ComboboxList>
+                          {(userAgent: string) => (
+                            <ComboboxItem key={userAgent} value={userAgent}>
+                              {userAgent}
+                            </ComboboxItem>
+                          )}
+                        </ComboboxList>
+                      </ComboboxContent>
+                    </Combobox>
                     {invalid && (
                       <p id={`${field.name}-error`} className="text-destructive text-sm">
                         {m.server_user_agent_required()}
@@ -687,9 +721,7 @@ export const ServerForm = ({
               </ul>
             </div>
           )}
-          {connectionDetail && (
-            <p className="text-destructive text-sm break-words">{connectionDetail}</p>
-          )}
+          {connectionState === "error" && <ConnectionFailure error={connectionError} />}
         </section>
       )}
 

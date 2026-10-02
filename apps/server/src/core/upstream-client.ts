@@ -20,6 +20,7 @@ import {
 import {
   MAX_CONNECTION_DIAGNOSTIC_BYTES,
   MAX_CONTROL_RESPONSE_BYTES,
+  MAX_FANOUT_CONCURRENCY,
   UPSTREAM_DETAIL_DEADLINE_MS,
   UPSTREAM_LIST_DEADLINE_MS,
 } from "./limits.js";
@@ -330,6 +331,36 @@ const transportDiagnostic = (error: unknown): string | undefined => {
     : limitDiagnostic(redactDiagnostic(message));
 };
 
+const responseDiagnostic = (value: string | undefined, response: Response): string | undefined => {
+  if (response.status === 497) return "The plain HTTP request was sent to HTTPS port.";
+  if (value === undefined) return undefined;
+  const isHtml =
+    /(?:text\/html|application\/xhtml\+xml)/i.test(response.headers.get("content-type") ?? "") ||
+    /<!doctype\s+html|<\/?(?:html|head|body|script|style)\b/i.test(value);
+  let text = value;
+  if (isHtml) {
+    const entities: Record<string, string> = {
+      amp: "&",
+      quot: '"',
+      apos: "'",
+      lt: "<",
+      gt: ">",
+      nbsp: " ",
+    };
+    text = text
+      .replace(/<(script|style|noscript)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/gi, " ")
+      .replace(/<!--[\s\S]*?(?:-->|$)/g, " ")
+      .replace(/<[^>]*(?:>|$)/g, " ")
+      .replace(
+        /&(amp|quot|apos|lt|gt|nbsp);/gi,
+        (match, entity: string) => entities[entity.toLowerCase()] ?? match,
+      );
+  }
+  text = redactDiagnostic(text);
+  if (isHtml) text = text.replace(/\s+/g, " ").trim();
+  return text === "" ? undefined : limitDiagnostic(text);
+};
+
 const readBoundedText = (
   response: Response,
   serverId: string,
@@ -403,9 +434,7 @@ const classifyStatus = (
       MAX_CONNECTION_DIAGNOSTIC_BYTES,
       true,
     ).pipe(
-      Effect.map((value) =>
-        value === undefined ? undefined : limitDiagnostic(redactDiagnostic(value)),
-      ),
+      Effect.map((value) => responseDiagnostic(value, response)),
       Effect.orElseSucceed(() => undefined),
     );
     const diagnostic = detail === undefined ? {} : { detail };
@@ -452,6 +481,28 @@ const VirtualFolders = Schema.Array(
     CollectionType: Schema.optional(Schema.String),
   }),
 );
+
+const UserViews = Schema.Struct({
+  Items: Schema.Array(
+    Schema.Struct({
+      Id: Schema.String,
+      Name: Schema.String,
+      CollectionType: Schema.optional(Schema.NullOr(Schema.String)),
+    }),
+  ),
+});
+
+const ContentTypeProbe = Schema.Struct({
+  Items: Schema.Array(Schema.Struct({ Type: Schema.String })),
+});
+
+const collectionMediaType = (
+  collectionType: string | null | undefined,
+): SourceLibrary["mediaType"] | null => {
+  if (collectionType === "movies") return "movies";
+  if (collectionType === "tvshows" || collectionType === "series") return "series";
+  return null;
+};
 
 export const makeUpstreamClientLayer = (
   config: UpstreamClientConfig,
@@ -769,12 +820,13 @@ export const makeUpstreamClientLayer = (
                   return yield* Effect.fail(new UpstreamUnavailable({ serverId: input.serverId }));
                 }
                 let activeServer = server;
+                let activeRequest = input;
                 for (let index = 0; index < endpoints.length; index++) {
                   const endpoint = endpoints[index]!;
                   const fetched = yield* fetchWithRedirects(
                     activeServer,
                     endpoint,
-                    input,
+                    activeRequest,
                     activeServer.accessToken,
                   ).pipe(Effect.result);
                   if (fetched._tag === "Failure") {
@@ -824,14 +876,16 @@ export const makeUpstreamClientLayer = (
                     const refreshed = authentication.success;
                     activeServer = refreshed.server;
                     const refreshedEndpoint = yield* endpointById(refreshed.server, endpoint.id);
-                    const replay =
-                      input.replayPath === undefined
-                        ? input
-                        : { ...input, path: input.replayPath(refreshed.upstreamUserId) };
+                    if (input.replayPath !== undefined) {
+                      activeRequest = {
+                        ...input,
+                        path: input.replayPath(refreshed.upstreamUserId),
+                      };
+                    }
                     const replayed = yield* fetchWithRedirects(
                       refreshed.server,
                       refreshedEndpoint,
-                      replay,
+                      activeRequest,
                       refreshed.server.accessToken,
                     ).pipe(Effect.result);
                     if (replayed._tag === "Failure") {
@@ -970,42 +1024,109 @@ export const makeUpstreamClientLayer = (
         );
 
       const listSourceLibraries: UpstreamClientService["listSourceLibraries"] = (serverId) =>
-        Effect.gen(function* () {
-          const server = yield* getServer(serverId);
-          if (
-            !server.enabled ||
-            server.health !== "healthy" ||
-            eligibleEndpoints(server).length === 0
-          ) {
-            return yield* Effect.fail(new UpstreamUnavailable({ serverId }));
-          }
-          const folders = yield* request(
-            {
-              serverId,
-              generation: server.generation,
-              path: "/Library/VirtualFolders",
-              method: "GET",
-            },
-            VirtualFolders,
-          );
-          return folders.flatMap((folder): ReadonlyArray<SourceLibrary> => {
-            let mediaType: SourceLibrary["mediaType"] | null = null;
-            if (folder.CollectionType === "movies") mediaType = "movies";
-            else if (folder.CollectionType === "tvshows" || folder.CollectionType === "series") {
-              mediaType = "series";
+        deadline(
+          Effect.gen(function* () {
+            const server = yield* getServer(serverId);
+            if (
+              !server.enabled ||
+              server.health !== "healthy" ||
+              eligibleEndpoints(server).length === 0
+            ) {
+              return yield* Effect.fail(new UpstreamUnavailable({ serverId }));
             }
-            return mediaType === null || folder.ItemId.trim() === "" || folder.Name.trim() === ""
-              ? []
-              : [
+            const folders = yield* request(
+              {
+                serverId,
+                generation: server.generation,
+                path: "/Library/VirtualFolders",
+                method: "GET",
+              },
+              VirtualFolders,
+            ).pipe(Effect.result);
+            const source = (
+              id: string,
+              name: string,
+              mediaType: SourceLibrary["mediaType"],
+            ): SourceLibrary => ({
+              id: id as SourceLibrary["id"],
+              serverId: server.id,
+              name,
+              mediaType,
+            });
+            if (folders._tag === "Success") {
+              return folders.success.flatMap((folder): ReadonlyArray<SourceLibrary> => {
+                const mediaType = collectionMediaType(folder.CollectionType);
+                return mediaType === null ||
+                  folder.ItemId.trim() === "" ||
+                  folder.Name.trim() === ""
+                  ? []
+                  : [source(folder.ItemId, folder.Name, mediaType)];
+              });
+            }
+            if (
+              folders.failure._tag !== "UpstreamNotFound" &&
+              !(folders.failure._tag === "UpstreamRejected" && folders.failure.status === 403)
+            )
+              return yield* Effect.fail(folders.failure);
+
+            const userRequest = <A>(path: (userId: string) => string, schema: Schema.Schema<A>) =>
+              Effect.gen(function* () {
+                // Authentication refresh can change the upstream user ID between requests.
+                const current = yield* getServer(serverId);
+                if (current.upstreamUserId === null)
+                  return yield* Effect.fail(new UpstreamInvalidResponse({ serverId }));
+                return yield* request(
                   {
-                    id: folder.ItemId as SourceLibrary["id"],
-                    serverId: server.id,
-                    name: folder.Name,
-                    mediaType,
+                    serverId,
+                    generation: server.generation,
+                    path: path(current.upstreamUserId),
+                    replayPath: path,
+                    method: "GET",
                   },
-                ];
-          });
-        });
+                  schema,
+                );
+              });
+            const views = yield* userRequest(
+              (userId) => `/Users/${encodeURIComponent(userId)}/Views`,
+              UserViews,
+            );
+            const libraries = yield* Effect.forEach(
+              views.Items,
+              (view) =>
+                Effect.gen(function* () {
+                  if (view.Id.trim() === "" || view.Name.trim() === "") return [];
+                  const mediaType = collectionMediaType(view.CollectionType);
+                  if (mediaType !== null) return [source(view.Id, view.Name, mediaType)];
+                  if (view.CollectionType && !["folders", "mixed"].includes(view.CollectionType))
+                    return [];
+                  const inferred: Array<SourceLibrary> = [];
+                  for (const [itemType, type] of [
+                    ["Movie", "movies"],
+                    ["Series", "series"],
+                  ] as const) {
+                    const query = new URLSearchParams({
+                      ParentId: view.Id,
+                      Recursive: "true",
+                      IncludeItemTypes: itemType,
+                      Limit: "1",
+                      EnableTotalRecordCount: "false",
+                    });
+                    const sample = yield* userRequest(
+                      (userId) => `/Users/${encodeURIComponent(userId)}/Items?${query}`,
+                      ContentTypeProbe,
+                    );
+                    if (sample.Items.some((item) => item.Type === itemType))
+                      inferred.push(source(view.Id, view.Name, type));
+                  }
+                  return inferred;
+                }),
+              { concurrency: MAX_FANOUT_CONCURRENCY },
+            );
+            return libraries.flat();
+          }),
+          serverId,
+          config.timeoutMs ?? UPSTREAM_LIST_DEADLINE_MS,
+        );
 
       const resolvePlayback: UpstreamClientService["resolvePlayback"] = (version) =>
         Effect.gen(function* () {

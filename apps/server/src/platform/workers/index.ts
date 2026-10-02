@@ -132,7 +132,7 @@ export const runWorkerRequest = async (
       const services = ApplicationServices.of({
         handleDashboard: () => toDashboardWebResponse(dashboardHandler, request, dashboardRequest),
         handleEmby: makeEmbyHandler({
-          config: { serverId: "oh-my-emby", serverName: "oh-my-emby", version: "0.0.0" },
+          config: { serverId: "oh-my-emby", serverName: "OhMyEmby", version: "0.0.0" },
           now: Date.now,
           auth,
           federation,

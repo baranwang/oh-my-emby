@@ -4,6 +4,7 @@ import type { ConnectionTestView, ServerInput, ServerView } from "@oh-my-emby/co
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ServerForm } from "../src/modules/servers/components/server-form.js";
+import { ServerDiscoveryError } from "../src/modules/servers/services/server-service.js";
 import { m } from "../src/paraglide/messages.js";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
@@ -89,12 +90,12 @@ const change = async (control: HTMLInputElement, value: string | boolean) => {
       return;
     }
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(control, value);
-    control.dispatchEvent(new Event("input", { bubbles: true }));
+    control.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText" }));
     control.dispatchEvent(new Event("change", { bubbles: true }));
   });
 };
 
-const click = async (button: HTMLButtonElement | HTMLInputElement) => {
+const click = async (button: HTMLElement) => {
   await act(async () => {
     button.click();
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -237,6 +238,118 @@ describe("server endpoints", () => {
 });
 
 describe("server User-Agent policy", () => {
+  it.each(["Infuse-Direct/8.5.6", "Rex-Standard/0.5.0", "SenPlayer/6.2.2", "VidHub/3.0.0"])(
+    "offers all four UA presets and saves the selected %s",
+    async (userAgent) => {
+      const onSave = vi.fn<(input: ServerInput) => Promise<void>>().mockResolvedValue(undefined);
+      const container = await render(<ServerForm server={configuredServer} onSave={onSave} />);
+      const input = byLabel(container, m.server_user_agent_fixed_value()) as HTMLInputElement;
+      expect(input.getAttribute("role")).toBe("combobox");
+      expect(input.value).toBe("SenPlayer/1");
+      await act(async () => {
+        input.focus();
+        input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+      });
+      const options = [...document.querySelectorAll<HTMLElement>('[role="option"]')];
+      expect(options.map((option) => option.textContent)).toEqual([
+        "Infuse-Direct/8.5.6",
+        "Rex-Standard/0.5.0",
+        "SenPlayer/6.2.2",
+        "VidHub/3.0.0",
+      ]);
+      await click(options.find((option) => option.textContent === userAgent)!);
+      expect(input.value).toBe(userAgent);
+      await click(byButton(container, m.save()));
+      expect(onSave).toHaveBeenCalledWith(
+        expect.objectContaining({ userAgentPolicy: "fixed", userAgent }),
+      );
+    },
+  );
+
+  it.each(["fixed", "client-preferred"] as const)(
+    "preserves a custom UA through blur and saves it with the %s policy",
+    async (userAgentPolicy) => {
+      const onSave = vi.fn<(input: ServerInput) => Promise<void>>().mockResolvedValue(undefined);
+      const container = await render(
+        <ServerForm server={{ ...configuredServer, userAgentPolicy }} onSave={onSave} />,
+      );
+      const input = byLabel(
+        container,
+        userAgentPolicy === "fixed"
+          ? m.server_user_agent_fixed_value()
+          : m.server_user_agent_fallback_value(),
+      ) as HTMLInputElement;
+      expect(input.getAttribute("role")).toBe("combobox");
+      await act(async () => input.focus());
+      await change(input, "MyCustomPlayer/2.0");
+      await act(async () => input.blur());
+      expect(input.value).toBe("MyCustomPlayer/2.0");
+      await click(byButton(container, m.save()));
+      expect(onSave).toHaveBeenCalledWith(
+        expect.objectContaining({ userAgentPolicy, userAgent: "MyCustomPlayer/2.0" }),
+      );
+    },
+  );
+
+  it("filters UA presets and selects a search result with the keyboard", async () => {
+    const onSave = vi.fn<(input: ServerInput) => Promise<void>>().mockResolvedValue(undefined);
+    const container = await render(<ServerForm server={configuredServer} onSave={onSave} />);
+    const input = byLabel(container, m.server_user_agent_fixed_value()) as HTMLInputElement;
+    expect(input.getAttribute("role")).toBe("combobox");
+    await act(async () => input.focus());
+    await change(input, "rex");
+    expect(
+      [...document.querySelectorAll('[role="option"]')].map((option) => option.textContent),
+    ).toEqual(["Rex-Standard/0.5.0"]);
+    for (const key of ["ArrowDown", "Enter"]) {
+      await act(async () => {
+        input.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+      });
+    }
+    expect(input.value).toBe("Rex-Standard/0.5.0");
+    expect(onSave).not.toHaveBeenCalled();
+    await click(byButton(container, m.save()));
+    expect(onSave).toHaveBeenCalledWith(
+      expect.objectContaining({ userAgent: "Rex-Standard/0.5.0" }),
+    );
+  });
+
+  it("shows the presets when an empty fallback switches back to fixed User-Agent", async () => {
+    const container = await render(<ServerForm server={configuredServer} onSave={vi.fn()} />);
+    await click(byLabel(container, m.server_user_agent_client_preferred()));
+    await change(byLabel(container, m.server_user_agent_fallback_value()) as HTMLInputElement, "");
+    await click(byLabel(container, m.server_user_agent_fixed()));
+    const input = byLabel(container, m.server_user_agent_fixed_value()) as HTMLInputElement;
+    expect(input.value).toBe(m.server_default_user_agent());
+    await act(async () => {
+      input.focus();
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    });
+    expect(
+      [...document.querySelectorAll('[role="option"]')].map((option) => option.textContent),
+    ).toEqual(["Infuse-Direct/8.5.6", "Rex-Standard/0.5.0", "SenPlayer/6.2.2", "VidHub/3.0.0"]);
+  });
+
+  it.each(["passthrough", "client-preferred"] as const)(
+    "preserves an empty saved User-Agent when reopening a %s server",
+    async (userAgentPolicy) => {
+      const onSave = vi.fn<(input: ServerInput) => Promise<void>>().mockResolvedValue(undefined);
+      const savedServer = { ...configuredServer, userAgentPolicy, userAgent: null };
+      const container = await render(<ServerForm server={savedServer} onSave={onSave} />);
+
+      await click(byButton(container, m.save()));
+
+      expect(onSave).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userAgentPolicy,
+          userAgent: null,
+          password: { _tag: "Preserve" },
+        }),
+      );
+      expect(container.querySelector('[role="alert"]')).toBeNull();
+    },
+  );
+
   it("defaults new servers to the first client-preferred choice and submits it unchanged", async () => {
     const onSave = vi.fn<(input: ServerInput) => Promise<void>>().mockResolvedValue(undefined);
     const container = await render(<ServerForm onSave={onSave} />);
@@ -391,6 +504,94 @@ describe("server credentials and failures", () => {
     );
   });
 
+  it.each(["save", "test"])(
+    "explains a 497 failure during %s without displaying an HTML error page",
+    async (action) => {
+      const cause = {
+        _tag: "UpstreamRejected",
+        serverId: configuredServer.id,
+        status: 497,
+        detail:
+          "<!DOCTYPE HTML><html><style>body { color: red; }</style><script>window.__ESA_ERROR_PAGE_INFO = { http_status: 497 };</script></html>",
+      };
+      const onSave = vi
+        .fn()
+        .mockRejectedValue(new ServerDiscoveryError(configuredServer, "connection", cause));
+      const onTestConnection = vi.fn().mockRejectedValue(cause);
+      const container = await render(
+        <ServerForm
+          server={configuredServer}
+          onSave={onSave}
+          onTestConnection={onTestConnection}
+        />,
+      );
+
+      await click(byButton(container, action === "save" ? m.save() : m.server_test_connection()));
+
+      expect(container.textContent).toContain("497");
+      expect(container.textContent).toContain("HTTPS");
+      expect(container.textContent).not.toContain("<!DOCTYPE");
+      expect(container.textContent).not.toContain("window.__ESA_ERROR_PAGE_INFO");
+      if (action === "save") {
+        expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+          "Configuration saved",
+        );
+      }
+    },
+  );
+
+  it.each(["save", "test"])(
+    "keeps long diagnostic details collapsed during %s failures",
+    async (action) => {
+      const cause = {
+        _tag: "UpstreamRejected",
+        serverId: configuredServer.id,
+        status: 403,
+        detail: `blocked by upstream: ${"diagnostic ".repeat(350)}`,
+      };
+      const onSave = vi
+        .fn()
+        .mockRejectedValue(new ServerDiscoveryError(configuredServer, "connection", cause));
+      const onTestConnection = vi.fn().mockRejectedValue(cause);
+      const container = await render(
+        <ServerForm
+          server={configuredServer}
+          onSave={onSave}
+          onTestConnection={onTestConnection}
+        />,
+      );
+
+      await click(byButton(container, action === "save" ? m.save() : m.server_test_connection()));
+
+      const details = container.querySelector("details");
+      expect(details).toBeInstanceOf(HTMLDetailsElement);
+      expect(details?.open).toBe(false);
+      expect(details?.querySelector("summary")?.textContent).toContain("response details");
+      expect(details?.querySelector("pre")?.textContent).toContain("blocked by upstream");
+      expect(details?.parentElement?.textContent).toContain("403");
+    },
+  );
+
+  it.each([
+    [{ _tag: "UpstreamRejected", status: 401 }, /username and password/i],
+    [{ _tag: "UpstreamRejected", status: 404 }, /base path/i],
+    [{ _tag: "UpstreamRejected", status: 502 }, /upstream service/i],
+    [{ _tag: "Timeout" }, /timed out/i],
+    [{ _tag: "UpstreamUnavailable" }, /address, port and network/i],
+  ])("gives actionable guidance for %j", async (cause, guidance) => {
+    const container = await render(
+      <ServerForm
+        server={configuredServer}
+        onSave={vi.fn()}
+        onTestConnection={vi.fn().mockRejectedValue(cause)}
+      />,
+    );
+
+    await click(byButton(container, m.server_test_connection()));
+
+    expect(container.textContent).toMatch(guidance);
+  });
+
   it("renders connection results in configured endpoint order", async () => {
     const onTestConnection = vi.fn<() => Promise<ConnectionTestView>>().mockResolvedValue({
       reachable: true,
@@ -430,6 +631,7 @@ describe("server credentials and failures", () => {
     const rows = [...container.querySelectorAll("[data-connection-result]")];
     expect(status?.textContent).toContain(m.server_test_failed());
     expect(status?.textContent).not.toContain(m.server_test_reachable());
+    expect(container.textContent).toMatch(/address, port, network and credentials/i);
     expect(rows).toHaveLength(2);
     expect(rows[0]?.textContent).toContain("primary.example.com");
     expect(rows[1]?.textContent).toContain("backup.example.com");

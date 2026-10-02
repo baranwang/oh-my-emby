@@ -97,6 +97,13 @@ export interface CatalogMembership {
   readonly version: SourceMediaVersion | null;
 }
 
+export interface FederatedItemCounts {
+  readonly MovieCount: number;
+  readonly SeriesCount: number;
+  readonly EpisodeCount: number;
+  readonly ItemCount?: number;
+}
+
 export class FederationLimitExceeded extends Schema.TaggedError<FederationLimitExceeded>()(
   "FederationLimitExceeded",
   { requestedEnd: Schema.Int, maximum: Schema.Int },
@@ -114,6 +121,9 @@ export type FederationFailure =
   | RepositoryError;
 
 export interface FederationService {
+  readonly counts: (
+    clientUserAgent?: string,
+  ) => Effect.Effect<FederatedItemCounts, FederationFailure>;
   readonly list: (query: FederatedQuery) => Effect.Effect<FederatedPage, FederationFailure>;
   readonly search: (query: SearchQuery) => Effect.Effect<FederatedPage, FederationFailure>;
   readonly studios: (query: FederatedQuery) => Effect.Effect<FederatedPage, FederationFailure>;
@@ -209,6 +219,26 @@ const parsePage = (value: unknown): UpstreamPage => {
         : null,
   };
 };
+
+const parseItemCounts = (value: unknown): FederatedItemCounts => {
+  const counts = toJson(value);
+  if (!jsonObject(counts)) throw new TypeError("upstream counts must be an object");
+  const read = (key: string): number => {
+    const count = counts[key];
+    if (typeof count !== "number" || !Number.isSafeInteger(count) || count < 0) {
+      throw new TypeError(`upstream ${key} must be a non-negative safe integer`);
+    }
+    return count;
+  };
+  return {
+    MovieCount: read("MovieCount"),
+    SeriesCount: read("SeriesCount"),
+    EpisodeCount: read("EpisodeCount"),
+    ...(counts.ItemCount === undefined ? {} : { ItemCount: read("ItemCount") }),
+  };
+};
+
+const supportedItemTypes: ReadonlyArray<string> = ["Movie", "Series", "Season", "Episode"];
 
 const canonicalJson = (value: JsonValue): string =>
   JSON.stringify(value, (_key, entry) => {
@@ -514,7 +544,7 @@ export const makeFederationLayer = (
       const detailDeadlineMs = config.detailDeadlineMs ?? UPSTREAM_DETAIL_DEADLINE_MS;
 
       const requestForUser = <A>(
-        source: EligibleSource,
+        source: Pick<EligibleSource, "serverId" | "serverGeneration">,
         path: string,
         schema: Schema.Schema<A>,
         clientUserAgent?: string,
@@ -540,6 +570,92 @@ export const makeFederationLayer = (
             },
             schema,
           );
+        });
+
+      const counts: FederationService["counts"] = (clientUserAgent) =>
+        Effect.gen(function* () {
+          const enabledServers = () =>
+            repositories
+              .listServers()
+              .pipe(Effect.map((servers) => servers.filter((server) => server.enabled)));
+          const servers = yield* enabledServers();
+          const catalogs = new Map(
+            servers.map((server) => [
+              server.verifiedCatalogId === null
+                ? `server:${server.id}`
+                : `catalog:${server.verifiedCatalogId}`,
+              server,
+            ]),
+          );
+
+          const results = yield* Effect.forEach(
+            [...catalogs.values()],
+            (server) =>
+              deadline(
+                requestForUser(
+                  { serverId: server.id, serverGeneration: server.generation },
+                  "/Items/Counts",
+                  Schema.Unknown,
+                  clientUserAgent,
+                ).pipe(
+                  Effect.flatMap((value) =>
+                    Effect.try({
+                      try: () => parseItemCounts(value),
+                      catch: () => new UpstreamInvalidResponse({ serverId: server.id }),
+                    }),
+                  ),
+                ),
+                server.id,
+                detailDeadlineMs,
+              ).pipe(
+                Effect.mapError(() => new FederationUnavailable({ sourceIds: [server.id] })),
+                Effect.result,
+              ),
+            { concurrency: MAX_FANOUT_CONCURRENCY },
+          );
+          const failedSourceIds = results.flatMap((result) =>
+            Result.isFailure(result) ? result.failure.sourceIds : [],
+          );
+          if (failedSourceIds.length > 0) {
+            return yield* Effect.fail(new FederationUnavailable({ sourceIds: failedSourceIds }));
+          }
+
+          const currentServers = yield* enabledServers();
+          if (
+            currentServers.length !== servers.length ||
+            servers.some(
+              (server) =>
+                !currentServers.some(
+                  (current) =>
+                    current.id === server.id &&
+                    current.generation === server.generation &&
+                    current.verifiedCatalogId === server.verifiedCatalogId,
+                ),
+            )
+          ) {
+            return yield* Effect.fail(
+              new FederationUnavailable({
+                sourceIds: [...new Set([...servers, ...currentServers].map(({ id }) => id))],
+              }),
+            );
+          }
+          const totals = results.flatMap((result) =>
+            Result.isSuccess(result) ? [result.success] : [],
+          );
+          const counts: FederatedItemCounts = {
+            MovieCount: totals.reduce((sum, total) => sum + total.MovieCount, 0),
+            SeriesCount: totals.reduce((sum, total) => sum + total.SeriesCount, 0),
+            EpisodeCount: totals.reduce((sum, total) => sum + total.EpisodeCount, 0),
+            ...(totals.every((total) => total.ItemCount !== undefined)
+              ? { ItemCount: totals.reduce((sum, total) => sum + total.ItemCount!, 0) }
+              : {}),
+          };
+          if (!Object.values(counts).every(Number.isSafeInteger)) {
+            return yield* Effect.fail(
+              new FederationUnavailable({ sourceIds: servers.map(({ id }) => id) }),
+            );
+          }
+          return counts;
         });
 
       const readCatalog = (ids: ReadonlyArray<string>) =>
@@ -613,7 +729,7 @@ export const makeFederationLayer = (
         Effect.gen(function* () {
           const resolved: Array<BufferedItem> = [];
           for (const raw of items) {
-            if (!["Movie", "Series", "Season", "Episode"].includes(raw.Type as string)) continue;
+            if (!supportedItemTypes.includes(raw.Type as string)) continue;
             const result = yield* identity.resolve(candidate(source, raw, observedAtMs));
             if (writeCache) yield* cacheItem(result, projection, raw, observedAtMs);
             const records = yield* repositories.readCatalogItems([result.canonical.id], now());
@@ -654,10 +770,14 @@ export const makeFederationLayer = (
         });
 
       const list = (
-        query: FederatedQuery,
+        requestedQuery: FederatedQuery,
         searchTerm?: string,
       ): Effect.Effect<FederatedPage, FederationFailure> =>
         Effect.gen(function* () {
+          const query = {
+            ...requestedQuery,
+            itemTypes: requestedQuery.itemTypes.filter((type) => supportedItemTypes.includes(type)),
+          };
           const startIndex = Number.isSafeInteger(query.startIndex)
             ? Math.max(0, query.startIndex)
             : 0;
@@ -673,6 +793,9 @@ export const makeFederationLayer = (
               }),
             );
           }
+
+          if (requestedQuery.itemTypes.length > 0 && query.itemTypes.length === 0)
+            return { items: [], totalRecordCount: 0, exhausted: true, incompleteSourceIds: [] };
 
           const libraries = yield* scopedLibraries(query);
           if (libraries.length === 0)
@@ -1465,6 +1588,7 @@ export const makeFederationLayer = (
         });
 
       return Federation.of({
+        counts,
         list: (query) => list(query),
         search: (query) => list(query, query.searchTerm),
         studios,

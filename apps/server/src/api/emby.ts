@@ -11,6 +11,7 @@ import type {
   FederationService,
   SortTerm,
 } from "../core/federation.js";
+import { FederationUnavailable } from "../core/federation.js";
 import type { LibraryServiceApi } from "../core/library-service.js";
 import type { DrivembyCompat, ItemFlags } from "../core/drivemby-compat.js";
 import { decodeHistoryCursor } from "../core/drivemby-compat.js";
@@ -70,7 +71,7 @@ export interface EmbyServices {
     FederationService,
     "list" | "search" | "studios" | "detail" | "lookupMembership"
   > &
-    Partial<Pick<FederationService, "showChildren">>;
+    Partial<Pick<FederationService, "showChildren" | "counts">>;
   readonly compat?: DrivembyCompat;
   readonly userState: Pick<UserStateService, "write" | "recordPlaybackEvent">;
   readonly libraries: Pick<LibraryServiceApi, "list">;
@@ -675,7 +676,7 @@ const playbackEvent = (
 const serverInfo = (services: EmbyServices) => ({
   Id: services.config.serverId,
   ServerName: services.config.serverName,
-  ProductName: "oh-my-emby",
+  ProductName: "OhMyEmby",
   Version: services.config.version,
   OperatingSystem: "Unknown",
   StartupWizardCompleted: true,
@@ -685,6 +686,8 @@ const user = (services: EmbyServices, userId: string) => ({
   Id: userId,
   Name: userId,
   ServerId: services.config.serverId,
+  PrimaryImageTag: "ohmyemby-logo-v1",
+  PrimaryImageAspectRatio: 1,
   HasPassword: true,
   HasConfiguredPassword: true,
   Configuration: {},
@@ -1143,11 +1146,10 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
       });
     }
     if (itemCounts) {
-      return json(
-        services.compat === undefined
-          ? { MovieCount: 0, SeriesCount: 0, EpisodeCount: 0, ItemCount: 0 }
-          : yield* services.compat.counts(),
-      );
+      if (services.federation.counts === undefined) {
+        return yield* Effect.fail(new FederationUnavailable({ sourceIds: [] }));
+      }
+      return json(yield* services.federation.counts(clientUserAgent));
     }
     if (genres) {
       const bounds = pageBounds(url);
