@@ -626,7 +626,7 @@ describe("playback decisions", () => {
     expect(fixture.metadataRefreshes).toBe(0);
   });
 
-  it.each(["Primary", "Backdrop"])(
+  it.each(["Primary", "Backdrop", "Logo"])(
     "fills cold external metadata for the first %s image request",
     async (imageType) => {
       const expected = new URL("https://image.tmdb.org/t/p/w780/poster.jpg");
@@ -642,7 +642,6 @@ describe("playback decisions", () => {
   );
 
   it.each([
-    ["Logo", 0],
     ["Thumb", 0],
     ["Primary", 1],
   ] as const)("does not fetch external artwork for %s index %s", async (imageType, imageIndex) => {

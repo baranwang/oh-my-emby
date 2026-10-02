@@ -706,7 +706,12 @@ export const crossPlatformAcceptance = (name: "workers" | "docker", harness: Acc
         }),
       );
       await expect(app.inspectStorage()).resolves.toEqual({
-        migrationNames: ["initial", "dashboard_alignment", "drivemby_compat"],
+        migrationNames: [
+          "initial",
+          "dashboard_alignment",
+          "drivemby_compat",
+          "metadata_artwork_languages",
+        ],
         enabledEncoding: 1,
       });
     });

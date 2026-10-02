@@ -244,5 +244,22 @@
   "change_password": "更改密码",
   "changing_password": "正在更改密码…",
   "password_change_failed": "无法更改密码。",
-  "password_change_success": "密码已更改。请使用新密码重新登录。"
+  "password_change_success": "密码已更改。请使用新密码重新登录。",
+  "metadata_language_preference": "元数据语言偏好",
+  "metadata_logo_language": "Logo 语言",
+  "metadata_poster_language": "海报语言",
+  "metadata_language_system": "系统默认",
+  "metadata_language_metadata": "跟随元数据语言",
+  "metadata_language_original": "影片原语言",
+  "metadata_language_zh_cn": "简体中文",
+  "metadata_language_zh_tw": "繁体中文（台湾）",
+  "metadata_language_zh_hk": "繁体中文（香港）",
+  "metadata_language_zh_sg": "简体中文（新加坡）",
+  "metadata_language_es_es": "西班牙语",
+  "metadata_language_en_us": "英文",
+  "metadata_language_ar_sa": "阿拉伯语",
+  "metadata_language_ja_jp": "日语",
+  "metadata_language_ko_kr": "韩语",
+  "metadata_language_ru_ru": "俄语",
+  "metadata_language_fr_fr": "法语"
 }

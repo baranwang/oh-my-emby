@@ -31,6 +31,9 @@ import { makeSqliteRepositoriesLayer } from "../src/platform/bun/sqlite-reposito
 
 const publicOrigin = "https://dashboard.example.com";
 const credentials = { username: "owner", password: "valid password" };
+const artworkMigration = await Bun.file(
+  new URL("../migrations/0005_metadata_artwork_languages.sql", import.meta.url),
+).text();
 const migration = await Bun.file(new URL("../migrations/0001_initial.sql", import.meta.url)).text();
 
 const placeholderGroups = Layer.effectContext(
@@ -82,6 +85,7 @@ describe("Dashboard authentication boundary", () => {
     filename = join(directory, "dashboard-auth.sqlite");
     const database = new Database(filename);
     database.exec(migration);
+    database.exec(artworkMigration);
     database.close();
     const repositories = makeSqliteRepositoriesLayer({ filename });
     const auth = makeAuthLayer().pipe(Layer.provide(repositories));

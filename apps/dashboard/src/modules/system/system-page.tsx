@@ -146,7 +146,7 @@ export const SystemPage = () => {
         <h2 id="preferences-title" className="font-heading text-xl font-medium">
           {m.preferences_title()}
         </h2>
-        <Preferences />
+        <Preferences settings={metadata.data} />
       </section>
 
       <Separator />

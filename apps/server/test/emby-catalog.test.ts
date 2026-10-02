@@ -134,6 +134,37 @@ const get = (path: string, token = "token") =>
   });
 
 describe("Emby catalog routes", () => {
+  it("advertises external logos and changes image tags when artwork language settings change", async () => {
+    let revision = 42;
+    const base = services();
+    const app = makeEmbyHandler({
+      ...base,
+      federation: {
+        ...base.federation,
+        detail: () =>
+          Effect.succeed(
+            item("movie-1", "Movie", {
+              displayMetadata: {
+                ImageTags: { Primary: "upstream" },
+                ExternalArtworkRevision: revision,
+                ExternalImages: { Logo: "https://image.tmdb.org/t/p/w500/logo.png" },
+              },
+            }),
+          ),
+      },
+    });
+    const first = await Effect.runPromise(app(get("/Items/movie-1")));
+    expect((await first.json()).ImageTags).toEqual({
+      Primary: "local-art-42",
+      Logo: "external-art-42",
+    });
+    revision = 43;
+    const second = await Effect.runPromise(app(get("/Items/movie-1")));
+    expect((await second.json()).ImageTags).toEqual({
+      Primary: "local-art-43",
+      Logo: "external-art-43",
+    });
+  });
   it.each(["/emby/Users/owner/Items", "/emby/Items", "/emby/Users/owner/Items/Latest"])(
     "accepts Rex requests without ParentId at %s",
     async (path) => {

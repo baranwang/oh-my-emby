@@ -478,11 +478,16 @@ const mediaSourceDto = (
 const streamPath = (canonicalId: string, mediaSourceId: string) =>
   `/Videos/${encodeURIComponent(canonicalId)}/stream?MediaSourceId=${encodeURIComponent(mediaSourceId)}`;
 
+const artworkRevisionTag = (metadata: Readonly<Record<string, JsonValue>>) =>
+  typeof metadata.ExternalArtworkRevision === "number"
+    ? `-art-${metadata.ExternalArtworkRevision}`
+    : "";
+
 const imageTagTypes = (metadata: Readonly<Record<string, JsonValue>>) =>
   Object.fromEntries(
     Object.entries(object(metadata.ImageTags ?? null)).flatMap(([type, tag]) =>
       /^[A-Za-z][A-Za-z0-9_-]{0,31}$/.test(type) && typeof tag === "string" && tag.length > 0
-        ? [[type, "local"]]
+        ? [[type, `local${artworkRevisionTag(metadata)}`]]
         : [],
     ),
   );
@@ -490,7 +495,7 @@ const imageTagTypes = (metadata: Readonly<Record<string, JsonValue>>) =>
 const backdropImageTags = (metadata: Readonly<Record<string, JsonValue>>) =>
   Array.isArray(metadata.BackdropImageTags)
     ? metadata.BackdropImageTags.flatMap((tag) =>
-        typeof tag === "string" && tag.length > 0 ? ["local"] : [],
+        typeof tag === "string" && tag.length > 0 ? [`local${artworkRevisionTag(metadata)}`] : [],
       )
     : [];
 
@@ -498,9 +503,12 @@ const externalImageTags = (metadata: Readonly<Record<string, JsonValue>>) => {
   const images = object(metadata.ExternalImages ?? null);
   return {
     primary: typeof images.Primary === "string" && images.Primary.length > 0,
+    logo: typeof images.Logo === "string" && images.Logo.length > 0,
     backdrops: Array.isArray(images.Backdrop)
       ? images.Backdrop.flatMap((image, index) =>
-          typeof image === "string" && image.length > 0 ? [`external-${index}`] : [],
+          typeof image === "string" && image.length > 0
+            ? [`external-${index}${artworkRevisionTag(metadata)}`]
+            : [],
         )
       : [],
   };
@@ -511,10 +519,15 @@ const itemDto = (item: CanonicalItemView, serverId: string): EmbyItemDtoValue =>
   const upstreamImageTags = imageTagTypes(metadata);
   const upstreamBackdrops = backdropImageTags(metadata);
   const external = externalImageTags(metadata);
-  const imageTags =
-    external.primary && upstreamImageTags.Primary === undefined
-      ? { ...upstreamImageTags, Primary: "external" }
-      : upstreamImageTags;
+  const imageTags = {
+    ...upstreamImageTags,
+    ...(external.primary && upstreamImageTags.Primary === undefined
+      ? { Primary: `external${artworkRevisionTag(metadata)}` }
+      : {}),
+    ...(external.logo && upstreamImageTags.Logo === undefined
+      ? { Logo: `external${artworkRevisionTag(metadata)}` }
+      : {}),
+  };
   const backdrops = upstreamBackdrops.length > 0 ? upstreamBackdrops : external.backdrops;
   return {
     ...pickScalars(metadata, itemScalarFields),

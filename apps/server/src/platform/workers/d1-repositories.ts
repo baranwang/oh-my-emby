@@ -1227,6 +1227,9 @@ const makeRepositories = Effect.gen(function* () {
     readonly enabled: unknown;
     readonly provider_order: unknown;
     readonly language: string | null;
+    readonly logo_language: MetadataProviderSetting["logoLanguage"] | null;
+    readonly poster_language: MetadataProviderSetting["posterLanguage"] | null;
+    readonly system_language: MetadataProviderSetting["systemLanguage"] | null;
     readonly credential: string | null;
     readonly status: unknown;
     readonly updated_at_ms: unknown;
@@ -1237,6 +1240,9 @@ const makeRepositories = Effect.gen(function* () {
     enabled: boolean(row.enabled, "enabled"),
     order: integer(row.provider_order, "provider_order"),
     language: row.language,
+    ...(row.logo_language == null ? {} : { logoLanguage: row.logo_language }),
+    ...(row.poster_language == null ? {} : { posterLanguage: row.poster_language }),
+    ...(row.system_language == null ? {} : { systemLanguage: row.system_language }),
     credential: row.credential,
     status: metadataProviderStatus(row.status),
     updatedAtMs: integer(row.updated_at_ms, "updated_at_ms"),
@@ -1254,7 +1260,7 @@ const makeRepositories = Effect.gen(function* () {
           ('trakt', 0, 1, NULL, NULL, 'unconfigured', 0)
       `);
         const rows = yield* sql.unsafe<MetadataProviderRow>(
-          "SELECT * FROM metadata_provider_settings ORDER BY provider_order",
+          "SELECT m.*, a.logo_language, a.poster_language, a.system_language FROM metadata_provider_settings m LEFT JOIN metadata_artwork_settings a ON a.provider_id = m.provider_id ORDER BY m.provider_order",
         );
         return yield* decode("readMetadataSettings", () => {
           if (rows.length !== 2)
@@ -1273,7 +1279,7 @@ const makeRepositories = Effect.gen(function* () {
       Effect.gen(function* () {
         yield* sql.batch([
           sql.unsafe("DELETE FROM metadata_provider_settings"),
-          ...settings.map((setting) =>
+          ...settings.flatMap((setting) => [
             sql.unsafe(
               `
           INSERT INTO metadata_provider_settings (
@@ -1290,7 +1296,22 @@ const makeRepositories = Effect.gen(function* () {
                 setting.updatedAtMs,
               ],
             ),
-          ),
+            ...(setting.logoLanguage === undefined &&
+            setting.posterLanguage === undefined &&
+            setting.systemLanguage === undefined
+              ? []
+              : [
+                  sql.unsafe(
+                    "INSERT INTO metadata_artwork_settings (provider_id, logo_language, poster_language, system_language) VALUES (?, ?, ?, ?)",
+                    [
+                      setting.id,
+                      setting.logoLanguage ?? "original",
+                      setting.posterLanguage ?? "original",
+                      setting.systemLanguage ?? "en-US",
+                    ],
+                  ),
+                ]),
+          ]),
         ]);
         return settings;
       }),

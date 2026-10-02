@@ -14,6 +14,7 @@ import {
 
 const tables = [
   "external_metadata_cache",
+  "metadata_artwork_settings",
   "metadata_provider_settings",
   "upstream_server_endpoints",
   "playback_watermarks",
@@ -1324,6 +1325,7 @@ it("keeps Wrangler and application migration bookkeeping separate", async () => 
       { version: 1, name: "initial" },
       { version: 2, name: "dashboard_alignment" },
       { version: 4, name: "drivemby_compat" },
+      { version: 5, name: "metadata_artwork_languages" },
     ],
   });
 });

@@ -3,6 +3,7 @@ import { Context, Effect, Layer, Result, Schema } from "effect";
 import { METADATA_FRESH_MS, METADATA_STALE_MS } from "./limits.js";
 import type { ExternalMetadataCacheEntry, JsonValue, MetadataProviderSetting } from "./model.js";
 import { Repositories, type CatalogItemRecord } from "./repositories.js";
+import { artworkLanguage, selectArtworkPath } from "./tmdb-artwork.js";
 
 const PROVIDER_DEADLINE_MS = 5_000;
 const MAX_PROVIDER_RESPONSE_BYTES = 1024 * 1024;
@@ -16,8 +17,10 @@ export interface ExternalMetadataPayload {
   readonly Overview?: string;
   readonly ExternalImages?: {
     readonly Primary?: string;
+    readonly Logo?: string;
     readonly Backdrop?: ReadonlyArray<string>;
   };
+  readonly ExternalArtworkRevision?: number;
 }
 
 export class MetadataProviderFailure extends Schema.TaggedError<MetadataProviderFailure>()(
@@ -71,7 +74,7 @@ const text = (value: unknown): string | undefined => {
 const allowedImage = (
   providerId: ProviderId,
   value: string,
-  tmdbSize?: "w780" | "w1280",
+  tmdbSize?: "w500" | "w780" | "w1280",
 ): string | undefined => {
   let url: URL;
   try {
@@ -92,7 +95,7 @@ const allowedImage = (
     : undefined;
 };
 
-const tmdbImage = (path: unknown, size: "w780" | "w1280"): string | undefined => {
+const tmdbImage = (path: unknown, size: "w500" | "w780" | "w1280"): string | undefined => {
   const value = text(path);
   if (value === undefined || !/^\/[A-Za-z0-9_./-]+$/.test(value)) return undefined;
   return allowedImage("tmdb", `https://image.tmdb.org/t/p/${size}${value}`, size);
@@ -118,14 +121,18 @@ const payload = (
   overview: string | undefined,
   primary: string | undefined,
   backdrops: ReadonlyArray<string>,
+  logo?: string,
+  revision?: number,
 ): ExternalMetadataPayload => ({
   ...(name === undefined ? {} : { Name: name }),
   ...(overview === undefined ? {} : { Overview: overview }),
-  ...(primary === undefined && backdrops.length === 0
+  ...(revision === undefined ? {} : { ExternalArtworkRevision: revision }),
+  ...(primary === undefined && logo === undefined && backdrops.length === 0
     ? {}
     : {
         ExternalImages: {
           ...(primary === undefined ? {} : { Primary: primary }),
+          ...(logo === undefined ? {} : { Logo: logo }),
           ...(backdrops.length === 0 ? {} : { Backdrop: backdrops }),
         },
       }),
@@ -168,6 +175,7 @@ const cachedPayload = (
   if (!object(value)) return null;
   const images = object(value.ExternalImages) ? value.ExternalImages : {};
   const primary = text(images.Primary);
+  const logo = text(images.Logo);
   const backdrops = Array.isArray(images.Backdrop)
     ? images.Backdrop.flatMap((entry) => {
         const candidate = text(entry);
@@ -182,7 +190,11 @@ const cachedPayload = (
     primary === undefined
       ? undefined
       : allowedImage(providerId, primary, providerId === "tmdb" ? "w780" : undefined);
-  return payload(text(value.Name), text(value.Overview), acceptedPrimary, backdrops);
+  const acceptedLogo =
+    logo === undefined || providerId !== "tmdb"
+      ? undefined
+      : allowedImage(providerId, logo, "w500");
+  return payload(text(value.Name), text(value.Overview), acceptedPrimary, backdrops, acceptedLogo);
 };
 
 const mergePayloads = (
@@ -199,6 +211,14 @@ const mergePayloads = (
     first(({ Overview }) => Overview),
     first(({ ExternalImages }) => ExternalImages?.Primary),
     first(({ ExternalImages }) => ExternalImages?.Backdrop) ?? [],
+    first(({ ExternalImages }) => ExternalImages?.Logo),
+    payloads.reduce<number | undefined>(
+      (revision, entry) =>
+        entry.ExternalArtworkRevision === undefined
+          ? revision
+          : Math.max(revision ?? 0, entry.ExternalArtworkRevision),
+      undefined,
+    ),
   );
 };
 
@@ -315,7 +335,9 @@ export const makeMetadataProvidersLayer = (
                 : `https://api.themoviedb.org/3/find/${encodeURIComponent(key.value)}`,
             );
             if (!direct) url.searchParams.set("external_source", "imdb_id");
-            if (setting.language?.trim()) url.searchParams.set("language", setting.language.trim());
+            const metadataLanguage = setting.language?.trim() || setting.systemLanguage || "en-US";
+            if (setting.language?.trim() || setting.systemLanguage)
+              url.searchParams.set("language", metadataLanguage);
             const result = yield* requestJson(
               setting,
               new Request(url, {
@@ -326,7 +348,7 @@ export const makeMetadataProvidersLayer = (
               }),
             );
             if (!result.found) return null;
-            return yield* Effect.try({
+            const base = yield* Effect.try({
               try: () => {
                 if (direct && (!object(result.value) || result.value.id !== Number(key.value))) {
                   throw new TypeError("mismatched TMDB detail identity");
@@ -340,6 +362,86 @@ export const makeMetadataProvidersLayer = (
               },
               catch: () => providerFailure(setting.id, "invalid-response"),
             });
+            if (
+              base === null ||
+              (setting.logoLanguage === undefined && setting.posterLanguage === undefined)
+            )
+              return base;
+            let item = result.value;
+            if (!direct && object(result.value)) {
+              const results = result.value[itemType === "Movie" ? "movie_results" : "tv_results"];
+              item = Array.isArray(results) ? results[0] : null;
+            }
+            if (
+              !object(item) ||
+              typeof item.id !== "number" ||
+              !Number.isSafeInteger(item.id) ||
+              item.id <= 0
+            ) {
+              return yield* Effect.fail(providerFailure(setting.id, "invalid-response"));
+            }
+            const originalLanguage =
+              typeof item.original_language === "string" &&
+              /^[a-z]{2,3}$/.test(item.original_language)
+                ? item.original_language
+                : undefined;
+            const posterLanguage = artworkLanguage(
+              setting.posterLanguage,
+              metadataLanguage,
+              originalLanguage,
+            );
+            const logoLanguage = artworkLanguage(
+              setting.logoLanguage,
+              metadataLanguage,
+              originalLanguage,
+            );
+            const imagesUrl = new URL(
+              `https://api.themoviedb.org/3/${itemType === "Movie" ? "movie" : "tv"}/${item.id}/images`,
+            );
+            imagesUrl.searchParams.set(
+              "include_image_language",
+              [
+                ...new Set(
+                  [posterLanguage, logoLanguage, originalLanguage, "null"].filter(
+                    (language): language is string => language !== undefined,
+                  ),
+                ),
+              ].join(","),
+            );
+            const images = yield* requestJson(
+              setting,
+              new Request(imagesUrl, {
+                headers: {
+                  authorization: `Bearer ${setting.credential}`,
+                  accept: "application/json",
+                },
+              }),
+            );
+            if (!images.found) return base;
+            if (
+              !object(images.value) ||
+              images.value.id !== item.id ||
+              !Array.isArray(images.value.posters) ||
+              !Array.isArray(images.value.logos)
+            ) {
+              return yield* Effect.fail(providerFailure(setting.id, "invalid-response"));
+            }
+            const poster =
+              tmdbImage(
+                selectArtworkPath(images.value.posters, posterLanguage, originalLanguage),
+                "w780",
+              ) ?? base.ExternalImages?.Primary;
+            const logo = tmdbImage(
+              selectArtworkPath(images.value.logos, logoLanguage, originalLanguage),
+              "w500",
+            );
+            return payload(
+              base.Name,
+              base.Overview,
+              poster,
+              base.ExternalImages?.Backdrop ?? [],
+              logo,
+            );
           }
           const kind = itemType === "Movie" ? "movies" : "shows";
           const url = new URL(`https://api.trakt.tv/${kind}/${encodeURIComponent(key.value)}`);
@@ -361,7 +463,12 @@ export const makeMetadataProvidersLayer = (
             try: () => traktPayload(result.value, key.value),
             catch: () => providerFailure(setting.id, "invalid-response"),
           });
-        });
+        }).pipe(
+          Effect.timeout(deadlineMs),
+          Effect.catchTag("TimeoutError", () =>
+            Effect.fail(providerFailure(setting.id, "timeout")),
+          ),
+        );
 
       const identity = (record: CatalogItemRecord, providerId: ProviderId) => {
         if (record.canonical.itemType !== "Movie" && record.canonical.itemType !== "Series")
@@ -436,6 +543,11 @@ export const makeMetadataProvidersLayer = (
           for (const setting of yield* configured()) {
             const key = identity(record, setting.id);
             if (key === null) continue;
+            if (
+              setting.id === "tmdb" &&
+              (setting.logoLanguage !== undefined || setting.posterLanguage !== undefined)
+            )
+              values.push({ ExternalArtworkRevision: setting.updatedAtMs });
             const entry = yield* readCached(setting, key, false);
             const normalized = entry?.found ? cachedPayload(setting.id, entry.payload) : null;
             if (normalized !== null) values.push(normalized);
@@ -466,6 +578,11 @@ export const makeMetadataProvidersLayer = (
           for (const setting of yield* configured()) {
             const key = identity(record, setting.id);
             if (key === null) continue;
+            if (
+              setting.id === "tmdb" &&
+              (setting.logoLanguage !== undefined || setting.posterLanguage !== undefined)
+            )
+              values.push({ ExternalArtworkRevision: setting.updatedAtMs });
             const fresh = yield* readCached(setting, key, true);
             if (fresh !== null) {
               const normalized = fresh.found ? cachedPayload(setting.id, fresh.payload) : null;
@@ -507,23 +624,27 @@ export const makeMetadataProvidersLayer = (
         imageIndex,
       ) =>
         Effect.gen(function* () {
-          if (imageType !== "Primary" && imageType !== "Backdrop") return null;
+          if (imageType !== "Primary" && imageType !== "Backdrop" && imageType !== "Logo")
+            return null;
           if (imageIndex !== undefined && (!Number.isSafeInteger(imageIndex) || imageIndex < 0))
             return null;
           const images = mergePayloads(yield* cachedPayloads(record)).ExternalImages;
           if (!object(images)) return null;
           let selected: string | undefined;
-          if (imageType === "Primary") {
-            if ((imageIndex ?? 0) === 0) selected = text(images.Primary);
+          if (imageType === "Primary" || imageType === "Logo") {
+            if ((imageIndex ?? 0) === 0) selected = text(images[imageType]);
           } else if (Array.isArray(images.Backdrop)) {
             selected = text(images.Backdrop[imageIndex ?? 0]);
           }
           if (selected === undefined) return null;
           const providerId = selected.includes("image.tmdb.org") ? "tmdb" : "trakt";
+          let size: "w500" | "w780" | "w1280" = "w1280";
+          if (imageType === "Primary") size = "w780";
+          if (imageType === "Logo") size = "w500";
           const accepted = allowedImage(
             providerId,
             selected,
-            providerId === "tmdb" ? (imageType === "Primary" ? "w780" : "w1280") : undefined,
+            providerId === "tmdb" ? size : undefined,
           );
           return accepted === undefined ? null : new URL(accepted);
         });

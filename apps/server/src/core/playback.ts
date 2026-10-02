@@ -498,7 +498,8 @@ export const makePlaybackLayer = (
             external === null &&
             (current.canonical.itemType === "Movie" || current.canonical.itemType === "Series") &&
             (input.imageType === "Backdrop" ||
-              (input.imageType === "Primary" && (input.imageIndex ?? 0) === 0))
+              ((input.imageType === "Primary" || input.imageType === "Logo") &&
+                (input.imageIndex ?? 0) === 0))
           ) {
             yield* metadataProviders.refresh(current);
             external = yield* metadataProviders.resolveCachedImage(

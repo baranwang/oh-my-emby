@@ -135,6 +135,145 @@ const fixture = (options: {
 };
 
 describe("MetadataProviders", () => {
+  it.each([
+    ["metadata", "original", "/zh.jpg", "/ja-logo.png"],
+    ["original", "metadata", "/ja.jpg", "/zh-logo.png"],
+    ["en-US", "zh-TW", "/en.jpg", "/zh-logo.png"],
+  ] as const)(
+    "selects poster %s and logo %s languages independently",
+    async (posterLanguage, logoLanguage, poster, logo) => {
+      const configured = settings();
+      configured[0] = {
+        ...configured[0],
+        language: "zh-HK",
+        posterLanguage,
+        logoLanguage,
+        systemLanguage: "en-US",
+      };
+      configured[1] = { ...configured[1], enabled: false };
+      const requests: Array<Request> = [];
+      const test = fixture({
+        providerSettings: configured,
+        fetch: async (input, init) => {
+          const request = new Request(input, init);
+          requests.push(request);
+          return new URL(request.url).pathname.endsWith("/images")
+            ? Response.json({
+                id: 20526,
+                posters: [
+                  { iso_639_1: "en", file_path: "/en.jpg" },
+                  { iso_639_1: "zh", file_path: "/zh.jpg" },
+                  { iso_639_1: "ja", file_path: "/ja.jpg" },
+                  { iso_639_1: null, file_path: "/neutral.jpg" },
+                ],
+                logos: [
+                  { iso_639_1: "zh", file_path: "/zh-logo.png" },
+                  { iso_639_1: "ja", file_path: "/ja-logo.png" },
+                ],
+              })
+            : Response.json({
+                id: 20526,
+                title: "Localized title",
+                original_language: "ja",
+                poster_path: "/default.jpg",
+                backdrop_path: "/backdrop.jpg",
+              });
+        },
+      });
+      await test.run(
+        Effect.gen(function* () {
+          const providers = yield* MetadataProviders;
+          const enriched = yield* providers.refresh(record());
+          expect(enriched.canonical.displayMetadata).toMatchObject({
+            Name: "Localized title",
+            ExternalImages: {
+              Primary: `https://image.tmdb.org/t/p/w780${poster}`,
+              Logo: `https://image.tmdb.org/t/p/w500${logo}`,
+            },
+          });
+          expect((yield* providers.resolveCachedImage(record(), "Logo"))?.href).toBe(
+            `https://image.tmdb.org/t/p/w500${logo}`,
+          );
+          yield* providers.refresh(record());
+        }),
+      );
+      expect(requests).toHaveLength(2);
+      expect(new URL(requests[0]!.url).searchParams.get("language")).toBe("zh-HK");
+      expect(new URL(requests[1]!.url).searchParams.get("include_image_language")).toContain("ja");
+    },
+  );
+
+  it("uses the saved system language and refreshes artwork after preferences change", async () => {
+    const configured = settings();
+    configured[0] = {
+      ...configured[0],
+      language: null,
+      systemLanguage: "zh-CN",
+      posterLanguage: "metadata",
+      logoLanguage: "original",
+    };
+    configured[1] = { ...configured[1], enabled: false };
+    const requests: Array<Request> = [];
+    let now = 10000;
+    const test = fixture({
+      providerSettings: configured,
+      now: () => now,
+      fetch: async (input, init) => {
+        const request = new Request(input, init);
+        requests.push(request);
+        return new URL(request.url).pathname.endsWith("/images")
+          ? Response.json({
+              id: 20526,
+              posters: [
+                { iso_639_1: "zh", file_path: "/zh.jpg" },
+                { iso_639_1: "en", file_path: "/en.jpg" },
+              ],
+              logos: [],
+            })
+          : Response.json({ id: 20526, original_language: "en", title: "Title" });
+      },
+    });
+    await test.run(
+      Effect.gen(function* () {
+        yield* (yield* MetadataProviders).refresh(record());
+      }),
+    );
+    expect(new URL(requests[0]!.url).searchParams.get("language")).toBe("zh-CN");
+    test.settings[0] = { ...test.settings[0], posterLanguage: "original", updatedAtMs: 10001 };
+    now = 10002;
+    const result = await test.run(
+      Effect.gen(function* () {
+        return yield* (yield* MetadataProviders).refresh(record());
+      }),
+    );
+    expect(result.canonical.displayMetadata).toMatchObject({
+      ExternalImages: { Primary: "https://image.tmdb.org/t/p/w780/en.jpg" },
+      ExternalArtworkRevision: 10001,
+    });
+    expect(requests).toHaveLength(4);
+  });
+
+  it("keeps upstream fallback when localized artwork requests fail without caching a partial response", async () => {
+    const configured = settings();
+    configured[0] = { ...configured[0], posterLanguage: "zh-CN", logoLanguage: "original" };
+    configured[1] = { ...configured[1], enabled: false };
+    const test = fixture({
+      providerSettings: configured,
+      fetch: async (input) =>
+        new URL(new Request(input).url).pathname.endsWith("/images")
+          ? new Response(null, { status: 503 })
+          : Response.json({ id: 20526, original_language: "en", title: "New" }),
+    });
+    const result = await test.run(
+      Effect.gen(function* () {
+        return yield* (yield* MetadataProviders).refresh(record());
+      }),
+    );
+    expect(result.canonical.displayMetadata).not.toHaveProperty("ExternalImages");
+    expect(test.writes).toHaveLength(0);
+    expect(test.settings[0].status).toBe("degraded");
+  });
+
   it.each(["Movie", "Series"] as const)(
     "prefers the typed TMDB ID over IMDb for %s",
     async (itemType) => {

@@ -1,54 +1,69 @@
-import type { MetadataProviderSettingsInput, MetadataProviderSettingsView } from "@oh-my-emby/contracts"
-import { ArrowDownIcon, ArrowUpIcon } from "lucide-react"
+import type {
+  MetadataProviderSettingsInput,
+  MetadataProviderSettingsView,
+} from "@oh-my-emby/contracts";
+import { ArrowDownIcon, ArrowUpIcon } from "lucide-react";
 
-import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
-import { ButtonGroup } from "@/components/ui/button-group"
-import { useUpdateMetadataSettings } from "@/modules/system/hooks/use-system"
-import { m } from "@/paraglide/messages.js"
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { ButtonGroup } from "@/components/ui/button-group";
+import { useUpdateMetadataSettings } from "@/modules/system/hooks/use-system";
+import { m } from "@/paraglide/messages.js";
 
-type Provider = MetadataProviderSettingsView["providers"][number]
+type Provider = MetadataProviderSettingsView["providers"][number];
 
-const inputProvider = (provider: Provider, order: number): MetadataProviderSettingsInput["providers"][number] => ({
+const inputProvider = (
+  provider: Provider,
+  order: number,
+): MetadataProviderSettingsInput["providers"][number] => ({
   id: provider.id,
   enabled: provider.enabled,
   order,
   language: provider.language,
-  credential: { _tag: "Preserve" }
-})
+  ...(provider.logoLanguage !== undefined ? { logoLanguage: provider.logoLanguage } : {}),
+  ...(provider.posterLanguage !== undefined ? { posterLanguage: provider.posterLanguage } : {}),
+  ...(provider.systemLanguage !== undefined ? { systemLanguage: provider.systemLanguage } : {}),
+  credential: { _tag: "Preserve" },
+});
 
-const providerName = (id: Provider["id"]) => id === "tmdb" ? "TMDB" : "Trakt"
+const providerName = (id: Provider["id"]) => (id === "tmdb" ? "TMDB" : "Trakt");
 
 export const MetadataProviders = ({
   settings,
-  onEdit
+  onEdit,
 }: {
-  readonly settings: MetadataProviderSettingsView
-  readonly onEdit: (provider: Provider) => void
+  readonly settings: MetadataProviderSettingsView;
+  readonly onEdit: (provider: Provider) => void;
 }) => {
-  const update = useUpdateMetadataSettings()
-  const providers = [...settings.providers].sort((left, right) => left.order - right.order)
+  const update = useUpdateMetadataSettings();
+  const providers = [...settings.providers].sort((left, right) => left.order - right.order);
 
   const move = async (index: number, target: number) => {
-    const next = [...providers]
-    ;[next[index], next[target]] = [next[target]!, next[index]!]
+    const next = [...providers];
+    [next[index], next[target]] = [next[target]!, next[index]!];
     try {
       await update.mutateAsync({
-        providers: [inputProvider(next[0]!, 0), inputProvider(next[1]!, 1)]
-      })
+        providers: [inputProvider(next[0]!, 0), inputProvider(next[1]!, 1)],
+      });
     } catch {
       // Mutation state renders the localized failure below.
     }
-  }
+  };
 
   return (
     <ol className="divide-y">
       {providers.map((provider, index) => (
-        <li key={provider.id} data-provider-row className="flex flex-wrap items-center gap-3 py-4 first:pt-0">
+        <li
+          key={provider.id}
+          data-provider-row
+          className="flex flex-wrap items-center gap-3 py-4 first:pt-0"
+        >
           <div className="min-w-36 flex-1">
             <div className="flex flex-wrap items-center gap-2">
               <h3 className="font-medium">{providerName(provider.id)}</h3>
-              <Badge variant="outline">{provider.hasCredential ? m.metadata_configured() : m.metadata_not_configured()}</Badge>
+              <Badge variant="outline">
+                {provider.hasCredential ? m.metadata_configured() : m.metadata_not_configured()}
+              </Badge>
               <Badge variant="secondary">{provider.enabled ? m.enabled() : m.disabled()}</Badge>
             </div>
           </div>
@@ -88,7 +103,11 @@ export const MetadataProviders = ({
           </div>
         </div>
       </li>
-      {update.isError && <li role="alert" className="py-3 text-sm text-destructive">{m.metadata_save_failed()}</li>}
+      {update.isError && (
+        <li role="alert" className="text-destructive py-3 text-sm">
+          {m.metadata_save_failed()}
+        </li>
+      )}
     </ol>
-  )
-}
+  );
+};
