@@ -235,7 +235,7 @@ const logRequest = (
 };
 
 const number = (value: string | null): number | undefined =>
-  value === null ? undefined : value.trim() === "" ? Number.NaN : Number(value);
+  value === null ? undefined : (value.trim() === "" ? Number.NaN : Number(value));
 
 const booleanQuery = (value: string | null): boolean | undefined => {
   if (value === null || value.trim() === "") return undefined;
@@ -336,7 +336,7 @@ const pathSegment = (value: string): Effect.Effect<string, InvalidEmbyRequest> =
 
 const normalizedPath = (pathname: string): string => {
   let path =
-    pathname === "/emby" ? "/" : pathname.startsWith("/emby/") ? pathname.slice(5) : pathname;
+    pathname === "/emby" ? "/" : (pathname.startsWith("/emby/") ? pathname.slice(5) : pathname);
   if (
     path === "/api/me" ||
     path.startsWith("/api/me/") ||
@@ -1057,16 +1057,20 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
       method === "DELETE" ? path.match(/^\/Users\/([^/]+)\/PlaybackHistory\/([^/]+)$/) : null;
     const history =
       method === "GET" ? path.match(/^\/Users\/([^/]+)\/PlaybackHistory$/) : null;
-    const playbackKind =
-      method === "POST"
-        ? path === "/Sessions/Playing"
-          ? "start"
-          : path === "/Sessions/Playing/Progress"
-            ? "progress"
-            : path === "/Sessions/Playing/Stopped"
-              ? "stop"
-              : null
-        : null;
+    let playbackKind: PlaybackEvent["kind"] | null = null;
+    if (method === "POST") {
+      switch (path) {
+        case "/Sessions/Playing":
+          playbackKind = "start";
+          break;
+        case "/Sessions/Playing/Progress":
+          playbackKind = "progress";
+          break;
+        case "/Sessions/Playing/Stopped":
+          playbackKind = "stop";
+          break;
+      }
+    }
 
     if (
       !system &&
@@ -1246,9 +1250,9 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
       };
       const page = studios
         ? yield* services.federation.studios(input)
-        : decoded.SearchTerm
+        : (decoded.SearchTerm
           ? yield* services.federation.search({ ...input, searchTerm: decoded.SearchTerm })
-          : yield* services.federation.list(input);
+          : yield* services.federation.list(input));
       const hidden = resumeItems && services.compat !== undefined ? yield* services.compat.hiddenIds() : new Set<string>();
       const visible = page.items.filter((item) => !hidden.has(item.id));
       const flags = studios
@@ -1566,14 +1570,19 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
       yield* requireUser(principal, hideFromResume[1]!);
       const canonicalId = yield* pathSegment(hideFromResume[2]!);
       const hideRaw = url.searchParams.get("Hide");
-      const hide =
-        hideRaw === null || hideRaw.trim() === ""
-          ? true
-          : hideRaw.toLowerCase() === "true"
-            ? true
-            : hideRaw.toLowerCase() === "false"
-              ? false
-              : null;
+      let hide: boolean | null = true;
+      if (hideRaw !== null && hideRaw.trim() !== "") {
+        switch (hideRaw.toLowerCase()) {
+          case "true":
+            hide = true;
+            break;
+          case "false":
+            hide = false;
+            break;
+          default:
+            hide = null;
+        }
+      }
       if (hide === null) return yield* Effect.fail(new InvalidEmbyRequest());
       const membership = yield* services.federation.lookupMembership(canonicalId);
       if (membership === null) return yield* Effect.fail(new EmbyNotFound());

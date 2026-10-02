@@ -139,9 +139,9 @@ export const makeOutboxLayer = (
         permanent: details.permanent
       })
       if (!recorded && details.uncertain) return "uncertain" as const
-      return details.permanent ? "permanent-failure" as const : details.uncertain
+      return details.permanent ? "permanent-failure" as const : (details.uncertain
         ? "uncertain" as const
-        : "transient-failure" as const
+        : "transient-failure" as const)
     })
   })
 }))

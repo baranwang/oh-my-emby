@@ -8,6 +8,9 @@
   "categories": {
     "correctness": "error"
   },
+  "rules": {
+    "unicorn/no-nested-ternary": "error"
+  },
   "overrides": [
     {
       "files": [

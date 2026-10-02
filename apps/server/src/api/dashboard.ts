@@ -204,57 +204,55 @@ export const publicFailure = (
       ? error.detail
       : undefined;
   const diagnostic = detail === undefined ? {} : { detail };
-  const body =
-    tag === "AlreadyInitialized"
-      ? { _tag: "Conflict", code: "already_initialized" }
-      : tag === "ForbiddenOrigin"
-        ? { _tag: "ForbiddenOrigin" }
-        : tag === "InvalidCredentials" || tag === "AuthenticationChanged" || tag === "RateLimited"
-          ? { _tag: "Unauthorized" }
-          : tag === "ServerNotFound" || tag === "LibraryNotFound"
-            ? { _tag: "NotFound" }
-            : tag === "InvalidUpstreamUrl" || tag === "LibraryValidationFailed"
-              ? {
-                  _tag: "ValidationFailed",
-                  fieldErrors: [{ field: "configuration", message: "invalid configuration" }],
-                }
-              : tag === "CatalogIdentityMismatch" ||
-                  tag === "CatalogIdentityUnverifiable" ||
-                  tag === "ObsoleteGeneration" ||
-                  tag === "ServerLimitExceeded"
-                ? {
-                    _tag: "Conflict",
-                    code:
-                      tag === "CatalogIdentityMismatch"
-                        ? "catalog_identity_mismatch"
-                        : tag === "CatalogIdentityUnverifiable"
-                          ? "catalog_identity_unverifiable"
-                          : tag === "ObsoleteGeneration"
-                            ? "obsolete_generation"
-                            : "server_limit_exceeded",
-                  }
-                : tag === "UpstreamRejected"
-                  ? {
-                      _tag: "UpstreamRejected",
-                      serverId,
-                      status:
-                        "status" in error && typeof error.status === "number" ? error.status : 502,
-                      ...diagnostic,
-                    }
-                  : tag === "UpstreamNotFound"
-                    ? { _tag: "UpstreamRejected", serverId, status: 404, ...diagnostic }
-                    : tag === "UpstreamTimeout"
-                      ? { _tag: "Timeout" }
-                      : tag === "UpstreamUnavailable" ||
-                          tag === "DestinationRejected" ||
-                          tag === "RedirectLimitExceeded" ||
-                          tag === "RedirectLoop" ||
-                          tag === "HttpsDowngrade" ||
-                          tag === "ResponseTooLarge" ||
-                          tag === "UpstreamInvalidResponse"
-                        ? { _tag: "UpstreamUnavailable", serverId, ...diagnostic }
-                        : { _tag: "Internal", requestId: crypto.randomUUID() };
-  return HttpServerResponse.jsonUnsafe(body, { status: statusFor(tag) });
+  const respond = (body: unknown) => HttpServerResponse.jsonUnsafe(body, { status: statusFor(tag) });
+  switch (tag) {
+    case "AlreadyInitialized":
+      return respond({ _tag: "Conflict", code: "already_initialized" });
+    case "ForbiddenOrigin":
+      return respond({ _tag: "ForbiddenOrigin" });
+    case "InvalidCredentials":
+    case "AuthenticationChanged":
+    case "RateLimited":
+      return respond({ _tag: "Unauthorized" });
+    case "ServerNotFound":
+    case "LibraryNotFound":
+      return respond({ _tag: "NotFound" });
+    case "InvalidUpstreamUrl":
+    case "LibraryValidationFailed":
+      return respond({
+        _tag: "ValidationFailed",
+        fieldErrors: [{ field: "configuration", message: "invalid configuration" }],
+      });
+    case "CatalogIdentityMismatch":
+      return respond({ _tag: "Conflict", code: "catalog_identity_mismatch" });
+    case "CatalogIdentityUnverifiable":
+      return respond({ _tag: "Conflict", code: "catalog_identity_unverifiable" });
+    case "ObsoleteGeneration":
+      return respond({ _tag: "Conflict", code: "obsolete_generation" });
+    case "ServerLimitExceeded":
+      return respond({ _tag: "Conflict", code: "server_limit_exceeded" });
+    case "UpstreamRejected":
+      return respond({
+        _tag: "UpstreamRejected",
+        serverId,
+        status: "status" in error && typeof error.status === "number" ? error.status : 502,
+        ...diagnostic,
+      });
+    case "UpstreamNotFound":
+      return respond({ _tag: "UpstreamRejected", serverId, status: 404, ...diagnostic });
+    case "UpstreamTimeout":
+      return respond({ _tag: "Timeout" });
+    case "UpstreamUnavailable":
+    case "DestinationRejected":
+    case "RedirectLimitExceeded":
+    case "RedirectLoop":
+    case "HttpsDowngrade":
+    case "ResponseTooLarge":
+    case "UpstreamInvalidResponse":
+      return respond({ _tag: "UpstreamUnavailable", serverId, ...diagnostic });
+    default:
+      return respond({ _tag: "Internal", requestId: crypto.randomUUID() });
+  }
 };
 
 const requestMetadata = (request: HttpServerRequest): DashboardRequest => {

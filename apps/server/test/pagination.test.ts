@@ -157,9 +157,9 @@ describe("federated pagination generations", () => {
       const start = Number(new URL(path, "https://local").searchParams.get("StartIndex"))
       return start === 0
         ? { Items: [movie("1", "A"), movie("2", "B")], TotalRecordCount: 6 }
-        : start === 2
+        : (start === 2
           ? { Items: [movie("1", "A"), movie("2", "B")], TotalRecordCount: 4 }
-          : { Items: [], TotalRecordCount: 2 }
+          : { Items: [], TotalRecordCount: 2 })
     })
     await Effect.runPromise(Effect.gen(function*() {
       const federation = yield* Federation

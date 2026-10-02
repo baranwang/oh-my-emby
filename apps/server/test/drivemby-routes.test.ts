@@ -28,7 +28,7 @@ const state = {
 
 const media = (id: string): CanonicalItemView => ({
   id,
-  itemType: id.startsWith("series") ? "Series" : id.startsWith("episode") ? "Episode" : "Movie",
+  itemType: id.startsWith("series") ? "Series" : (id.startsWith("episode") ? "Episode" : "Movie"),
   displayMetadata: {
     Name: id,
     ParentIndexNumber: id === "episode-special" ? 0 : 1,

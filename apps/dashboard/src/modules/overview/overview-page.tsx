@@ -95,7 +95,7 @@ export const OverviewPage = () => {
         {m.add_server()}
       </Button>
     </SetupState>
-  ) : libraryData.length === 0 ? (
+  ) : (libraryData.length === 0 ? (
     <SetupState
       icon={LibraryIcon}
       title={m.overview_setup_library_title()}
@@ -105,7 +105,7 @@ export const OverviewPage = () => {
         {m.add_library()}
       </Button>
     </SetupState>
-  ) : null
+  ) : null)
 
   if (setupState && !hasExceptions) return <OverviewFrame>{setupState}</OverviewFrame>
 
@@ -149,9 +149,9 @@ export const OverviewPage = () => {
                 <p className="mt-1 text-sm text-muted-foreground">{m.overview_server_attention_title()}</p>
               </div>
               <Badge variant="destructive">
-                {server.verifiedCatalogId === null ? m.overview_server_unverified() : server.health === "degraded"
+                {server.verifiedCatalogId === null ? m.overview_server_unverified() : (server.health === "degraded"
                   ? m.status_degraded()
-                  : m.status_unknown()}
+                  : m.status_unknown())}
               </Badge>
               <Button nativeButton={false} render={<Link to="/servers/$id" params={{ id: server.id }} />} variant="outline">
                 {m.servers()}

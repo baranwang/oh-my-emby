@@ -91,7 +91,7 @@ describe("exact canonical identity", () => {
       second,
       decision: second.sourceItem.quarantineReason !== null
         ? "quarantined"
-        : first.canonical.id === second.canonical.id ? "merged" : "separate"
+        : (first.canonical.id === second.canonical.id ? "merged" : "separate")
     }
   }
 

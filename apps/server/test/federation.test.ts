@@ -188,9 +188,9 @@ describe("Federation", () => {
         Items:
           serverId === "server-0"
             ? [item("10", "Alpha"), item("20", "Shared")]
-            : serverId === "server-1"
+            : (serverId === "server-1"
               ? [item("20", "Shared"), item("30", "Zulu")]
-              : [item("40", "Hidden")],
+              : [item("40", "Hidden")]),
         TotalRecordCount: serverId === "server-2" ? 1 : 2,
       }),
     );

@@ -321,7 +321,7 @@ const limitDiagnostic = (value: string): string => {
 
 const transportDiagnostic = (error: unknown): string | undefined => {
   const message =
-    error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
+    error instanceof Error ? error.message : (typeof error === "string" ? error : undefined);
   return message === undefined || message === ""
     ? undefined
     : limitDiagnostic(redactDiagnostic(message));
@@ -873,9 +873,9 @@ export const makeUpstreamClientLayer = (
             durationMs: Date.now() - startedAtMs,
             cacheOutcome: "bypass",
             retryOutcome: trace.retried
-              ? failureCategory === "none"
+              ? (failureCategory === "none"
                 ? "retried"
-                : "failed"
+                : "failed")
               : "none",
             failureCategory,
           });
@@ -990,9 +990,9 @@ export const makeUpstreamClientLayer = (
             const mediaType =
               folder.CollectionType === "movies"
                 ? ("movies" as const)
-                : folder.CollectionType === "tvshows" || folder.CollectionType === "series"
+                : (folder.CollectionType === "tvshows" || folder.CollectionType === "series"
                   ? ("series" as const)
-                  : null;
+                  : null);
             return mediaType === null || folder.ItemId.trim() === "" || folder.Name.trim() === ""
               ? []
               : [

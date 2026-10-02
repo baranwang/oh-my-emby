@@ -30,6 +30,41 @@ export const LibrariesPage = ({ creating = false, selectedId, onAddServer, onCre
   const create = useCreateLibrary()
   const open = creating || selectedId !== undefined
 
+  const renderDrawerContent = () => {
+    if (!creating) {
+      return selectedId ? <LibraryDetailPage id={selectedId} onClose={onClose} /> : null
+    }
+    if (servers.isPending) {
+      return <Skeleton aria-label={m.servers_loading()} className="h-24 w-full" />
+    }
+    if (servers.isError || !servers.data) {
+      return (
+        <div role="alert" className="space-y-2">
+          <p className="text-sm text-destructive">{m.servers_load_failed()}</p>
+          <Button type="button" variant="outline" onClick={() => void servers.refetch()}>{m.retry()}</Button>
+        </div>
+      )
+    }
+    if (servers.data.length === 0) {
+      return (
+        <div className="space-y-3">
+          <p className="text-sm text-muted-foreground">{m.servers_empty()}</p>
+          <Button type="button" onClick={onAddServer}>{m.add_server()}</Button>
+        </div>
+      )
+    }
+    return (
+      <LibraryForm
+        groups={groups}
+        onCancel={onClose}
+        onSave={async (input) => {
+          await create.mutateAsync(input)
+          onClose()
+        }}
+      />
+    )
+  }
+
   return (
     <div className="max-w-5xl space-y-8">
       <header className="flex flex-wrap items-start justify-between gap-4">
@@ -40,7 +75,7 @@ export const LibrariesPage = ({ creating = false, selectedId, onAddServer, onCre
         {!creating && libraries.data?.length !== 0 && <Button onClick={onCreate}>{m.add_library()}</Button>}
       </header>
       <LibraryList
-        state={libraries.isPending ? "pending" : libraries.isError ? "error" : "success"}
+        state={libraries.isPending ? "pending" : (libraries.isError ? "error" : "success")}
         libraries={libraries.data ?? []}
         onRetry={() => void libraries.refetch()}
         onCreate={onCreate}
@@ -53,32 +88,7 @@ export const LibrariesPage = ({ creating = false, selectedId, onAddServer, onCre
           </DrawerHeader>
           <ScrollArea className="min-h-0 flex-1">
             <div className="p-4">
-              {creating ? (
-                servers.isPending ? (
-                  <Skeleton aria-label={m.servers_loading()} className="h-24 w-full" />
-                ) : servers.isError || !servers.data ? (
-                  <div role="alert" className="space-y-2">
-                    <p className="text-sm text-destructive">{m.servers_load_failed()}</p>
-                    <Button type="button" variant="outline" onClick={() => void servers.refetch()}>{m.retry()}</Button>
-                  </div>
-                ) : servers.data.length === 0 ? (
-                  <div className="space-y-3">
-                    <p className="text-sm text-muted-foreground">{m.servers_empty()}</p>
-                    <Button type="button" onClick={onAddServer}>{m.add_server()}</Button>
-                  </div>
-                ) : (
-                  <LibraryForm
-                    groups={groups}
-                    onCancel={onClose}
-                    onSave={async (input) => {
-                      await create.mutateAsync(input)
-                      onClose()
-                    }}
-                  />
-                )
-              ) : selectedId ? (
-                <LibraryDetailPage id={selectedId} onClose={onClose} />
-              ) : null}
+              {renderDrawerContent()}
             </div>
           </ScrollArea>
         </DrawerContent>

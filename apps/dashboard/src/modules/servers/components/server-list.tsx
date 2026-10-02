@@ -25,11 +25,11 @@ type ServerListProps = {
 
 const healthLabel = (health: ServerView["health"]) => health === "healthy"
   ? m.status_healthy()
-  : health === "degraded" ? m.status_degraded() : m.status_unknown()
+  : (health === "degraded" ? m.status_degraded() : m.status_unknown())
 
 const policyLabel = (policy: ServerView["userAgentPolicy"]) => policy === "fixed"
   ? m.server_user_agent_fixed()
-  : policy === "client-preferred" ? m.server_user_agent_client_preferred() : m.server_user_agent_passthrough()
+  : (policy === "client-preferred" ? m.server_user_agent_client_preferred() : m.server_user_agent_passthrough())
 
 export const ServerList = ({ state, servers, onRetry, onCreate }: ServerListProps) => {
   if (state === "pending") {
@@ -59,7 +59,7 @@ export const ServerList = ({ state, servers, onRetry, onCreate }: ServerListProp
               <CardTitle><span className="block truncate">{server.name}</span></CardTitle>
               <CardDescription><span className="block truncate">{server.endpoints[0]?.displayUrl}</span></CardDescription>
               <CardAction>
-                <Badge variant={server.health === "healthy" ? "secondary" : server.health === "degraded" ? "destructive" : "outline"}>
+                <Badge variant={server.health === "healthy" ? "secondary" : (server.health === "degraded" ? "destructive" : "outline")}>
                   {healthLabel(server.health)}
                 </Badge>
               </CardAction>

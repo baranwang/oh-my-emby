@@ -461,9 +461,9 @@ const exactClaim = (
   const priority =
     record.canonical.itemType === "Movie"
       ? ["tmdb:movie", "imdb:title"]
-      : record.canonical.itemType === "Series"
+      : (record.canonical.itemType === "Series"
         ? ["tmdb:tv", "imdb:title"]
-        : ["imdb:title"];
+        : ["imdb:title"]);
   for (const namespace of priority) {
     const claim = record.claims.find(
       (entry) => entry.namespace === namespace && entry.state === "exact",
@@ -483,9 +483,9 @@ const matchesClaim = (
   const ids = providerIds(item);
   return claim.namespace === "tmdb:movie"
     ? ids.tmdbMovie === claim.value && item.Type === "Movie"
-    : claim.namespace === "tmdb:tv"
+    : (claim.namespace === "tmdb:tv"
       ? ids.tmdbTv === claim.value && item.Type === "Series"
-      : ids.imdbTitle === claim.value;
+      : ids.imdbTitle === claim.value);
 };
 
 const view = (
@@ -1225,17 +1225,15 @@ export const makeFederationLayer = (
                         ? ("transient" as const)
                         : ("invalid" as const);
                     }
-                    return refreshed.success.includes("transient")
-                      ? ("transient" as const)
-                      : refreshed.success.includes("found") &&
-                          (refreshed.success.includes("invalid") ||
-                            refreshed.success.includes("missing"))
-                        ? ("partial" as const)
-                        : refreshed.success.includes("invalid")
-                          ? ("invalid" as const)
-                          : refreshed.success.includes("found")
-                            ? ("found" as const)
-                            : ("missing" as const);
+                    if (refreshed.success.includes("transient")) return "transient" as const;
+                    if (
+                      refreshed.success.includes("found") &&
+                      (refreshed.success.includes("invalid") ||
+                        refreshed.success.includes("missing"))
+                    ) return "partial" as const;
+                    if (refreshed.success.includes("invalid")) return "invalid" as const;
+                    if (refreshed.success.includes("found")) return "found" as const;
+                    return "missing" as const;
                   });
                 if (cachedResult === false) {
                   const refreshed = yield* refreshKnownItems();

@@ -83,13 +83,18 @@ export const normalizeExternalClaims = (
   itemType: SourceItemCandidate["itemType"],
   ids: ProviderIds = {}
 ): ReadonlyArray<ExternalClaim> => {
-  const claims = itemType === "Movie"
-    ? [claim("tmdb:movie", ids.tmdbMovie), claim("imdb:title", ids.imdbTitle)]
-    : itemType === "Series"
-      ? [claim("tmdb:tv", ids.tmdbTv), claim("imdb:title", ids.imdbTitle)]
-      : itemType === "Episode"
-        ? [claim("imdb:title", ids.imdbTitle)]
-        : []
+  let claims: ReadonlyArray<ExternalClaim | null> = []
+  switch (itemType) {
+    case "Movie":
+      claims = [claim("tmdb:movie", ids.tmdbMovie), claim("imdb:title", ids.imdbTitle)]
+      break
+    case "Series":
+      claims = [claim("tmdb:tv", ids.tmdbTv), claim("imdb:title", ids.imdbTitle)]
+      break
+    case "Episode":
+      claims = [claim("imdb:title", ids.imdbTitle)]
+      break
+  }
   return claims.filter((value): value is ExternalClaim => value !== null).sort((left, right) =>
     left.namespace.localeCompare(right.namespace)
   )
@@ -173,10 +178,10 @@ const prepare = async (candidate: SourceItemCandidate): Promise<PreparedIdentity
     sourceExclusiveCanonicalId,
     proposedCanonicalId,
     sourceExclusiveReason: parentRequired && candidate.canonicalSeriesId && fallback === null && claims.length === 0
-      ? candidate.numberingConflict || (candidate.combinedEpisodeNumbers?.length ?? 0) > 1
+      ? (candidate.numberingConflict || (candidate.combinedEpisodeNumbers?.length ?? 0) > 1
         ? null
-        : "parent-unresolved"
-      : parentRequired && !candidate.canonicalSeriesId ? "parent-unresolved" : null,
+        : "parent-unresolved")
+      : (parentRequired && !candidate.canonicalSeriesId ? "parent-unresolved" : null),
     mediaVersions,
     observedAtMs
   }

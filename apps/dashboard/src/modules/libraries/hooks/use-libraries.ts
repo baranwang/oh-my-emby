@@ -34,12 +34,18 @@ export const useSourceLibraryGroups = (servers: ReadonlyArray<ServerView>, activ
   return servers.map((server, index) => {
     const query = queries[index]!
     const eligible = server.enabled && server.health === "healthy"
+    let state: "unavailable" | "pending" | "error" | "success" = "success"
+    if (!eligible) {
+      state = "unavailable"
+    } else if (query.isPending) {
+      state = "pending"
+    } else if (query.isError) {
+      state = "error"
+    }
+
     return {
       server,
-      state: !eligible ? "unavailable" as const
-        : query.isPending ? "pending" as const
-        : query.isError ? "error" as const
-        : "success" as const,
+      state,
       sources: query.data ?? [],
       retry: query.refetch
     }

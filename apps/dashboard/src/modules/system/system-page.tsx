@@ -54,14 +54,14 @@ export const SystemPage = () => {
         <h2 id="metadata-providers-title" className="font-heading text-xl font-medium">{m.metadata_providers_title()}</h2>
         {metadata.isPending ? (
           <Skeleton aria-label={m.metadata_loading()} className="h-36" />
-        ) : metadata.isError || !metadata.data ? (
+        ) : (metadata.isError || !metadata.data ? (
           <div role="alert" className="space-y-2">
             <p className="text-sm text-destructive">{m.metadata_load_failed()}</p>
             <Button variant="outline" onClick={() => void metadata.refetch()}>{m.retry()}</Button>
           </div>
         ) : (
           <MetadataProviders settings={metadata.data} onEdit={setProvider} />
-        )}
+        ))}
       </section>
 
       <Separator />
@@ -84,12 +84,12 @@ export const SystemPage = () => {
         <h2 id="runtime-status-title" className="font-heading text-xl font-medium">{m.runtime_status_title()}</h2>
         {status.isPending ? (
           <Skeleton aria-label={m.system_status_loading()} className="h-48" />
-        ) : status.isError || !status.data ? (
+        ) : (status.isError || !status.data ? (
           <div role="alert" className="space-y-2">
             <p className="text-sm text-destructive">{m.system_status_failed()}</p>
             <Button variant="outline" onClick={() => void status.refetch()}>{m.retry()}</Button>
           </div>
-        ) : <SystemStatus status={status.data} />}
+        ) : <SystemStatus status={status.data} />)}
       </section>
 
       <Separator />
@@ -110,12 +110,12 @@ export const SystemPage = () => {
           <div className="pt-3">
             {failures.isPending ? (
               <Skeleton aria-label={m.outbox_failures_loading()} className="h-24" />
-            ) : failures.isError ? (
+            ) : (failures.isError ? (
               <div role="alert" className="space-y-2">
                 <p className="text-sm text-destructive">{m.outbox_failures_load_failed()}</p>
                 <Button variant="outline" onClick={() => void failures.refetch()}>{m.retry()}</Button>
               </div>
-            ) : <OutboxFailures failures={failures.data ?? []} />}
+            ) : <OutboxFailures failures={failures.data ?? []} />)}
           </div>
         </details>
       </section>

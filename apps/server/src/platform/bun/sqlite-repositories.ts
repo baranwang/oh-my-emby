@@ -1791,9 +1791,9 @@ const makeRepositories = Effect.gen(function*() {
         ...canonicalRows.map(({ identity_state }) => identity_state),
         ...(clusterClaims.some(({ namespace, state }) => state === "exact" && providerNamespaces.has(namespace))
           ? ["exact"]
-          : clusterClaims.some(({ namespace, state }) => state === "exact" && namespace.startsWith("fallback:"))
+          : (clusterClaims.some(({ namespace, state }) => state === "exact" && namespace.startsWith("fallback:"))
             ? ["fallback"]
-            : [])
+            : []))
       ].reduce((retained, state) =>
         (stateRank[state as keyof typeof stateRank] ?? -1) > (stateRank[retained as keyof typeof stateRank] ?? -1)
           ? state

@@ -90,7 +90,7 @@ export const makeWorkersResourceCache = (
       if (resource.body.byteLength > MAX_IMAGE_BYTES || !Number.isSafeInteger(expiresAtMs)) throw failure()
       const request = await cacheRequest(key)
       const headers = new Headers(resource.headers.map(([name, value]) => [name, value]))
-      for (const name of [...headers.keys()]) {
+      for (const name of Array.from(headers.keys())) {
         if (!safeHeaders.includes(name as typeof safeHeaders[number])) headers.delete(name)
       }
       headers.set(expiresHeader, String(expiresAtMs))

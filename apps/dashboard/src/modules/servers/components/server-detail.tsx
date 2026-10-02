@@ -19,9 +19,9 @@ const STALE_HEALTH_MS = 60_000;
 const healthLabel = (health: ServerHealthView["health"]) =>
   health === "healthy"
     ? m.status_healthy()
-    : health === "degraded"
+    : (health === "degraded"
       ? m.status_degraded()
-      : m.status_unknown();
+      : m.status_unknown());
 
 const isNotFound = (error: unknown) =>
   typeof error === "object" && error !== null && "_tag" in error && error._tag === "NotFound";
@@ -47,9 +47,9 @@ export const ServerHealthStatus = ({
   const freshness =
     health.lastSuccessAtMs === null
       ? m.health_missing()
-      : effectiveNowMs - health.lastSuccessAtMs > STALE_HEALTH_MS
+      : (effectiveNowMs - health.lastSuccessAtMs > STALE_HEALTH_MS
         ? m.health_stale()
-        : m.health_current();
+        : m.health_current());
 
   return (
     <div className="space-y-2 rounded-lg border p-4">
@@ -143,6 +143,30 @@ export const ServerDetailPage = ({
     );
   }
 
+  const renderSourceLibraries = () => {
+    if (!eligible) {
+      return (
+        <p className="text-muted-foreground rounded-lg border p-4 text-sm">
+          {m.source_libraries_unavailable()}
+        </p>
+      );
+    }
+    if (sources.isPending) {
+      return <Skeleton aria-label={m.source_libraries_loading()} className="h-24 w-full" />;
+    }
+    if (sources.isError) {
+      return (
+        <div role="alert" className="border-destructive/40 space-y-2 rounded-lg border p-4">
+          <p className="text-destructive text-sm">{m.source_libraries_failed()}</p>
+          <Button variant="outline" onClick={() => void sources.refetch()}>
+            {m.retry()}
+          </Button>
+        </div>
+      );
+    }
+    return <SourceLibraries sources={sources.data ?? []} />;
+  };
+
   return (
     <div className="space-y-8">
       <p className="text-muted-foreground text-sm">
@@ -150,7 +174,7 @@ export const ServerDetailPage = ({
       </p>
       {health.isPending ? (
         <Skeleton aria-label={m.server_health_loading()} className="h-28 w-full" />
-      ) : health.isError || !health.data ? (
+      ) : (health.isError || !health.data ? (
         <div role="alert" className="border-destructive/40 space-y-2 rounded-lg border p-4">
           <p className="text-destructive text-sm">{m.server_health_failed()}</p>
           <Button variant="outline" onClick={() => void health.refetch()}>
@@ -159,7 +183,7 @@ export const ServerDetailPage = ({
         </div>
       ) : (
         <ServerHealthStatus health={health.data} />
-      )}
+      ))}
       <ServerForm
         server={server.data}
         {...(footerContainer ? { footerContainer } : {})}
@@ -170,22 +194,7 @@ export const ServerDetailPage = ({
         }}
         onTestConnection={() => connection.mutateAsync()}
       />
-      {!eligible ? (
-        <p className="text-muted-foreground rounded-lg border p-4 text-sm">
-          {m.source_libraries_unavailable()}
-        </p>
-      ) : sources.isPending ? (
-        <Skeleton aria-label={m.source_libraries_loading()} className="h-24 w-full" />
-      ) : sources.isError ? (
-        <div role="alert" className="border-destructive/40 space-y-2 rounded-lg border p-4">
-          <p className="text-destructive text-sm">{m.source_libraries_failed()}</p>
-          <Button variant="outline" onClick={() => void sources.refetch()}>
-            {m.retry()}
-          </Button>
-        </div>
-      ) : (
-        <SourceLibraries sources={sources.data ?? []} />
-      )}
+      {renderSourceLibraries()}
       <section className="border-t pt-6">
         <Button
           variant="destructive"
