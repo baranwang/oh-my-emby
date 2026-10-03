@@ -704,7 +704,15 @@ export const makeMetadataProvidersLayer = (
             if (setting.id === "tmdb" && !setting.language?.trim())
               values.push({ ExternalArtworkLanguage: yield* ClientLanguage });
             let fresh = yield* readCached(setting, key, true);
-            if(setting.id === "tmdb" && record.canonical.itemType === "Movie" && record.sourceItems.length>0 && fresh?.found && object(fresh.payload) && fresh.payload.TmdbCollectionId===undefined) fresh=null;
+            if (
+              setting.id === "tmdb" &&
+              record.canonical.itemType === "Movie" &&
+              record.sourceItems.length > 0 &&
+              fresh?.found &&
+              object(fresh.payload) &&
+              fresh.payload.TmdbCollectionId === undefined
+            )
+              fresh = null;
             if (fresh !== null) {
               const normalized = fresh.found ? cachedPayload(setting.id, fresh.payload) : null;
               if (normalized !== null) {

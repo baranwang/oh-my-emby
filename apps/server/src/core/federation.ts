@@ -1,3 +1,4 @@
+import { providerIds, sourceItemCandidate as candidate } from "./source-item-candidate.js";
 import { Context, Effect, Layer, Result, Schema } from "effect";
 
 import {
@@ -9,13 +10,7 @@ import {
   type IdentityFailure,
   type UpstreamFailure,
 } from "./errors.js";
-import {
-  Identity,
-  stableCanonicalId,
-  type ProviderIds,
-  type ProviderNamespace,
-  type SourceItemCandidate,
-} from "./identity.js";
+import { Identity, stableCanonicalId, type ProviderNamespace } from "./identity.js";
 import {
   DB_BATCH_SIZE,
   MAX_FANOUT_CONCURRENCY,
@@ -322,48 +317,6 @@ const sameParticipation = (
 
 const projectionKey = (query: FederatedQuery): string =>
   `list:${[...new Set(query.fields ?? [])].sort().join(",")}`;
-
-const providerIds = (item: Record<string, JsonValue>): ProviderIds => {
-  const raw = item.ProviderIds;
-  const ids: { readonly [key: string]: JsonValue } =
-    raw !== undefined && jsonObject(raw) ? raw : {};
-  const read = (name: string) => (typeof ids[name] === "string" ? ids[name] : null);
-  return { tmdbMovie: read("Tmdb"), tmdbTv: read("Tmdb"), imdbTitle: read("Imdb") };
-};
-
-const mediaVersions = (item: Record<string, JsonValue>, provider: string) =>
-  Array.isArray(item.MediaSources)
-    ? item.MediaSources.flatMap((entry) => {
-        if (!jsonObject(entry) || typeof entry.Id !== "string") return [];
-        const name = typeof entry.Name === "string" ? entry.Name : entry.Id;
-        return [
-          {
-            upstreamMediaSourceId: entry.Id,
-            label: `[${provider}] ${name}`,
-            capabilities: entry,
-            streams: Array.isArray(entry.MediaStreams) ? entry.MediaStreams : [],
-          },
-        ];
-      })
-    : [];
-
-const candidate = (
-  source: EligibleSource,
-  item: Record<string, JsonValue>,
-  observedAtMs: number,
-): SourceItemCandidate => ({
-  serverId: source.serverId,
-  catalogNamespace: source.catalogNamespace,
-  verifiedCatalogId: source.verifiedCatalogId,
-  serverGeneration: source.serverGeneration,
-  sourceLibraryId: source.sourceLibraryId,
-  upstreamItemId: item.Id as string,
-  itemType: item.Type as SourceItemCandidate["itemType"],
-  providerIds: providerIds(item),
-  displayMetadata: item,
-  mediaVersions: mediaVersions(item, source.name),
-  observedAtMs,
-});
 
 const stateDependent = (query: FederatedQuery) =>
   query.filters.some(

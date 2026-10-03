@@ -42,7 +42,7 @@ export interface TmdbCollectionPayload {
   readonly id: string;
   readonly Name: string;
   readonly Overview?: string;
-  readonly ExternalImages?: ExternalMetadataPayload["ExternalImages"];
+  readonly ExternalImages?: NonNullable<ExternalMetadataPayload["ExternalImages"]>;
   readonly movieIds: ReadonlyArray<string>;
   readonly ExternalArtworkRevision?: number;
   readonly ExternalArtworkLanguage?: string;
