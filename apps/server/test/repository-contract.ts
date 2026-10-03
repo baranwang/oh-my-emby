@@ -218,6 +218,59 @@ export const repositoryContract = (makeHarness: () => Promise<RepositoryHarness>
       );
     });
 
+    it.each(["Movie", "Series", "Season", "Episode"])(
+      "isolates %s source discovery when a mixed library is bound to both media types",
+      async (itemType) => {
+        await harness.seedCanonicalWithEligibleSources({ ...canonicalFixture, itemType });
+        await Effect.runPromise(
+          Effect.gen(function* () {
+            const repo = yield* Repositories;
+            const record = (yield* repo.readCatalogItems([canonicalFixture.id]))[0]!;
+            const source = record.sourceItems[0]!;
+            yield* repo.saveServer(server(source.serverId));
+            const libraries = yield* repo.listVirtualLibraries();
+            const original = libraries[0]!;
+            const matching: "movies" | "series" = itemType === "Movie" ? "movies" : "series";
+            const other = matching === "movies" ? "series" : "movies";
+            const binding = {
+              serverId: source.serverId,
+              sourceLibraryId: source.sourceLibraryId,
+              sourceLibraryName: "Mixed",
+              mediaType: matching,
+              sourceOrder: 0,
+              enabled: true,
+            };
+            const fences = [{ serverId: source.serverId, generation: source.serverGeneration }];
+            yield* repo.saveVirtualLibrary(
+              { ...original, mediaType: matching, sources: [binding] },
+              fences,
+            );
+            yield* repo.saveVirtualLibrary(
+              {
+                ...original,
+                id: "other-library",
+                mediaType: other,
+                sources: [
+                  { ...binding, mediaType: other },
+                  {
+                    ...binding,
+                    sourceLibraryId: "other-category",
+                    mediaType: other,
+                    sourceOrder: 1,
+                  },
+                ],
+              },
+              fences,
+            );
+            const eligible = yield* repo.resolveEligibleSourcesForCanonical(canonicalFixture.id);
+            expect(eligible).toHaveLength(1);
+            expect(eligible[0]!.mediaType).toBe(matching);
+            expect(eligible[0]!.sourceLibraryId).toBe(source.sourceLibraryId);
+          }).pipe(Effect.provide(harness.layer)),
+        );
+      },
+    );
+
     it("returns eligible sources in configured order", async () => {
       await Effect.runPromise(
         Effect.gen(function* () {

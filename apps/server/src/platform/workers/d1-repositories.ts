@@ -3287,6 +3287,10 @@ const makeRepositories = Effect.gen(function* () {
         )
       WHERE item.canonical_id = ?
         AND library.enabled = 1 AND origin.enabled = 1 AND target.enabled = 1
+        AND (
+          (item.item_type = 'Movie' AND library.media_type = 'movies') OR
+          (item.item_type IN ('Series', 'Season', 'Episode') AND library.media_type = 'series')
+        )
         AND server.enabled = 1 AND server.deleted_at_ms IS NULL
         AND server.health = 'healthy'
         AND (server.verified_catalog_id IS NOT NULL OR server.verified_base_url IS NOT NULL)

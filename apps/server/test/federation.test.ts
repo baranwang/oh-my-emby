@@ -124,6 +124,7 @@ describe("Federation", () => {
     sourceCount: number,
     handle: RequestHandler,
     options: {
+      readonly mediaType?: "movies" | "series";
       readonly now?: () => number;
       readonly listDeadlineMs?: number;
       readonly detailDeadlineMs?: number;
@@ -139,7 +140,7 @@ describe("Federation", () => {
           {
             id: "library-1" as any,
             name: "Movies",
-            mediaType: "movies",
+            mediaType: options.mediaType ?? "movies",
             enabled: true,
             createdAtMs: 1_000,
             updatedAtMs: 1_000,
@@ -147,7 +148,7 @@ describe("Federation", () => {
               serverId: `server-${index}` as any,
               sourceLibraryId: `movies-${index}` as any,
               sourceLibraryName: `Movies ${index}`,
-              mediaType: "movies" as const,
+              mediaType: options.mediaType ?? "movies",
               sourceOrder: index,
               enabled: true,
             })),
@@ -191,38 +192,45 @@ describe("Federation", () => {
   it.each([{}, { Imdb: "tt1234567" }])(
     "projects canonical series and season relationships in lists and details with %j",
     async (providerIds) => {
-      const layer = await setup(1, (_server, path) => {
-        let items;
-        if (path.includes("/Seasons")) {
-          items = [
-            item("season-1", "Season one", {
-              Type: "Season",
-              IndexNumber: 1,
-              SeriesId: "series-10",
-              ParentId: "series-10",
-              ProviderIds: {},
-            }),
-          ];
-        } else if (path.includes("/Episodes") || path.includes("AnyProviderIdEquals=imdb.")) {
-          items = [
-            item("episode-1", "Episode one", {
-              Type: "Episode",
-              IndexNumber: 1,
-              ParentIndexNumber: 1,
-              SeriesId: "series-10",
-              SeasonId: "season-1",
-              ParentId: "season-1",
-              ProviderIds: providerIds,
-            }),
-          ];
-        } else {
-          items = [
-            item("series-10", "Series", { Type: "Series" }),
-            item("unrelated-series", "Unrelated", { Type: "Series", ProviderIds: { Tmdb: "20" } }),
-          ];
-        }
-        return Effect.succeed({ Items: items, TotalRecordCount: 1 });
-      });
+      const layer = await setup(
+        1,
+        (_server, path) => {
+          let items;
+          if (path.includes("/Seasons")) {
+            items = [
+              item("season-1", "Season one", {
+                Type: "Season",
+                IndexNumber: 1,
+                SeriesId: "series-10",
+                ParentId: "series-10",
+                ProviderIds: {},
+              }),
+            ];
+          } else if (path.includes("/Episodes") || path.includes("AnyProviderIdEquals=imdb.")) {
+            items = [
+              item("episode-1", "Episode one", {
+                Type: "Episode",
+                IndexNumber: 1,
+                ParentIndexNumber: 1,
+                SeriesId: "series-10",
+                SeasonId: "season-1",
+                ParentId: "season-1",
+                ProviderIds: providerIds,
+              }),
+            ];
+          } else {
+            items = [
+              item("series-10", "Series", { Type: "Series" }),
+              item("unrelated-series", "Unrelated", {
+                Type: "Series",
+                ProviderIds: { Tmdb: "20" },
+              }),
+            ];
+          }
+          return Effect.succeed({ Items: items, TotalRecordCount: 1 });
+        },
+        { mediaType: "series" },
+      );
       await Effect.runPromise(
         Effect.gen(function* () {
           const federation = yield* Federation;
@@ -291,25 +299,28 @@ describe("Federation", () => {
     let media = [
       { Id: "episode-media", Container: "mkv", Protocol: "Http", SupportsDirectPlay: true },
     ];
-    const layer = await setup(1, (_serverId, path) =>
-      Effect.succeed(
-        path.includes("/Episodes")
-          ? {
-              Items: [
-                item("episode-1", "Episode one", {
-                  Type: "Episode",
-                  ProviderIds: {},
-                  ParentIndexNumber: 1,
-                  IndexNumber: 1,
-                  SeriesId: "series-10",
-                  ImageTags: { Primary: "episode-image" },
-                  MediaSources: media,
-                }),
-              ],
-              TotalRecordCount: 1,
-            }
-          : { Items: [item("series-10", "Series", { Type: "Series" })], TotalRecordCount: 1 },
-      ),
+    const layer = await setup(
+      1,
+      (_serverId, path) =>
+        Effect.succeed(
+          path.includes("/Episodes")
+            ? {
+                Items: [
+                  item("episode-1", "Episode one", {
+                    Type: "Episode",
+                    ProviderIds: {},
+                    ParentIndexNumber: 1,
+                    IndexNumber: 1,
+                    SeriesId: "series-10",
+                    ImageTags: { Primary: "episode-image" },
+                    MediaSources: media,
+                  }),
+                ],
+                TotalRecordCount: 1,
+              }
+            : { Items: [item("series-10", "Series", { Type: "Series" })], TotalRecordCount: 1 },
+        ),
+      { mediaType: "series" },
     );
     await Effect.runPromise(
       Effect.gen(function* () {
@@ -339,34 +350,37 @@ describe("Federation", () => {
   it.each([false, true])(
     "merges episode resources from later sources when the first source is playable: %s",
     async (firstPlayable) => {
-      const layer = await setup(2, (serverId, path) =>
-        Effect.succeed(
-          path.includes("/Episodes")
-            ? {
-                Items: [
-                  item(`episode-${serverId}`, "Episode one", {
-                    Type: "Episode",
-                    ProviderIds: {},
-                    ParentIndexNumber: 1,
-                    IndexNumber: 1,
-                    MediaSources:
-                      serverId === "server-0" && !firstPlayable
-                        ? []
-                        : [{ Id: `media-${serverId}`, Container: "mkv" }],
-                  }),
-                ],
-                TotalRecordCount: 1,
-              }
-            : {
-                Items: [
-                  item(`series-${serverId}`, "Series", {
-                    Type: "Series",
-                    ProviderIds: { Tmdb: "10" },
-                  }),
-                ],
-                TotalRecordCount: 1,
-              },
-        ),
+      const layer = await setup(
+        2,
+        (serverId, path) =>
+          Effect.succeed(
+            path.includes("/Episodes")
+              ? {
+                  Items: [
+                    item(`episode-${serverId}`, "Episode one", {
+                      Type: "Episode",
+                      ProviderIds: {},
+                      ParentIndexNumber: 1,
+                      IndexNumber: 1,
+                      MediaSources:
+                        serverId === "server-0" && !firstPlayable
+                          ? []
+                          : [{ Id: `media-${serverId}`, Container: "mkv" }],
+                    }),
+                  ],
+                  TotalRecordCount: 1,
+                }
+              : {
+                  Items: [
+                    item(`series-${serverId}`, "Series", {
+                      Type: "Series",
+                      ProviderIds: { Tmdb: "10" },
+                    }),
+                  ],
+                  TotalRecordCount: 1,
+                },
+          ),
+        { mediaType: "series" },
       );
       await Effect.runPromise(
         Effect.gen(function* () {
