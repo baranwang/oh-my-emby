@@ -20,6 +20,7 @@ import {
 import {
   MAX_CONNECTION_DIAGNOSTIC_BYTES,
   MAX_CONTROL_RESPONSE_BYTES,
+  MAX_IMAGE_BYTES,
   UPSTREAM_DETAIL_DEADLINE_MS,
   UPSTREAM_LIST_DEADLINE_MS,
 } from "./limits.js";
@@ -83,6 +84,9 @@ export interface UpstreamClientService {
     request: UpstreamRequest,
     schema: Schema.Schema<A>,
   ) => Effect.Effect<A, UpstreamFailure>;
+  readonly requestImage: (
+    input: UpstreamRequest,
+  ) => Effect.Effect<{ bytes: Uint8Array; contentType: string }, UpstreamFailure>;
   readonly authenticate: (
     server: UpstreamServer,
     includeDiagnostic?: boolean,
@@ -791,9 +795,9 @@ export const makeUpstreamClientLayer = (
         clientUserAgent,
       ) => authenticateServer(server, includeDiagnostic, endpointId, clientUserAgent);
 
-      const request: UpstreamClientService["request"] = <A>(
+      const requestWithDecoder = <A>(
         input: UpstreamRequest,
-        schema: Schema.Schema<A>,
+        decode: (response: Response, serverId: string) => Effect.Effect<A, UpstreamFailure>,
       ) => {
         const requestId = crypto.randomUUID();
         const startedAtMs = Date.now();
@@ -907,7 +911,7 @@ export const makeUpstreamClientLayer = (
                       continue;
                     }
                   }
-                  const decoded = yield* decodeResponse(response, input.serverId, schema);
+                  const decoded = yield* decode(response, input.serverId);
                   const current = yield* getServer(input.serverId);
                   if (current.generation !== input.generation) {
                     return yield* Effect.fail(new ObsoleteGeneration({ serverId: input.serverId }));
@@ -939,6 +943,65 @@ export const makeUpstreamClientLayer = (
           Effect.tapError((error) => record(error._tag)),
         );
       };
+
+      const request: UpstreamClientService["request"] = (input, schema) =>
+        requestWithDecoder(input, (response, serverId) =>
+          decodeResponse(response, serverId, schema),
+        );
+      const requestImage: UpstreamClientService["requestImage"] = (input) =>
+        requestWithDecoder(input, (response, serverId) =>
+          Effect.gen(function* () {
+            yield* classifyStatus(serverId, response);
+            const contentType =
+              response.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() ?? "";
+            if (
+              !["image/jpeg", "image/png", "image/webp"].includes(contentType) ||
+              !response.body
+            ) {
+              void response.body?.cancel();
+              return yield* Effect.fail(new UpstreamInvalidResponse({ serverId }));
+            }
+            const advertised = response.headers.get("content-length");
+            if (
+              advertised !== null &&
+              (!/^\d+$/.test(advertised) || Number(advertised) > MAX_IMAGE_BYTES)
+            ) {
+              void response.body.cancel();
+              return yield* Effect.fail(new ResponseTooLarge({ serverId }));
+            }
+            const reader = response.body.getReader(),
+              chunks: Uint8Array[] = [];
+            let size = 0;
+            try {
+              while (true) {
+                const part = yield* Effect.tryPromise({
+                  try: (signal) => {
+                    const abort = () => {
+                      void reader.cancel();
+                    };
+                    signal.addEventListener("abort", abort, { once: true });
+                    return reader.read().finally(() => signal.removeEventListener("abort", abort));
+                  },
+                  catch: () => new UpstreamUnavailable({ serverId }),
+                });
+                if (part.done) break;
+                size += part.value.length;
+                if (size > MAX_IMAGE_BYTES)
+                  return yield* Effect.fail(new ResponseTooLarge({ serverId }));
+                chunks.push(part.value);
+              }
+            } finally {
+              void reader.cancel().catch(() => undefined);
+            }
+            const bytes = new Uint8Array(size);
+            let offset = 0;
+            for (const chunk of chunks) {
+              bytes.set(chunk, offset);
+              offset += chunk.length;
+            }
+            return { bytes, contentType };
+          }),
+        );
 
       const serverIdentity = (
         server: UpstreamServer,
@@ -1381,6 +1444,7 @@ export const makeUpstreamClientLayer = (
         resolvePlayback,
         resolvePlaybackRedirect,
         requestResource,
+        requestImage,
       });
     }),
   );

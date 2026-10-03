@@ -1,3 +1,4 @@
+import { libraryCoverConfigDigest } from "./library-cover-model.js";
 import type { VirtualLibraryInput, VirtualLibraryView } from "@oh-my-emby/contracts";
 import { Context, Effect, Layer } from "effect";
 
@@ -76,10 +77,40 @@ export const makeLibraryServiceLayer: Layer.Layer<
       );
 
     const list: LibraryServiceApi["list"] = () =>
-      records().pipe(Effect.map((libraries) => libraries.map(toView)));
+      records().pipe(
+        Effect.flatMap((libraries) =>
+          repositories.listLibraryCoverSummaries(libraries.map((l) => l.id)).pipe(
+            Effect.map((covers) =>
+              libraries.map((l) => {
+                const c = covers.find((c) => c.libraryId === l.id);
+                return {
+                  ...toView(l),
+                  ...(c
+                    ? {
+                        cover: {
+                          revision: c.revision,
+                          width: c.width,
+                          height: c.height,
+                          stale: c.configDigest !== libraryCoverConfigDigest(l),
+                        },
+                      }
+                    : {}),
+                };
+              }),
+            ),
+          ),
+        ),
+      );
 
     const get: LibraryServiceApi["get"] = (libraryId) =>
-      getRecord(libraryId).pipe(Effect.map(toView));
+      list().pipe(
+        Effect.flatMap((libraries) => {
+          const library = libraries.find((l) => l.id === libraryId);
+          return library
+            ? Effect.succeed(library)
+            : Effect.fail(new LibraryNotFound({ libraryId }));
+        }),
+      );
 
     const validateSources = (
       input: VirtualLibraryInput,

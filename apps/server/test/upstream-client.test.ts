@@ -1945,4 +1945,26 @@ describe("UpstreamClient", () => {
       ]);
     },
   );
+  it("downloads bounded cover image bytes with upstream auth", async () => {
+    const result = await run(
+      async (input, init) => {
+        const r = new Request(input, init);
+        expect(r.headers.get("x-emby-token")).toBe("token-1");
+        return new Response(new Uint8Array([1, 2, 3]), {
+          headers: { "content-type": "image/jpeg" },
+        });
+      },
+      Effect.gen(function* () {
+        const client = yield* UpstreamClient;
+        return yield* client.requestImage({
+          serverId: "server-1",
+          generation: 1,
+          method: "GET",
+          path: "/Items/movie/Images/Primary",
+        });
+      }),
+    );
+    expect(result.bytes).toEqual(new Uint8Array([1, 2, 3]));
+    expect(result.contentType).toBe("image/jpeg");
+  });
 });

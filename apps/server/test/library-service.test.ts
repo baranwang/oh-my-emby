@@ -15,6 +15,7 @@ import { makeSqliteRepositoriesLayer } from "../src/platform/bun/sqlite-reposito
 const migration = [
   await Bun.file(new URL("../migrations/0001_initial.sql", import.meta.url)).text(),
   await Bun.file(new URL("../migrations/0002_dashboard_alignment.sql", import.meta.url)).text(),
+  await Bun.file(new URL("../migrations/0008_library_covers.sql", import.meta.url)).text(),
 ].join("\n");
 const server = (id: string, overrides: Partial<UpstreamServer> = {}): UpstreamServer => ({
   id: id as any,
