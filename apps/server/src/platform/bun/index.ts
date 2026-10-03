@@ -1,3 +1,5 @@
+import { LibraryCoverService, makeLibraryCoverServiceLayer } from "../../core/library-covers.js";
+import { handleDashboardLibraryCover } from "../../api/dashboard-library-covers.js";
 import { makeCollectionsLayer } from "../../core/collections.js";
 import { BunRuntime as EffectBunRuntime } from "@effect/platform-bun";
 import { dirname, join, resolve } from "node:path";
@@ -115,6 +117,7 @@ const makeBunCoreLayer = (config: BunRuntimeConfig) => {
   const userState = makeUserStateLayer().pipe(Layer.provide(repositories));
   const serverService = makeServerServiceLayer.pipe(Layer.provide(foundation));
   const libraryService = makeLibraryServiceLayer.pipe(Layer.provide(foundation));
+  const libraryCovers = makeLibraryCoverServiceLayer.pipe(Layer.provide(foundation));
   const metadataSettings = makeMetadataSettingsLayer.pipe(Layer.provide(repositories));
   const playback = makePlaybackLayer({
     fetchArtwork: config.upstreamFetch ?? fetch,
@@ -129,6 +132,7 @@ const makeBunCoreLayer = (config: BunRuntimeConfig) => {
     userState,
     serverService,
     libraryService,
+    libraryCovers,
     metadataSettings,
     playback,
     outbox,
@@ -186,6 +190,7 @@ export const startBunRuntime = async (config: BunRuntimeConfig): Promise<BunRunt
         const repositories = yield* Repositories;
         const userState = yield* UserState;
         const libraries = yield* LibraryService;
+        const libraryCovers = yield* LibraryCoverService;
         const playback = yield* Playback;
         const resourceCache = yield* ResourceCache;
         const dashboardRequest = HttpServerRequest.fromWeb(request).modify({
@@ -193,7 +198,18 @@ export const startBunRuntime = async (config: BunRuntimeConfig): Promise<BunRunt
         });
         const services = ApplicationServices.of({
           handleDashboard: () =>
-            toDashboardWebResponse(dashboardHandler, request, dashboardRequest),
+            Effect.gen(function* () {
+              const cover = yield* handleDashboardLibraryCover(
+                request,
+                auth,
+                libraryCovers,
+                remoteAddress,
+              );
+              return (
+                cover ??
+                (yield* toDashboardWebResponse(dashboardHandler, request, dashboardRequest))
+              );
+            }),
           handleEmby: makeEmbyHandler({
             config: { serverId: "oh-my-emby", serverName: "OhMyEmby", version: "0.0.0" },
             now: Date.now,

@@ -1,3 +1,4 @@
+import { LibraryCoverPreparation } from "./library-covers.js";
 import { Schema } from "effect";
 import { HttpApi, HttpApiEndpoint, HttpApiGroup, HttpApiSchema } from "effect/http-api";
 import {
@@ -123,6 +124,11 @@ const servers = HttpApiGroup.make("servers").add(
 );
 
 const libraries = HttpApiGroup.make("libraries").add(
+  HttpApiEndpoint.post("prepareLibraryCover", "/libraries/:id/cover/prepare", {
+    params: { id: VirtualLibraryId },
+    success: LibraryCoverPreparation,
+    error: upstreamErrors,
+  }),
   HttpApiEndpoint.get("listVirtualLibraries", "/libraries", {
     success: Schema.Array(VirtualLibraryView),
     error: [Unauthorized, Internal],

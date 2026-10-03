@@ -1,3 +1,4 @@
+import { LibraryCoverService } from "../core/library-covers.js";
 import { DashboardApi } from "@oh-my-emby/contracts";
 import { Effect, Layer, Option, Result } from "effect";
 import * as HttpServerError from "effect/http/HttpServerError";
@@ -165,11 +166,13 @@ const statusFor = (tag: string): number => {
       return 404;
     case "InvalidUpstreamUrl":
     case "LibraryValidationFailed":
+    case "LibraryCoverValidationFailed":
       return 400;
     case "CatalogIdentityMismatch":
     case "CatalogIdentityUnverifiable":
     case "ObsoleteGeneration":
     case "ServerLimitExceeded":
+    case "LibraryCoverConflict":
       return 409;
     case "UpstreamUnavailable":
     case "DestinationRejected":
@@ -220,6 +223,7 @@ export const publicFailure = (
       return respond({ _tag: "NotFound" });
     case "InvalidUpstreamUrl":
     case "LibraryValidationFailed":
+    case "LibraryCoverValidationFailed":
       return respond({
         _tag: "ValidationFailed",
         fieldErrors: [{ field: "configuration", message: "invalid configuration" }],
@@ -231,6 +235,7 @@ export const publicFailure = (
     case "ObsoleteGeneration":
       return respond({ _tag: "Conflict", code: "obsolete_generation" });
     case "ServerLimitExceeded":
+    case "LibraryCoverConflict":
       return respond({ _tag: "Conflict", code: "server_limit_exceeded" });
     case "UpstreamRejected":
       return respond({
@@ -456,7 +461,14 @@ export const makeDashboardControlPlaneLayers = () => {
     Effect.gen(function* () {
       const auth = yield* Auth;
       const service = yield* LibraryService;
+      const covers = yield* LibraryCoverService;
       return handlers.handleAll({
+        prepareLibraryCover: ({ params, request }) =>
+          Effect.gen(function* () {
+            const access = yield* authorized(request, auth).pipe(Effect.result);
+            if (Result.isFailure(access)) return publicFailure(access.failure);
+            return yield* resultOrFailure(covers.prepare(params.id));
+          }),
         listVirtualLibraries: ({ request }) =>
           Effect.gen(function* () {
             const access = yield* authorized(request, auth).pipe(Effect.result);
