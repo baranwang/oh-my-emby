@@ -6,7 +6,7 @@ const migration = await Bun.file(new URL("../migrations/0008_library_covers.sql"
   .text()
   .catch(() => "");
 db.exec(
-  "PRAGMA foreign_keys=ON; CREATE TABLE virtual_libraries(id TEXT PRIMARY KEY,name TEXT,media_type TEXT,enabled INTEGER); CREATE TABLE library_sources(virtual_library_id TEXT,server_id TEXT,source_library_id TEXT,enabled INTEGER,source_order INTEGER); CREATE TABLE upstream_servers(id TEXT,generation INTEGER,enabled INTEGER,deleted_at_ms INTEGER,health TEXT,verified_base_url TEXT);",
+  "CREATE TABLE schema_migrations(version INTEGER,name TEXT,applied_at_ms INTEGER); PRAGMA foreign_keys=ON; CREATE TABLE virtual_libraries(id TEXT PRIMARY KEY,name TEXT,media_type TEXT,enabled INTEGER); CREATE TABLE library_sources(virtual_library_id TEXT,server_id TEXT,source_library_id TEXT,enabled INTEGER,source_order INTEGER); CREATE TABLE upstream_servers(id TEXT,generation INTEGER,enabled INTEGER,deleted_at_ms INTEGER,health TEXT,verified_base_url TEXT);",
 );
 if (migration) db.exec(migration);
 libraryCoverRepositoryContract(

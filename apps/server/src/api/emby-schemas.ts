@@ -84,6 +84,7 @@ export const EmbyItemDto = Schema.Struct({
   ChildCount: Schema.optionalKey(Schema.Number),
   IsFolder: Schema.optionalKey(Schema.Boolean),
   IsHD: Schema.optionalKey(Schema.Boolean),
+  PrimaryImageAspectRatio: Schema.optionalKey(Schema.Number),
   ImageTags: Schema.optionalKey(Schema.Record(Schema.String, Schema.NonEmptyString)),
   BackdropImageTags: Schema.optionalKey(StringList),
   Genres: Schema.optionalKey(StringList),

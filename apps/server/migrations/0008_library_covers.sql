@@ -12,3 +12,4 @@ CREATE TABLE library_cover_manifests (
 CREATE INDEX library_cover_manifest_library ON library_cover_manifests(library_id,expires_at_ms);
 CREATE TRIGGER cover_consume_insert AFTER INSERT ON library_covers BEGIN DELETE FROM library_cover_manifests WHERE library_id=NEW.library_id; END;
 CREATE TRIGGER cover_consume_update AFTER UPDATE ON library_covers BEGIN DELETE FROM library_cover_manifests WHERE library_id=NEW.library_id; END;
+INSERT INTO schema_migrations(version,name,applied_at_ms) VALUES(8,'library_covers',CAST(unixepoch('subsec') * 1000 AS INTEGER));

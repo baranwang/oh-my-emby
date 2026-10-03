@@ -1334,6 +1334,7 @@ it("keeps Wrangler and application migration bookkeeping separate", async () => 
       { version: 5, name: "metadata_artwork_languages" },
       { version: 6, name: "movie_collections" },
       { version: 7, name: "collection_query_snapshots" },
+      { version: 8, name: "library_covers" },
     ],
   });
 });

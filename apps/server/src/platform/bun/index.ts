@@ -217,6 +217,7 @@ export const startBunRuntime = async (config: BunRuntimeConfig): Promise<BunRunt
             federation,
             userState,
             libraries,
+            libraryCovers,
             playback,
             resourceCache,
             compat: repositories.drivemby,

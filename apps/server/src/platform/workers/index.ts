@@ -161,6 +161,7 @@ export const runWorkerRequest = async (
           federation,
           userState,
           libraries,
+          libraryCovers,
           playback,
           resourceCache,
           compat: repositories.drivemby,

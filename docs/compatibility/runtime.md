@@ -10,10 +10,10 @@ The authentication cost is defined once by `PBKDF2_ITERATIONS` in `apps/server/s
 bun scripts/benchmark-pbkdf2.ts
 ```
 
-| Target | Measurement | Timestamp | Runtime | Iterations | p50 | p95 | Gate |
-| --- | --- | --- | --- | ---: | ---: | ---: | --- |
-| Local Bun | in-process | 2026-09-21T02:05:47+08:00 | Bun 1.4.2 | 310,000 | 17.84 ms | 18.96 ms | PASS |
-| Deployed Worker | remote request upper bound | UNEXECUTED | Cloudflare Workers | 310,000 | UNEXECUTED | UNEXECUTED | UNEXECUTED |
+| Target          | Measurement                | Timestamp                 | Runtime            | Iterations |        p50 |        p95 | Gate       |
+| --------------- | -------------------------- | ------------------------- | ------------------ | ---------: | ---------: | ---------: | ---------- |
+| Local Bun       | in-process                 | 2026-09-21T02:05:47+08:00 | Bun 1.4.2          |    310,000 |   17.84 ms |   18.96 ms | PASS       |
+| Deployed Worker | remote request upper bound | UNEXECUTED                | Cloudflare Workers |    310,000 | UNEXECUTED | UNEXECUTED | UNEXECUTED |
 
 Remote Worker measurement is deliberately **UNEXECUTED** in Task 15 because remote Cloudflare side effects were not authorized. Deployed Workers deliberately freeze high-resolution timers while CPU-only code runs, so the temporary Worker performs one untimed derivation per authenticated request and `scripts/benchmark-workers-pbkdf2.ts` measures ten requests from the caller. The recorded value is therefore a conservative end-to-end upper bound that includes network latency, not a fabricated CPU-only duration. `./scripts/smoke-workers.sh --remote` runs this benchmark after the application smoke and prints the result before deleting the run-owned resources.
 
@@ -21,13 +21,20 @@ Workers use 100,000 PBKDF2 iterations because 310,000 iterations exceeds the Wor
 
 ## Runtime smoke matrix
 
-| Target | Evidence |
-| --- | --- |
-| Workers local workerd + local D1 | Run `./scripts/smoke-workers.sh` |
+| Target                                | Evidence                                                                                                                                                                 |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Workers local workerd + local D1      | Run `./scripts/smoke-workers.sh`                                                                                                                                         |
 | Workers remote staging + ephemeral D1 | **UNEXECUTED**; the local fake-API integration proves fail-closed Worker ownership and exact-ID cleanup, but run the explicit `--remote` command for Cloudflare evidence |
-| Docker/Bun + SQLite | Run `docker build -t oh-my-emby:verify . && ./scripts/smoke-docker.sh` |
-| Real SenPlayer | **UNTESTED**; follow `docs/compatibility/senplayer.md` |
+| Docker/Bun + SQLite                   | Run `docker build -t oh-my-emby:verify . && ./scripts/smoke-docker.sh`                                                                                                   |
+| Real SenPlayer                        | **UNTESTED**; follow `docs/compatibility/senplayer.md`                                                                                                                   |
 
 ## Movie collections
 
 See [collections compatibility evidence](collections.md) for TMDB/upstream BoxSet discovery, access filtering, Infuse verification, and the unverified real Rex/remote Workers portions.
+
+## Library covers (2026-10-03)
+
+- Real in-app Chromium browser, standalone Bun test instance on localhost:3002: Dashboard login → libraries automatic generation → nine registered-source PNG posters → Satori SVG → Canvas system-font JPEG → authenticated upload → SQLite → visible list/detail cover. Manual regeneration also verified. Fixture posters use gradients rather than copyrighted artwork.
+- Chinese titles and a long Chinese/emoji title rendered in the real browser; image output visually checked for rotation, clipping and text boundaries.
+- Authenticated Emby HTTP protocol tests cover Views/details/VirtualFolders tags, Primary index 0, GET/HEAD/304, old-tag revalidation, missing/disabled libraries and ordinary movie routing. Real Emby clients remain **UNTESTED**.
+- Local workerd/D1 tests and smoke validate local runtime compatibility. Remote deployed Workers remain **UNEXECUTED**. Rendering modules and Yoga are Dashboard static assets, not Worker executable dependencies.

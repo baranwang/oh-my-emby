@@ -1,3 +1,6 @@
+import type { LibraryCoverServiceApi } from "../core/library-covers.js";
+import { libraryCoverImageFields } from "./emby-library-covers.js";
+import { coverImageResponse } from "./library-cover-response.js";
 import {
   collectionDto,
   collectionsRootDto,
@@ -86,6 +89,7 @@ export interface EmbyServices {
   readonly libraries: Pick<LibraryServiceApi, "list">;
   readonly playback: PlaybackBoundary;
   readonly resourceCache?: ResourceCacheService;
+  readonly libraryCovers?: Pick<LibraryCoverServiceApi, "read">;
 }
 
 class InvalidEmbyRequest extends Schema.TaggedError<InvalidEmbyRequest>()(
@@ -1324,6 +1328,7 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
           .filter(({ enabled }) => enabled)
           .map((library) => ({
             Name: library.name,
+            ...libraryCoverImageFields(library.cover),
             Locations: [],
             CollectionType: library.mediaType === "series" ? "tvshows" : "movies",
             ItemId: library.id,
@@ -1342,6 +1347,7 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
           Id: library.id,
           ServerId: services.config.serverId,
           Name: library.name,
+          ...libraryCoverImageFields(library.cover),
           Type: "CollectionFolder",
           CollectionType: library.mediaType === "series" ? "tvshows" : "movies",
           IsFolder: true,
@@ -1474,6 +1480,7 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
           Id: library.id,
           ServerId: services.config.serverId,
           Name: library.name,
+          ...libraryCoverImageFields(library.cover),
           Type: "CollectionFolder",
           CollectionType: library.mediaType === "series" ? "tvshows" : "movies",
           IsFolder: true,
@@ -1630,9 +1637,21 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
     }
 
     if (image) {
-      if (services.playback.resolveImage === undefined) return notFound();
       const canonicalId = yield* pathSegment(image[1]!);
       const imageType = yield* pathSegment(image[2]!);
+      const library = (yield* services.libraries.list()).find(({ id }) => id === canonicalId);
+      if (library) {
+        if (
+          !library.enabled ||
+          imageType !== "Primary" ||
+          Number(image[3] ?? 0) !== 0 ||
+          !services.libraryCovers
+        )
+          return notFound();
+        const cover = yield* services.libraryCovers.read(canonicalId);
+        return cover ? coverImageResponse(request, cover) : notFound();
+      }
+      if (services.playback.resolveImage === undefined) return notFound();
       const decision = yield* services.playback.resolveImage({
         canonicalId,
         imageType,

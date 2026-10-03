@@ -79,3 +79,11 @@ The local Workers smoke uses workerd and local D1; it does not deploy to Cloudfl
 ## License
 
 [AGPL-3.0](LICENSE)
+
+## Library entry covers
+
+Opening the Dashboard libraries page automatically fills missing or configuration-stale covers for enabled libraries. Inspired by MoviePilot medialibcovers, the browser combines library posters into a 1920 × 1080 image. Use **Regenerate cover** in library details to refresh manually; adding movies alone does not trigger regeneration.
+
+The browser renders posters and backgrounds, then paints titles with the generating device’s system fonts, without downloading cover fonts. Font appearance can differ across systems; uploaded images remain identical across clients. Rendering code and Yoga WASM load on demand in the browser; Workers perform no image rendering.
+
+JPEGs are capped at 500 KiB and stored in SQLite on Bun or D1 on Workers. Dashboard and Emby share these persisted images, surviving restarts and resource-cache loss. Generation requires an administrator to open the page; failed assets preserve existing covers. Posters are read from registered upstream sources; cross-origin artwork redirects are skipped.
