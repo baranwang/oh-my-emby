@@ -1,7 +1,8 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { orderPosters } from "../src/modules/libraries/covers/template.js";
 import { imageDimensions, backgroundFromPixels } from "../src/modules/libraries/covers/assets.js";
 import {
+  loadCoverImage,
   fitCoverTitle,
   encodeCoverJpeg,
   SYSTEM_FONT_STACK,
@@ -20,6 +21,17 @@ describe("browser cover rendering", () => {
       "7",
     ]);
     expect(orderPosters(["a"])).toEqual(Array(9).fill("a"));
+    expect(orderPosters(["a", "b", "c", "d"])).toEqual([
+      "c",
+      "a",
+      "a",
+      "d",
+      "b",
+      "b",
+      "a",
+      "d",
+      "c",
+    ]);
     expect(() => orderPosters([])).toThrow();
   });
   it("rejects unrecognized dimensions before image decode", () => {
@@ -55,5 +67,29 @@ describe("browser cover rendering", () => {
     await expect(encodeCoverJpeg(canvas)).rejects.toThrow();
     canvas.toBlob = (cb: any) => cb(null);
     await expect(encodeCoverJpeg(canvas)).rejects.toThrow();
+  });
+  it("revokes a pending image URL and removes handlers on abort", async () => {
+    const revoke = vi.fn();
+    const pending: { src: string; onload: (() => void) | null; onerror: (() => void) | null } = {
+      src: "",
+      onload: null,
+      onerror: null,
+    };
+    vi.stubGlobal("URL", { createObjectURL: () => "blob:cover", revokeObjectURL: revoke });
+    vi.stubGlobal("Image", function ImageFixture() {
+      return pending;
+    });
+    try {
+      const controller = new AbortController();
+      const loaded = loadCoverImage(new Blob(["image"]), controller.signal);
+      controller.abort();
+      await expect(loaded).rejects.toMatchObject({ name: "AbortError" });
+      expect(revoke).toHaveBeenCalledExactlyOnceWith("blob:cover");
+      expect(pending?.src).toBe("");
+      expect(pending?.onload).toBeNull();
+      expect(pending?.onerror).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

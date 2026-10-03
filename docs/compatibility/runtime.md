@@ -38,3 +38,9 @@ See [collections compatibility evidence](collections.md) for TMDB/upstream BoxSe
 - Chinese titles and a long Chinese/emoji title rendered in the real browser; image output visually checked for rotation, clipping and text boundaries.
 - Authenticated Emby HTTP protocol tests cover Views/details/VirtualFolders tags, Primary index 0, GET/HEAD/304, old-tag revalidation, missing/disabled libraries and ordinary movie routing. Real Emby clients remain **UNTESTED**.
 - Local workerd/D1 tests and smoke validate local runtime compatibility. Remote deployed Workers remain **UNEXECUTED**. Rendering modules and Yoga are Dashboard static assets, not Worker executable dependencies.
+
+Final whole-branch review found D1 catalog/summary parameter limits, malformed JPEG frame headers and asset-stage 401 handling. Each issue had a failing regression test before its fix. Production Effect D1 adapter BLOB round trips, 200-item candidate selection, 201 summary IDs, config invalidation/deletion, StrictMode generation lifecycle, upload-conflict recovery, partial/zero poster failures and URL cleanup are covered.
+
+Execution decisions: preserve original checkout changes in an isolated worktree; use the existing authenticated upstream image pipeline with same-origin redirect restrictions (redirect-only sources can lack posters); initialize the browser-only Yoga asset explicitly; pin Satori 0.26.0 because 0.35's additional HarfBuzz loading failed under Vite (upgrades require browser regression checks). No remote deployment or real-client verification was inferred from local evidence; browser visits remain required and system-font appearance can vary.
+
+Deferred minor: navigation abort releases browser work, but an already running server-side upstream image request may continue to its deadline. Propagating its request signal through the server Effect is future work.

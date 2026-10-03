@@ -10,6 +10,10 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-03-library-covers-design.md`
 
+## Execution outcome (2026-10-03)
+
+Tasks 1–6 implemented on `codex/library-covers`; see [runtime evidence](../../compatibility/runtime.md). A fresh whole-branch review identified four important boundary issues; all were reproduced with failing tests and fixed. Subsequent verification includes production D1 BLOBs, 200 cached candidates, 201 summary IDs, StrictMode replay/unmount/reopening and upload conflicts. The detailed checkboxes below remain the original planned acceptance checklist, rather than asserting every combination was individually exercised. Real Emby client and remote deployed Worker validation remain unexecuted.
+
 ## Global Constraints
 
 - 图形模板以 320 × 180 为基准，输出 1920 × 1080 JPEG；上传上限 500 KiB，即 512000 bytes。
@@ -51,6 +55,7 @@
 **Files:** 新建 `apps/server/migrations/0008_library_covers.sql`、上述 contracts/model/repositories/jpeg 文件、`apps/server/test/library-cover-repository-contract.ts`、`apps/server/test/library-cover-jpeg.test.ts`；修改 `packages/contracts/src/{schemas.ts,index.ts}`、`apps/server/src/core/repositories.ts`、`apps/server/src/platform/{bun/sqlite-repositories.ts,workers/d1-repositories.ts}`、`apps/server/test/{sqlite-repository.test.ts,d1-repository.test.ts}`。
 
 **Interfaces:**
+
 - `LibraryCoverSummary = { revision: string; width: 1920; height: 1080; stale: boolean }`；`VirtualLibraryView.cover` 为可选摘要。
 - `LibraryCoverRecord` 包含 `libraryId, body: Uint8Array, revision, templateVersion, configDigest, width, height, updatedAtMs`；`LibraryCoverManifest` 包含 `token, libraryId, configDigest, serverFences, candidates, expectedRevision: string | null, expiresAtMs`。
 - `CoverCandidate = { canonicalId: string; serverId: string; sourceLibraryId: string; serverGeneration: number; upstreamItemId: string; imageTag: string | null }`。
@@ -67,6 +72,7 @@
 **Files:** 新建上述 candidates/service 文件和 `apps/server/test/library-covers.test.ts`；修改 `apps/server/src/core/library-service.ts`、`apps/server/src/core/errors.ts` 及必要的目录仓储查询。
 
 **Interfaces:**
+
 - `selectLibraryCoverCandidates(library: VirtualLibrary): Effect<ReadonlyArray<CoverCandidate>, RepositoryError | UpstreamFailure>`；输入内部库记录，缓存优先，只对仍缺素材的有效来源做限定目录请求。
 - `LibraryCoverPreparation = { token: string; title: string; subtitle: string; templateVersion: string; expiresAtMs: number; candidates: ReadonlyArray<{ index: number; url: string }> }`，候选内部上游位置不进入契约。
 - `LibraryCoverService.prepare(id)` 返回 preparation；`read(id)` 返回 record 或 null；`upload({ libraryId, token, bytes })` 返回 summary；`asset({ libraryId, token, index, signal })` 返回有界图片字节及 MIME。所有方法使用 Effect，错误采用明确的 RepositoryError、NotFound、Conflict、ValidationFailed 和 UpstreamFailure 映射。
@@ -93,6 +99,7 @@
 **Files:** 新建前端 `covers/{template.tsx,render.ts,assets.ts}`、`apps/dashboard/test/library-cover-render.test.ts`；修改 `apps/dashboard/package.json` 和 `bun.lock`，只在 dashboard 添加 Satori 依赖。
 
 **Interfaces:**
+
 - `CoverRenderInput = { title: string; subtitle: string; posters: ReadonlyArray<string>; background: string }`，posters 是已缩小的图片 data URL。
 - `createLibraryCoverTemplate(input): React.ReactElement` 只包含图形；`renderLibraryCover(input, signal?): Promise<Blob>` 返回 <=512000 bytes 的 1920×1080 JPEG。
 - `prepareLibraryCoverAssets(preparation, signal?): Promise<{ posters: ReadonlyArray<string>; background: string }>` 最多成功解码九张，下载并发上限二，成功后停止请求剩余候选。
@@ -109,6 +116,7 @@
 **Files:** 新建 `covers/coordinator.ts`、`services/library-cover-service.ts`、`hooks/use-library-covers.ts`、`components/library-cover.tsx`、`apps/dashboard/test/library-cover-generation.test.tsx`；修改 `libraries-page.tsx`、`components/{library-list.tsx,library-detail.tsx}`、`apps/dashboard/messages/{en.json,zh-CN.json}`。
 
 **Interfaces:**
+
 - `generateLibraryCover(id, queryClient, signal?): Promise<LibraryCoverSummary>`：prepare→assets→render→upload，成功或 409 时刷新库列表/详情；上传带同源 cookie，不将 JPEG 转为 JSON base64。
 - `LibraryCoverCoordinator.enqueue(id, mode: "automatic" | "manual")`、`cancel()`、`subscribe(listener)`；状态为 idle/preparing/rendering/uploading/error，单任务串行，自动尝试集合按本次页面访问维护。
 - `useLibraryCovers(libraries)` 调度启用且 missing/stale 的封面；`LibraryCover` 接收 library、状态和手动刷新回调，图片 URL 使用 summary.revision 作查询键。
