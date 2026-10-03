@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useId, useMemo, useState, type ReactNode } from "react";
 import type {
   ServerView,
   SourceLibraryView,
@@ -6,6 +6,7 @@ import type {
   VirtualLibraryView,
 } from "@oh-my-emby/contracts";
 import { VirtualLibraryInput as VirtualLibraryInputSchema } from "@oh-my-emby/contracts";
+import { createPortal } from "react-dom";
 import { useForm } from "@tanstack/react-form";
 import { Schema } from "effect";
 
@@ -111,11 +112,21 @@ type LibraryFormProps = {
   readonly groups: ReadonlyArray<SourceLibraryGroup>;
   readonly onSave: (input: VirtualLibraryInput) => Promise<void>;
   readonly onCancel?: () => void;
+  readonly footerContainer?: HTMLElement | null;
+  readonly footerActions?: ReactNode;
 };
 
 const libraryValidator = Schema.toStandardSchemaV1(VirtualLibraryInputSchema);
 
-export const LibraryForm = ({ library, groups, onSave, onCancel }: LibraryFormProps) => {
+export const LibraryForm = ({
+  library,
+  groups,
+  onSave,
+  onCancel,
+  footerContainer = null,
+  footerActions,
+}: LibraryFormProps) => {
+  const formId = useId();
   const [formError, setFormError] = useState<string | null>(null);
   const defaultValues: typeof VirtualLibraryInputSchema.Encoded = {
     name: library?.name ?? "",
@@ -200,8 +211,27 @@ export const LibraryForm = ({ library, groups, onSave, onCancel }: LibraryFormPr
     return merged;
   }, [groups, library]);
 
+  const footer = (
+    <form.Subscribe selector={(state) => [state.canSubmit, state.isSubmitting]}>
+      {([canSubmit, isSubmitting]) => (
+        <div className="flex gap-2">
+          <Button type="submit" form={formId} disabled={!canSubmit || isSubmitting}>
+            {isSubmitting ? m.saving() : m.save()}
+          </Button>
+          {onCancel && (
+            <Button type="button" variant="ghost" onClick={onCancel}>
+              {m.cancel()}
+            </Button>
+          )}
+          {footerActions && <div className="ml-auto">{footerActions}</div>}
+        </div>
+      )}
+    </form.Subscribe>
+  );
+
   return (
     <form
+      id={formId}
       className="space-y-5"
       onSubmit={(event) => {
         event.preventDefault();
@@ -314,20 +344,7 @@ export const LibraryForm = ({ library, groups, onSave, onCancel }: LibraryFormPr
           </div>
         )}
       </form.Field>
-      <form.Subscribe selector={(state) => [state.canSubmit, state.isSubmitting]}>
-        {([canSubmit, isSubmitting]) => (
-          <div className="flex gap-2">
-            <Button type="submit" disabled={!canSubmit || isSubmitting}>
-              {isSubmitting ? m.saving() : m.save()}
-            </Button>
-            {onCancel && (
-              <Button type="button" variant="ghost" onClick={onCancel}>
-                {m.cancel()}
-              </Button>
-            )}
-          </div>
-        )}
-      </form.Subscribe>
+      {footerContainer ? createPortal(footer, footerContainer) : footer}
     </form>
   );
 };

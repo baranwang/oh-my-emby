@@ -1,9 +1,11 @@
+import { useState } from "react";
 import { useLibraryCovers } from "./hooks/use-library-covers";
 import { Button } from "@/components/ui/button";
 import {
   Drawer,
   DrawerContent,
   DrawerDescription,
+  DrawerFooter,
   DrawerHeader,
   DrawerTitle,
 } from "@/components/ui/drawer";
@@ -35,6 +37,7 @@ export const LibrariesPage = ({
   onCreate,
   onClose,
 }: LibrariesPageProps) => {
+  const [footerContainer, setFooterContainer] = useState<HTMLDivElement | null>(null);
   const libraries = useLibraries();
   const covers = useLibraryCovers(libraries.data ?? []);
   const servers = useServers();
@@ -51,6 +54,7 @@ export const LibrariesPage = ({
         <LibraryDetailPage
           id={selectedId}
           onClose={onClose}
+          footerContainer={footerContainer}
           coverState={covers.phases[selectedId] ?? "idle"}
           onGenerateCover={() => covers.regenerate(selectedId)}
         />
@@ -82,6 +86,7 @@ export const LibrariesPage = ({
     return (
       <LibraryForm
         groups={groups}
+        footerContainer={footerContainer}
         onCancel={onClose}
         onSave={async (input) => {
           await create.mutateAsync(input);
@@ -128,6 +133,7 @@ export const LibrariesPage = ({
           <ScrollArea className="min-h-0 flex-1">
             <div className="p-4">{renderDrawerContent()}</div>
           </ScrollArea>
+          <DrawerFooter ref={setFooterContainer} />
         </DrawerContent>
       </Drawer>
     </div>

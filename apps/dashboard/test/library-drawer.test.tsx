@@ -155,6 +155,19 @@ describe("route-controlled virtual-library Drawer", () => {
     });
   });
 
+  it("keeps save, cancel and delete in the Drawer footer and submits the associated form", async () => {
+    const { router } = await renderRoute("/dashboard/libraries/library-1", fetchFor());
+    const footer = document.body.querySelector('[data-slot="drawer-footer"]');
+    expect(footer).not.toBeNull();
+    for (const name of [m.save(), m.cancel(), m.delete()])
+      expect(footer!.contains(button(name))).toBe(true);
+    const save = button(m.save());
+    expect(save.form).not.toBeNull();
+    expect(save.closest("form")).toBeNull();
+    await act(async () => save.click());
+    await vi.waitFor(() => expect(router.state.location.publicHref).toBe("/dashboard/libraries"));
+  });
+
   it("opens edit over the same list from a refreshable $id deep link", async () => {
     const { container, router } = await renderRoute("/dashboard/libraries/library-1", fetchFor());
 

@@ -24,11 +24,13 @@ export const LibraryDetailPage = ({
   onClose,
   coverState = "idle",
   onGenerateCover,
+  footerContainer = null,
 }: {
   readonly id: LibraryId;
   readonly onClose: () => void;
   readonly coverState?: LibraryCoverPhase;
   readonly onGenerateCover?: () => void;
+  readonly footerContainer?: HTMLElement | null;
 }) => {
   const library = useLibrary(id);
   const servers = useServers();
@@ -89,33 +91,34 @@ export const LibraryDetailPage = ({
         library={library.data}
         groups={groups}
         onCancel={onClose}
+        footerContainer={footerContainer}
+        footerActions={
+          <Button
+            variant="destructive"
+            disabled={remove.isPending}
+            onClick={async () => {
+              if (!window.confirm(m.library_delete_confirm())) return;
+              try {
+                await remove.mutateAsync();
+                onClose();
+              } catch {
+                // Mutation state renders the localized failure below.
+              }
+            }}
+          >
+            {remove.isPending ? m.deleting() : m.delete()}
+          </Button>
+        }
         onSave={async (input) => {
           await update.mutateAsync(input);
           onClose();
         }}
       />
-      <section className="border-t pt-6">
-        <Button
-          variant="destructive"
-          disabled={remove.isPending}
-          onClick={async () => {
-            if (!window.confirm(m.library_delete_confirm())) return;
-            try {
-              await remove.mutateAsync();
-              onClose();
-            } catch {
-              // Mutation state renders the localized failure below.
-            }
-          }}
-        >
-          {remove.isPending ? m.deleting() : m.delete()}
-        </Button>
-        {remove.isError && (
-          <p role="alert" className="text-destructive mt-2 text-sm">
-            {m.library_delete_failed()}
-          </p>
-        )}
-      </section>
+      {remove.isError && (
+        <p role="alert" className="text-destructive text-sm">
+          {m.library_delete_failed()}
+        </p>
+      )}
     </div>
   );
 };
