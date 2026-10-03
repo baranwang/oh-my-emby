@@ -2,7 +2,7 @@
 
 日期：2026-10-03
 
-状态：用户已确认同时支持 TMDB 自动合集与上游 Emby BoxSet；本文待审阅，尚未开始实现。
+状态：设计与实现计划已确认；TMDB 自动合集和上游 Emby BoxSet 已实现并验证。实测范围见 `docs/compatibility/collections.md`。
 
 ## 目标与成功标准
 

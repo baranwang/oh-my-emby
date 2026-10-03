@@ -27,3 +27,7 @@ Workers use 100,000 PBKDF2 iterations because 310,000 iterations exceeds the Wor
 | Workers remote staging + ephemeral D1 | **UNEXECUTED**; the local fake-API integration proves fail-closed Worker ownership and exact-ID cleanup, but run the explicit `--remote` command for Cloudflare evidence |
 | Docker/Bun + SQLite | Run `docker build -t oh-my-emby:verify . && ./scripts/smoke-docker.sh` |
 | Real SenPlayer | **UNTESTED**; follow `docs/compatibility/senplayer.md` |
+
+## Movie collections
+
+See [collections compatibility evidence](collections.md) for TMDB/upstream BoxSet discovery, access filtering, Infuse verification, and the unverified real Rex/remote Workers portions.
