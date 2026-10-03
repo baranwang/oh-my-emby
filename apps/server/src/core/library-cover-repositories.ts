@@ -161,7 +161,7 @@ export function makeLibraryCoverRepositories(sql: CollectionSql): LibraryCoverRe
       db(
         sql
           .unsafe<{ canonical_id: string }>(
-            `SELECT DISTINCT i.canonical_id FROM source_items i JOIN library_sources b ON b.server_id=i.server_id AND b.source_library_id=i.source_library_id JOIN upstream_servers s ON s.id=i.server_id WHERE b.virtual_library_id=? AND b.enabled=1 AND s.enabled=1 AND s.deleted_at_ms IS NULL AND s.generation=i.server_generation AND s.health='healthy' AND i.quarantine_reason IS NULL AND i.canonical_id IS NOT NULL AND i.item_type IN ('Movie','Series') ORDER BY i.canonical_id LIMIT ?`,
+            `SELECT DISTINCT i.canonical_id FROM source_items i JOIN library_sources b ON b.server_id=i.server_id AND b.source_library_id=i.source_library_id JOIN upstream_servers s ON s.id=i.server_id WHERE b.virtual_library_id=? AND b.enabled=1 AND s.enabled=1 AND s.deleted_at_ms IS NULL AND s.generation=i.server_generation AND s.health='healthy' AND i.quarantine_reason IS NULL AND i.canonical_id IS NOT NULL AND i.item_type IN ('Movie','Series') ORDER BY RANDOM() LIMIT ?`,
             [id, limit],
           )
           .pipe(Effect.map((r) => r.map((x) => x.canonical_id))),

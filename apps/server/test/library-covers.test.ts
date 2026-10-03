@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { Effect } from "effect";
 import { makeLibraryCoverService } from "../src/core/library-covers.js";
 import { makeLibraryCoverCandidateSelector } from "../src/core/library-cover-candidates.js";
@@ -111,6 +111,31 @@ describe("library covers", () => {
     const select = makeLibraryCoverCandidateSelector(s.repo, s.upstream, s.identity);
     expect(await Effect.runPromise(select(library))).toHaveLength(1);
   });
+  it("draws a different deduplicated cached selection when the random draw changes", async () => {
+    const s = setup();
+    s.repo.readCatalogItems = () =>
+      Effect.succeed(
+        Array.from({ length: 30 }, (_, i) => ({
+          ...record,
+          canonical: { ...canonical, id: `movie-${i}` },
+        })),
+      );
+    const random = vi.spyOn(Math, "random").mockReturnValue(0.999);
+    try {
+      const select = makeLibraryCoverCandidateSelector(s.repo, s.upstream, s.identity);
+      const first = await Effect.runPromise(select(library));
+      random.mockReturnValue(0);
+      const second = await Effect.runPromise(select(library));
+      expect(first).toHaveLength(18);
+      expect(second).toHaveLength(18);
+      expect(new Set(second.map((x) => x.canonicalId)).size).toBe(18);
+      expect(second.map((x) => x.canonicalId).sort()).not.toEqual(
+        first.map((x) => x.canonicalId).sort(),
+      );
+    } finally {
+      random.mockRestore();
+    }
+  });
   it("budgets discovery to one twenty-row page per source", async () => {
     const s = setup();
     s.repo.listLibraryCoverCandidateIds = () => Effect.succeed([]);
@@ -127,6 +152,9 @@ describe("library covers", () => {
     );
     expect(result).toEqual([]);
     expect(requests).toHaveLength(10);
+    expect(
+      requests.every((p) => new URL(p, "https://local").searchParams.get("SortBy") === "Random"),
+    ).toBe(true);
     expect(
       requests.every((p) => new URL(p, "https://local").searchParams.get("Limit") === "20"),
     ).toBe(true);

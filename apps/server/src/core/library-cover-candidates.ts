@@ -5,6 +5,14 @@ import type { IdentityApi } from "./identity.js";
 import type { VirtualLibrary, EligibleSource } from "./model.js";
 import type { CoverCandidate } from "./library-cover-model.js";
 import { isCatalogObject, sourceItemCandidate } from "./source-item-candidate.js";
+const shuffled = <T>(items: ReadonlyArray<T>): T[] => {
+  const result = [...items];
+  for (let i = result.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [result[i], result[j]] = [result[j]!, result[i]!];
+  }
+  return result;
+};
 const Page = Schema.Struct({ Items: Schema.Array(Schema.Unknown) });
 export const makeLibraryCoverCandidateSelector =
   (repo: RepositoriesService, upstream: UpstreamClientService, identity: IdentityApi) =>
@@ -37,7 +45,7 @@ export const makeLibraryCoverCandidateSelector =
       const records: CatalogItemRecord[] = [];
       for (let offset = 0; offset < ids.length; offset += 98)
         records.push(...(yield* repo.readCatalogItems(ids.slice(offset, offset + 98), Date.now())));
-      for (const r of [...records].sort((a, b) => a.canonical.id.localeCompare(b.canonical.id))) {
+      for (const r of shuffled(records)) {
         if (r.canonical.itemType !== expected) continue;
         for (const item of r.sourceItems) {
           const source = sources.find(
@@ -51,7 +59,7 @@ export const makeLibraryCoverCandidateSelector =
         }
       }
       if (chosen.size >= 9) return [...chosen.values()];
-      for (const source of sources.slice(0, 10)) {
+      for (const source of shuffled(sources).slice(0, 10)) {
         if (chosen.size >= 18) break;
         const server = yield* repo.getServer(source.serverId);
         if (!server?.upstreamUserId) continue;
@@ -65,7 +73,7 @@ export const makeLibraryCoverCandidateSelector =
             StartIndex: "0",
             Limit: "20",
             Fields: "ProviderIds,ImageTags",
-            SortBy: "SortName",
+            SortBy: "Random",
             SortOrder: "Ascending",
           });
         const response = yield* upstream
@@ -81,7 +89,7 @@ export const makeLibraryCoverCandidateSelector =
           )
           .pipe(Effect.result);
         if (Result.isFailure(response)) continue;
-        for (const raw of response.success.Items.slice(0, 20)) {
+        for (const raw of shuffled(response.success.Items.slice(0, 20))) {
           if (chosen.size >= 18) break;
           if (
             !isCatalogObject(raw) ||
