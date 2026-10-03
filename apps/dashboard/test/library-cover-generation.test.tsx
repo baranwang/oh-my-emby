@@ -1,8 +1,17 @@
 import { act, StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { LibraryCoverCoordinator } from "../src/modules/libraries/covers/coordinator.js";
 import { LibraryCover } from "../src/modules/libraries/components/library-cover.js";
+vi.mock("../src/components/ui/grid-reveal", () => ({
+  GridReveal: ({
+    src,
+    onRevealComplete,
+  }: {
+    src?: string | null;
+    onRevealComplete?: () => void;
+  }) => <div data-slot="grid-reveal" data-image={src ?? ""} onClick={onRevealComplete} />,
+}));
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 describe("cover generation coordination", () => {
   it("serializes libraries and attempts automatic failures once, allowing manual retry", async () => {
@@ -47,6 +56,33 @@ describe("cover generation coordination", () => {
     await new Promise((r) => setTimeout(r, 0));
     expect(aborted).toBe(true);
     expect(calls).toEqual(["a"]);
+  });
+  it("waits for the generated image before revealing it and removes the animation after completion", async () => {
+    const host = document.createElement("div"),
+      root = createRoot(host);
+    const library = {
+      id: "lib",
+      name: "Movies",
+      enabled: true,
+      sources: [],
+      cover: { revision: "old" },
+    } as any;
+    try {
+      await act(async () => root.render(<LibraryCover library={library} state="preparing" />));
+      expect(host.querySelector('[data-slot="grid-reveal"]')?.getAttribute("data-image")).toBe("");
+      await act(async () =>
+        root.render(
+          <LibraryCover library={{ ...library, cover: { revision: "new" } }} state="idle" />,
+        ),
+      );
+      const reveal = host.querySelector('[data-slot="grid-reveal"]') as HTMLElement;
+      expect(reveal?.getAttribute("data-image")).toContain("tag=new");
+      await act(async () => reveal.click());
+      expect(host.querySelector('[data-slot="grid-reveal"]')).toBeNull();
+      expect(host.querySelector("img")?.getAttribute("src")).toContain("tag=new");
+    } finally {
+      await act(async () => root.unmount());
+    }
   });
   it("retains old image while regenerating and exposes refresh action", async () => {
     const host = document.createElement("div"),
