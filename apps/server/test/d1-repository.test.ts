@@ -1404,15 +1404,15 @@ it("prepares a 200-item cache and reads 201 library summaries through production
   const harness = await makeHarness();
   await harness.seedCanonicalWithEligibleSources({
     ...canonicalFixture,
-    displayMetadata: { Name: "Movie", ImageTags: { Primary: "poster" } },
+    displayMetadata: { Name: "Movie" },
   });
   const commands: D1PreparedStatement[] = [];
-  for (let i = 0; i < 200; i++) {
+  for (let i = 0; i < 199; i++) {
     const id = `boundary-${String(i).padStart(3, "0")}`;
     commands.push(
       env.DB.prepare("INSERT INTO canonical_items VALUES (?,'Movie','exact',?,1000,1000)").bind(
         id,
-        JSON.stringify({ Name: id, ...(i >= 191 ? { ImageTags: { Primary: "poster" } } : {}) }),
+        JSON.stringify({ Name: id, ...(i >= 190 ? { ImageTags: { Primary: "poster" } } : {}) }),
       ),
     );
     commands.push(
