@@ -1308,6 +1308,7 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
       const base = query(principal, decoded);
       const input: FederatedQuery = {
         ...base,
+        ...(clientUserAgent?.toLowerCase().includes("infuse") ? { indexedPagination: true } : {}),
         ...(resumeItems
           ? {
               filters: [...base.filters, { field: "resume", value: true }],

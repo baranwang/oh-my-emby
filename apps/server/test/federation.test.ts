@@ -1386,6 +1386,133 @@ describe("Federation", () => {
     });
   });
 
+  it("exposes explicitly requested list media sources without skipping detail discovery", async () => {
+    let discoveryCalls = 0;
+    const layer = await setup(1, (_serverId, path) => {
+      if (path.includes("AnyProviderIdEquals=")) discoveryCalls++;
+      return Effect.succeed({
+        Items: [item("movie-10", "Movie", { MediaSources: [{ Id: "source-a", Name: "A" }] })],
+        TotalRecordCount: 1,
+      });
+    });
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const federation = yield* Federation;
+        const page = yield* federation.list(query({ fields: ["MediaSources"] }));
+        expect(page.items[0]?.mediaVersions.map(({ label }) => label)).toEqual(["[Server 0] A"]);
+        const replay = yield* federation.list(query({ fields: ["MediaSources"] }));
+        expect(replay.items[0]?.mediaVersions).toHaveLength(1);
+        yield* federation.detail(page.items[0]!.id);
+        expect(discoveryCalls).toBe(1);
+      }).pipe(Effect.provide(layer)),
+    );
+  });
+
+  it("uses reported totals for indexed pagination without scanning the whole catalog", async () => {
+    let calls = 0;
+    const rows = Array.from({ length: 125 }, (_, index) => item(`movie-${index + 1}`));
+    const layer = await setup(1, (_serverId, path) => {
+      calls++;
+      const parameters = new URL(path, "https://local").searchParams;
+      const start = Number(parameters.get("StartIndex"));
+      const limit = Number(parameters.get("Limit"));
+      return Effect.succeed({
+        Items: rows.slice(start, start + limit),
+        TotalRecordCount: rows.length,
+      });
+    });
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const federation = yield* Federation;
+        const input = query({ limit: 50, indexedPagination: true });
+        const first = yield* federation.list(input);
+        expect(first.items).toHaveLength(50);
+        expect(first.totalRecordCount).toBe(125);
+        expect(first.exhausted).toBe(false);
+        expect(calls).toBe(1);
+        const firstCalls = calls;
+        const second = yield* federation.list({ ...input, startIndex: 50 });
+        expect(second.items).toHaveLength(50);
+        expect(second.totalRecordCount).toBe(125);
+        expect(calls).toBe(firstCalls);
+        const last = yield* federation.list({ ...input, startIndex: 100 });
+        expect(last.items).toHaveLength(25);
+        expect(last.totalRecordCount).toBe(125);
+        expect(last.exhausted).toBe(true);
+      }).pipe(Effect.provide(layer)),
+    );
+  });
+
+  it("reserves a whole indexed page when the upstream omits its total", async () => {
+    const layer = await setup(1, () =>
+      Effect.succeed({
+        Items: Array.from({ length: 100 }, (_, index) => item(`movie-${index + 1}`)),
+      }),
+    );
+    const page = await Effect.runPromise(
+      Effect.gen(function* () {
+        return yield* (yield* Federation).list(query({ limit: 50, indexedPagination: true }));
+      }).pipe(Effect.provide(layer)),
+    );
+    expect(page.items).toHaveLength(50);
+    expect(page.totalRecordCount).toBe(100);
+  });
+
+  it("reserves indexed slots when only some sources report totals", async () => {
+    const layer = await setup(2, (serverId) =>
+      Effect.succeed(
+        serverId === "server-0"
+          ? { Items: [item("movie-700")], TotalRecordCount: 1 }
+          : { Items: Array.from({ length: 100 }, (_, index) => item(`movie-${index + 1}`)) },
+      ),
+    );
+    const page = await Effect.runPromise(
+      Effect.gen(function* () {
+        return yield* (yield* Federation).list(query({ limit: 50, indexedPagination: true }));
+      }).pipe(Effect.provide(layer)),
+    );
+    expect(page.items).toHaveLength(50);
+    expect(page.totalRecordCount).toBe(100);
+  });
+
+  it("keeps list resource snapshots on omission and withdraws them on an explicit empty array", async () => {
+    let response = item("movie-10", "Movie", { MediaSources: [{ Id: "source-a", Name: "A" }] });
+    const layer = await setup(1, () => Effect.succeed({ Items: [response], TotalRecordCount: 1 }));
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const federation = yield* Federation;
+        expect(
+          (yield* federation.list(query({ fields: ["MediaSources"] }))).items[0]?.mediaVersions,
+        ).toHaveLength(1);
+        response = item("movie-10");
+        expect(
+          (yield* federation.list(query({ deviceId: "omitted", fields: ["MediaSources"] })))
+            .items[0]?.mediaVersions,
+        ).toHaveLength(1);
+        response = item("movie-10", "Movie", { MediaSources: [] });
+        expect(
+          (yield* federation.list(query({ deviceId: "empty", fields: ["MediaSources"] }))).items[0]
+            ?.mediaVersions,
+        ).toEqual([]);
+      }).pipe(Effect.provide(layer)),
+    );
+  });
+
+  it("does not promote unsolicited list media sources into usable resource snapshots", async () => {
+    const layer = await setup(1, () =>
+      Effect.succeed({
+        Items: [item("movie-10", "Movie", { MediaSources: [{ Id: "source-a", Name: "A" }] })],
+        TotalRecordCount: 1,
+      }),
+    );
+    const page = await Effect.runPromise(
+      Effect.gen(function* () {
+        return yield* (yield* Federation).list(query({ fields: ["Overview"] }));
+      }).pipe(Effect.provide(layer)),
+    );
+    expect(page.items[0]?.mediaVersions).toEqual([]);
+  });
+
   it("updates fields present in a fresh primary projection without erasing omitted fields", async () => {
     let response = item("movie-10", "Old name", { Overview: "Keep me" });
     const layer = await setup(1, () => Effect.succeed({ Items: [response], TotalRecordCount: 1 }));

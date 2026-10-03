@@ -135,6 +135,34 @@ const get = (path: string, token = "token") =>
   });
 
 describe("Emby catalog routes", () => {
+  it.each([
+    ["Infuse-Direct/8.5.6", true],
+    [" INFuSE/8.5.6 ", true],
+    ["Rex-Standard/0.5.0", undefined],
+  ])("selects indexed pagination for %s", async (agent, expected) => {
+    const base = services();
+    let observed: FederatedQuery | undefined;
+    const app = makeEmbyHandler({
+      ...base,
+      federation: {
+        ...base.federation,
+        list: (input) => {
+          observed = input;
+          return base.federation.list(input);
+        },
+      },
+    });
+    const response = await Effect.runPromise(
+      app(
+        new Request("https://local/Users/owner/Items?IncludeItemTypes=Movie&Limit=50", {
+          headers: { authorization: "Bearer token", "user-agent": agent },
+        }),
+      ),
+    );
+    expect(response.status).toBe(200);
+    expect(observed?.indexedPagination).toBe(expected);
+  });
+
   it("propagates Accept-Language through concurrent catalog and image requests", async () => {
     const base = services();
     const observed: string[] = [];

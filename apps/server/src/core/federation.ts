@@ -60,6 +60,7 @@ export interface FederatedQuery {
   readonly itemTypes: ReadonlyArray<string>;
   readonly fields?: ReadonlyArray<string>;
   readonly clientUserAgent?: string;
+  readonly indexedPagination?: boolean;
 }
 
 export interface SearchQuery extends FederatedQuery {
@@ -732,6 +733,15 @@ export const makeFederationLayer = (
             if (!supportedItemTypes.includes(raw.Type as string)) continue;
             const result = yield* identity.resolve(candidate(source, raw, observedAtMs));
             if (writeCache) yield* cacheItem(result, projection, raw, observedAtMs);
+            // A list explicitly requesting MediaSources is also a resource snapshot.
+            // Preserve omission, but let an empty array withdraw previous versions.
+            if (
+              writeCache &&
+              query.fields?.includes("MediaSources") &&
+              Array.isArray(raw.MediaSources)
+            ) {
+              yield* cacheItem(result, "detail", raw, observedAtMs);
+            }
             const records = yield* repositories.readCatalogItems([result.canonical.id], now());
             const record = records[0];
             if (
@@ -1108,9 +1118,25 @@ export const makeFederationLayer = (
                   .map(({ serverId }) => serverId),
               ),
             ].sort();
+            // Indexed clients need enough slots to request another whole page. Until
+            // deduplication completes, upstream totals are an upper bound, not an exact count.
+            const reportedTotal =
+              query.indexedPagination && !localMembershipOnly(query)
+                ? state.sources.reduce((total, cursor) => total + (cursor.reportedTotal ?? 0), 0)
+                : 0;
+            const unknownTotal = state.sources.some(
+              (cursor) => !cursor.exhausted && cursor.reportedTotal === null,
+            );
             const totalRecordCount = exhausted
               ? published.length
-              : Math.max(published.length, requestedEnd + 1);
+              : Math.min(
+                  MAX_MATERIALIZED_ITEMS,
+                  Math.max(
+                    published.length,
+                    requestedEnd + (query.indexedPagination && unknownTotal ? limit : 1),
+                    reportedTotal,
+                  ),
+                );
             const overlaid = yield* Effect.forEach(records, metadataProviders.overlayCached);
             return {
               items: overlaid.map((record) => view(record, incompleteSourceIds)),
