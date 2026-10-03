@@ -91,12 +91,13 @@ export async function renderLibraryCover(
     if (!ctx) throw new Error("Canvas unavailable");
     ctx.drawImage(loaded.image, 0, 0);
     ctx.fillStyle = "#ffffff";
-    ctx.textBaseline = "top";
-    const title = fitCoverTitle(ctx, input.title, 780);
-    ctx.fillText(title.text, 144, 336);
-    ctx.font = `600 72px ${SYSTEM_FONT_STACK}`;
-    ctx.fillStyle = "rgba(255,255,255,0.8)";
-    ctx.fillText(input.subtitle, 144, 612);
+    ctx.textBaseline = "middle";
+    ctx.textAlign = "center";
+    const title = fitCoverTitle(ctx, input.title, 1480);
+    ctx.shadowColor = "rgba(0,0,0,0.5)";
+    ctx.shadowBlur = 24;
+    ctx.shadowOffsetY = 6;
+    ctx.fillText(title.text, 960, 540);
     return await encodeCoverJpeg(canvas, signal);
   } finally {
     loaded.release();

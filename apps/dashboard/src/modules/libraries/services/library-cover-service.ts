@@ -26,10 +26,7 @@ export async function generateLibraryCover(
     throw error;
   });
   onPhase?.("rendering");
-  const image = await renderLibraryCover(
-    { ...assets, title: preparation.title, subtitle: preparation.subtitle },
-    signal,
-  );
+  const image = await renderLibraryCover({ ...assets, title: preparation.title }, signal);
   signal?.throwIfAborted();
   onPhase?.("uploading");
   const response = await fetch(`/api/dashboard/libraries/${encodeURIComponent(id)}/cover`, {

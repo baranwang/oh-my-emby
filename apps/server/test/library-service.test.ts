@@ -1,3 +1,7 @@
+import {
+  COVER_TEMPLATE_VERSION,
+  libraryCoverConfigDigest,
+} from "../src/core/library-cover-model.js";
 import { Database } from "bun:sqlite";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -354,5 +358,35 @@ describe("LibraryService", () => {
       count: 0,
     });
     database.close();
+  });
+  it("marks a cover from an old template stale while preserving its revision", async () => {
+    const { service, repositories } = await setup([]);
+    const db = new Database(filename);
+    db.run("INSERT INTO virtual_libraries VALUES ('cover-library','华语影片','movies',1,1,1)");
+    const library = await Effect.runPromise(
+      Effect.gen(function* () {
+        return (yield* (yield* Repositories).listVirtualLibraries())[0]!;
+      }).pipe(Effect.provide(repositories)),
+    );
+    db.run("INSERT INTO library_covers VALUES (?,?,?,?,?,?,?,?)", [
+      library.id,
+      new Uint8Array([1]),
+      "saved-revision",
+      "old-template",
+      libraryCoverConfigDigest(library),
+      1920,
+      1080,
+      1,
+    ]);
+    const read = () =>
+      Effect.runPromise(
+        Effect.gen(function* () {
+          return yield* (yield* LibraryService).get(library.id);
+        }).pipe(Effect.provide(service)),
+      );
+    expect((await read()).cover).toMatchObject({ revision: "saved-revision", stale: true });
+    db.run("UPDATE library_covers SET template_version=?", [COVER_TEMPLATE_VERSION]);
+    expect((await read()).cover?.stale).toBe(false);
+    db.close();
   });
 });

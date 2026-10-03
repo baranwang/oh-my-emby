@@ -1,4 +1,4 @@
-import { libraryCoverConfigDigest } from "./library-cover-model.js";
+import { COVER_TEMPLATE_VERSION, libraryCoverConfigDigest } from "./library-cover-model.js";
 import type { VirtualLibraryInput, VirtualLibraryView } from "@oh-my-emby/contracts";
 import { Context, Effect, Layer } from "effect";
 
@@ -91,7 +91,9 @@ export const makeLibraryServiceLayer: Layer.Layer<
                           revision: c.revision,
                           width: c.width,
                           height: c.height,
-                          stale: c.configDigest !== libraryCoverConfigDigest(l),
+                          stale:
+                            c.configDigest !== libraryCoverConfigDigest(l) ||
+                            c.templateVersion !== COVER_TEMPLATE_VERSION,
                         },
                       }
                     : {}),

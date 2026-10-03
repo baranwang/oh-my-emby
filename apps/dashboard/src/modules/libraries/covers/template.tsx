@@ -1,7 +1,6 @@
 import type { ReactElement } from "react";
 export interface CoverRenderInput {
   readonly title: string;
-  readonly subtitle: string;
   readonly posters: ReadonlyArray<string>;
   readonly background: string;
 }
@@ -11,8 +10,7 @@ export const orderPosters = (posters: ReadonlyArray<string>): string[] => {
   return [..."315426987"].map((n) => filled[Number(n) - 1]!);
 };
 export function createLibraryCoverTemplate(input: CoverRenderInput): ReactElement {
-  const posters = orderPosters(input.posters),
-    scale = 6;
+  const posters = orderPosters(input.posters);
   return (
     <div
       style={{
@@ -28,43 +26,45 @@ export function createLibraryCoverTemplate(input: CoverRenderInput): ReactElemen
         style={{
           display: "flex",
           position: "absolute",
-          left: 0,
-          top: 0,
-          width: 1920,
-          height: 1080,
-          backgroundImage: "linear-gradient(to bottom, rgba(0,0,0,0), rgba(0,0,0,0.2))",
-        }}
-      />
-      <div
-        style={{
-          display: "flex",
-          position: "absolute",
-          left: 183 * scale,
-          top: -55.5 * scale,
-          width: 200 * scale,
-          height: 328 * scale,
-          transform: "rotate(15deg)",
+          left: -240,
+          top: -378,
+          width: 2400,
+          height: 1836,
+          transform: "rotate(-10deg)",
           transformOrigin: "50% 50%",
         }}
       >
-        {posters.map((src, i) => (
+        {Array.from({ length: 18 }, (_, i) => (
           <img
             key={i}
-            src={src}
-            width={64 * scale}
-            height={96 * scale}
+            src={posters[i % posters.length]}
+            width={388}
+            height={582}
             style={{
               position: "absolute",
-              left: Math.floor(i / 3) * 68 * scale,
-              top: ((Math.floor(i / 3) === 1 ? 0 : 32) + (i % 3) * 100) * scale,
-              width: 64 * scale,
-              height: 96 * scale,
+              left: (i % 6) * 400,
+              top: Math.floor(i / 6) * 612 - (i % 2) * 96,
+              width: 388,
+              height: 582,
               objectFit: "cover",
-              borderRadius: 4 * scale,
+              borderRadius: 12,
             }}
           />
         ))}
       </div>
+      <div
+        style={{
+          display: "flex",
+          position: "absolute",
+          left: 0,
+          top: 0,
+          width: 1920,
+          height: 1080,
+          backgroundColor: "rgba(0,0,0,0.58)",
+          backgroundImage:
+            "linear-gradient(to bottom, rgba(0,0,0,0.15), rgba(0,0,0,0), rgba(0,0,0,0.25))",
+        }}
+      />
     </div>
   );
 }
