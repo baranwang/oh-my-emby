@@ -727,6 +727,7 @@ export const crossPlatformAcceptance = (name: "workers" | "docker", harness: Acc
           "metadata_artwork_languages",
           "movie_collections",
           "collection_query_snapshots",
+          "library_covers",
         ],
         enabledEncoding: 1,
       });
