@@ -135,6 +135,83 @@ const get = (path: string, token = "token") =>
   });
 
 describe("Emby catalog routes", () => {
+  it("keeps the filename separate from the stream URL in item and playback responses", async () => {
+    const filename = "择天记 S01E01 1080p.mkv";
+    const named = `/Videos/movie-1/files/version-movie-1/${filename}`;
+    const stream = "/Videos/movie-1/stream?MediaSourceId=version-movie-1";
+    const value = item("movie-1");
+    const current = {
+      ...value,
+      mediaVersions: value.mediaVersions.map((version) => ({
+        ...version,
+        capabilities: { ...(version.capabilities as object), Name: `/private/library/${filename}` },
+      })),
+    };
+    const base = services();
+    const app = makeEmbyHandler({
+      ...base,
+      federation: { ...base.federation, detail: () => Effect.succeed(current) },
+      playback: {
+        getInfo: () =>
+          Effect.succeed({
+            playSessionId: "session",
+            mediaSources: [
+              {
+                Id: "version-movie-1",
+                Path: named,
+                DirectStreamUrl: stream,
+              },
+            ],
+          }),
+      },
+    });
+    const detail = (await (await Effect.runPromise(app(get("/Items/movie-1")))).json()) as any;
+    expect(detail.MediaSources[0].Path).toBe(named);
+    expect(detail.MediaSources[0].DirectStreamUrl).toBe(stream);
+    const response = await Effect.runPromise(
+      app(
+        new Request("http://localhost/Items/movie-1/PlaybackInfo", {
+          method: "POST",
+          headers: { authorization: "Bearer token", "user-agent": "Infuse-Direct/8.5.6" },
+        }),
+      ),
+    );
+    const playback = (await response.json()) as any;
+    expect(playback.MediaSources[0].Path).toBe(named);
+    expect(playback.MediaSources[0].DirectStreamUrl).toBe(stream);
+    expect(JSON.stringify(detail)).not.toContain("/private/library");
+  });
+
+  it.each(["GET", "HEAD"])(
+    "routes a named media path through authenticated version selection for %s",
+    async (method) => {
+      let observed: unknown;
+      const base = services();
+      const app = makeEmbyHandler({
+        ...base,
+        playback: {
+          ...base.playback,
+          resolveVideoRedirect: (input) => {
+            observed = input;
+            return Effect.succeed(new URL("https://cdn.example/video"));
+          },
+        },
+      });
+      const url = "https://local/Videos/movie-1/files/version-movie-1/Movie%201.mkv";
+      expect((await Effect.runPromise(app(new Request(url, { method })))).status).toBe(401);
+      expect(observed).toBeUndefined();
+      const response = await Effect.runPromise(
+        app(new Request(url, { method, headers: { authorization: "Bearer token" } })),
+      );
+      expect(response.status).toBe(302);
+      expect(observed).toMatchObject({ canonicalId: "movie-1", mediaSourceId: "version-movie-1" });
+      const conflict = await Effect.runPromise(
+        app(get(`${url.replace("https://local", "")}?MediaSourceId=another-version`)),
+      );
+      expect(conflict.status).toBe(400);
+    },
+  );
+
   it.each([
     ["Infuse-Direct/8.5.6", true],
     [" INFuSE/8.5.6 ", true],
@@ -841,6 +918,55 @@ describe("Emby catalog routes", () => {
       ],
     });
   });
+
+  it.each([
+    ["POST", "Infuse-Direct/8.5.6", true],
+    ["GET", " INFuSE/8.5.6 ", true],
+    ["POST", "Rex-Standard/0.5.0", false],
+  ])(
+    "preserves the configured Infuse authority for %s with %s",
+    async (method, agent, relative) => {
+      const path = "/Videos/movie-1/stream?MediaSourceId=version-movie-1";
+      const app = makeEmbyHandler(
+        services({
+          playback: {
+            getInfo: () =>
+              Effect.succeed({
+                playSessionId: "play-session",
+                mediaSources: [
+                  {
+                    Id: "version-movie-1",
+                    Protocol: "Http",
+                    Size: 3_435_256_467,
+                    Path: path,
+                    DirectStreamUrl: path,
+                  },
+                ],
+              }),
+          },
+        }),
+      );
+      // Infuse can omit the configured non-default port from its Host header.
+      const response = await Effect.runPromise(
+        app(
+          new Request("http://localhost/emby/Items/movie-1/PlaybackInfo", {
+            method,
+            headers: { authorization: "Bearer token", "user-agent": agent },
+          }),
+        ),
+      );
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as any;
+      const source = body.MediaSources[0];
+      const expected = relative ? path : `http://localhost${path}`;
+      expect(source.Path).toBe(expected);
+      expect(source.DirectStreamUrl).toBe(expected);
+      expect(source.Size).toBe(3_435_256_467);
+      if (relative) {
+        expect(new URL(source.Path, "http://localhost:3000").port).toBe("3000");
+      }
+    },
+  );
 
   it("returns JSON 404 before PlaybackInfo work for an unknown canonical item", async () => {
     let playbackCalls = 0;

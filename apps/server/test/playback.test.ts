@@ -515,6 +515,34 @@ describe("playback decisions", () => {
     expect(JSON.stringify(info)).not.toContain("api_key");
   });
 
+  it.each([
+    ["/srv/private/电影 S01E01.mkv", "电影 S01E01.mkv"],
+    ["https://upstream.example/video.mkv?api_key=secret", null],
+    ["movie.mkv\nsecret", null],
+    ["100% movie.mkv", null],
+    ["Movie%23.mkv", null],
+  ])("exposes only the display filename from %s", async (name, expected) => {
+    const entry = version("version-a", "source-a", "media-a");
+    const fixture = makeFixture({
+      sources: [source("a", "source-a", "item-a")],
+      eligible: [eligible("a", 0)],
+      versions: [{ ...entry, capabilities: { ...(entry.capabilities as object), Name: name } }],
+    });
+    const info = await fixture.run(
+      Effect.gen(function* () {
+        return yield* (yield* Playback).getInfo("movie-1");
+      }),
+    );
+    const output = info.mediaSources[0] as any;
+    const stream = "/Videos/movie-1/stream?MediaSourceId=version-a";
+    expect(output.Path).toBe(
+      expected === null ? stream : `/Videos/movie-1/files/version-a/${expected}`,
+    );
+    expect(output.DirectStreamUrl).toBe(stream);
+    expect(output.Path).not.toContain("secret");
+    expect(output.Path).not.toContain("private");
+  });
+
   it("resolves only registered external text subtitles by version and stream index", async () => {
     const sourceA = source("a", "source-a", "item-a");
     const fixture = makeFixture({

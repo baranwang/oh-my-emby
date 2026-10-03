@@ -1,4 +1,5 @@
 import { ClientLanguage, clientLanguage } from "../core/client-language.js";
+import { mediaFileName, mediaFilePath } from "../core/media-file-path.js";
 import { userAvatarPng } from "./user-avatar.js";
 import { Effect, Result, Schema } from "effect";
 import { getLogger } from "@logtape/logtape";
@@ -557,7 +558,13 @@ const itemDto = (item: CanonicalItemView, serverId: string): EmbyItemDtoValue =>
       });
       if (mapped === null) return [];
       const path = streamPath(item.id, version.id);
-      return [{ ...mapped, Path: path, DirectStreamUrl: path }];
+      return [
+        {
+          ...mapped,
+          Path: mediaFilePath(item.id, version.id, object(version.capabilities).Name) ?? path,
+          DirectStreamUrl: path,
+        },
+      ];
     }),
   } as EmbyItemDtoValue;
 };
@@ -566,6 +573,20 @@ const safeVideoPath = (value: JsonValue | undefined): string | null =>
   typeof value === "string" && /^\/Videos\/[^/?#]+\/stream\?MediaSourceId=[^&#]+$/.test(value)
     ? value
     : null;
+
+const safeNamedVideoPath = (value: JsonValue | undefined): string | null => {
+  if (typeof value !== "string") return null;
+  const match = value.match(/^\/Videos\/([^/?#]+)\/files\/([^/?#]+)\/([^/?#]+)$/);
+  if (match === null) return null;
+  try {
+    const canonicalId = decodeURIComponent(match[1]!);
+    const versionId = decodeURIComponent(match[2]!);
+    const filename = match[3]!;
+    return mediaFilePath(canonicalId, versionId, filename) === value ? value : null;
+  } catch {
+    return null;
+  }
+};
 
 const safeSubtitlePath = (value: JsonValue | undefined): string | null =>
   typeof value === "string" &&
@@ -579,7 +600,8 @@ const playbackInfoDto = (info: PlaybackInfoBoundary | PlaybackInfo): EmbyPlaybac
     const mapped = mediaSourceDto(source);
     if (mapped === null) return [];
     const raw = object(source);
-    const path = safeVideoPath(raw.Path) ?? safeVideoPath(raw.DirectStreamUrl);
+    const stream = safeVideoPath(raw.DirectStreamUrl) ?? safeVideoPath(raw.Path);
+    const path = safeNamedVideoPath(raw.Path) ?? stream;
     const streams = Array.isArray(raw.MediaStreams)
       ? raw.MediaStreams.flatMap((entry) => {
           const publicStream = mediaStreamDto(entry);
@@ -593,7 +615,7 @@ const playbackInfoDto = (info: PlaybackInfoBoundary | PlaybackInfo): EmbyPlaybac
     return [
       {
         ...mapped,
-        ...(path === null ? {} : { Path: path, DirectStreamUrl: path }),
+        ...(stream === null || path === null ? {} : { Path: path, DirectStreamUrl: stream }),
         MediaStreams: streams,
       } as EmbyMediaSourceDtoValue,
     ];
@@ -1096,6 +1118,10 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
       method === "GET" || method === "HEAD"
         ? path.match(/^\/Videos\/([^/]+)\/stream(?:\.[^/]+)?$/)
         : null;
+    const namedVideo =
+      method === "GET" || method === "HEAD"
+        ? path.match(/^\/Videos\/([^/]+)\/files\/([^/]+)\/([^/]+)$/)
+        : null;
     const videoDownload =
       method === "GET" || method === "HEAD" ? path.match(/^\/Items\/([^/]+)\/Download$/) : null;
     const image =
@@ -1162,6 +1188,7 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
       !played &&
       !playbackInfo &&
       !videoStream &&
+      !namedVideo &&
       !videoDownload &&
       !image &&
       !userImage &&
@@ -1482,12 +1509,18 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
         };
         if (typeof current.Path !== "string" || !current.Path.startsWith("/Videos/"))
           return [source];
-        const absolute = new URL(current.Path, request.url).href;
+        // Infuse may omit a non-default port from Host. Let it resolve the stream
+        // against its configured server instead of constructing an incorrect origin.
+        const infuse = clientUserAgent?.toLowerCase().includes("infuse") ?? false;
+        const streamUrl = infuse
+          ? (current.DirectStreamUrl ?? current.Path)
+          : new URL(current.DirectStreamUrl ?? current.Path, request.url).href;
+        const displayPath = infuse ? current.Path : new URL(current.Path, request.url).href;
         return [
           {
             ...current,
-            Path: absolute,
-            DirectStreamUrl: absolute,
+            Path: displayPath,
+            DirectStreamUrl: streamUrl,
             ...(playbackUserAgent === undefined
               ? {}
               : { RequiredHttpHeaders: { "User-Agent": playbackUserAgent } }),
@@ -1500,10 +1533,23 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
       return json({ ...dto, MediaSources: sources });
     }
 
-    if (videoStream || videoDownload) {
+    if (videoStream || videoDownload || namedVideo) {
       if (services.playback.resolveVideoRedirect === undefined) return notFound();
-      const canonicalId = yield* pathSegment((videoStream?.[1] ?? videoDownload?.[1])!);
-      const mediaSourceId = url.searchParams.get("MediaSourceId")?.trim() || undefined;
+      const canonicalId = yield* pathSegment(
+        (videoStream?.[1] ?? videoDownload?.[1] ?? namedVideo?.[1])!,
+      );
+      const requestedSource = url.searchParams.get("MediaSourceId")?.trim() || undefined;
+      const namedSource = namedVideo ? yield* pathSegment(namedVideo[2]!) : undefined;
+      if (namedVideo) {
+        const filename = yield* pathSegment(namedVideo[3]!);
+        if (
+          mediaFileName(filename) !== filename ||
+          (requestedSource !== undefined && requestedSource !== namedSource)
+        ) {
+          return yield* Effect.fail(new InvalidEmbyRequest());
+        }
+      }
+      const mediaSourceId = namedSource ?? requestedSource;
       const location = yield* services.playback.resolveVideoRedirect({
         canonicalId,
         ...(mediaSourceId === undefined ? {} : { mediaSourceId }),

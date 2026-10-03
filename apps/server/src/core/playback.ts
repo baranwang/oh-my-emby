@@ -10,6 +10,7 @@ import {
 } from "./limits.js";
 import type { EligibleSource, JsonValue, SourceItemRecord, SourceMediaVersion } from "./model.js";
 import { MetadataProviders } from "./metadata-providers.js";
+import { mediaFilePath } from "./media-file-path.js";
 import {
   ResourceCacheError,
   type CachedResource,
@@ -278,7 +279,7 @@ const mediaSource = (canonicalId: string, version: SourceMediaVersion): JsonValu
     ),
     Id: version.id,
     Name: version.label,
-    Path: local,
+    Path: mediaFilePath(canonicalId, version.id, details.Name) ?? local,
     DirectStreamUrl: local,
     SupportsDirectPlay: true,
     SupportsDirectStream: true,
