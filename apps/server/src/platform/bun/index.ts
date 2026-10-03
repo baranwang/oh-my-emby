@@ -1,3 +1,4 @@
+import { makeCollectionsLayer } from "../../core/collections.js";
 import { BunRuntime as EffectBunRuntime } from "@effect/platform-bun";
 import { dirname, join, resolve } from "node:path";
 import { mkdir } from "node:fs/promises";
@@ -106,18 +107,23 @@ const makeBunCoreLayer = (config: BunRuntimeConfig) => {
     fetch: config.upstreamFetch ?? fetch,
   }).pipe(Layer.provide(repositories));
   const foundation = Layer.mergeAll(repositories, upstream, identity, metadataProviders);
-  const federation = makeFederationLayer().pipe(Layer.provide(foundation));
+  const collections = makeCollectionsLayer().pipe(Layer.provide(foundation));
+  const federation = makeFederationLayer().pipe(
+    Layer.provide(Layer.merge(foundation, collections)),
+  );
   const auth = makeAuthLayer().pipe(Layer.provide(repositories));
   const userState = makeUserStateLayer().pipe(Layer.provide(repositories));
   const serverService = makeServerServiceLayer.pipe(Layer.provide(foundation));
   const libraryService = makeLibraryServiceLayer.pipe(Layer.provide(foundation));
   const metadataSettings = makeMetadataSettingsLayer.pipe(Layer.provide(repositories));
   const playback = makePlaybackLayer({
+    fetchArtwork: config.upstreamFetch ?? fetch,
     isClientUsableResource: ({ kind }) => kind === "image",
-  }).pipe(Layer.provide(Layer.merge(foundation, federation)));
+  }).pipe(Layer.provide(Layer.mergeAll(foundation, federation, collections)));
   const outbox = makeOutboxLayer().pipe(Layer.provide(foundation));
   return Layer.mergeAll(
     foundation,
+    collections,
     federation,
     auth,
     userState,
@@ -189,7 +195,7 @@ export const startBunRuntime = async (config: BunRuntimeConfig): Promise<BunRunt
           handleDashboard: () =>
             toDashboardWebResponse(dashboardHandler, request, dashboardRequest),
           handleEmby: makeEmbyHandler({
-            config: { serverId: "oh-my-emby", serverName: "oh-my-emby", version: "0.0.0" },
+            config: { serverId: "oh-my-emby", serverName: "OhMyEmby", version: "0.0.0" },
             now: Date.now,
             auth,
             federation,

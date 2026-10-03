@@ -1,3 +1,12 @@
+import {
+  collectionDto,
+  collectionsRootDto,
+  isCollectionsRoot,
+  isCollectionId,
+} from "./emby-collections.js";
+import { ClientLanguage, clientLanguage } from "../core/client-language.js";
+import { mediaFileName, mediaFilePath } from "../core/media-file-path.js";
+import { userAvatarPng } from "./user-avatar.js";
 import { Effect, Result, Schema } from "effect";
 import { getLogger } from "@logtape/logtape";
 
@@ -11,6 +20,7 @@ import type {
   FederationService,
   SortTerm,
 } from "../core/federation.js";
+import { FederationUnavailable } from "../core/federation.js";
 import type { LibraryServiceApi } from "../core/library-service.js";
 import type { DrivembyCompat, ItemFlags } from "../core/drivemby-compat.js";
 import { decodeHistoryCursor } from "../core/drivemby-compat.js";
@@ -70,7 +80,7 @@ export interface EmbyServices {
     FederationService,
     "list" | "search" | "studios" | "detail" | "lookupMembership"
   > &
-    Partial<Pick<FederationService, "showChildren">>;
+    Partial<Pick<FederationService, "showChildren" | "counts" | "collectionsAvailable">>;
   readonly compat?: DrivembyCompat;
   readonly userState: Pick<UserStateService, "write" | "recordPlaybackEvent">;
   readonly libraries: Pick<LibraryServiceApi, "list">;
@@ -476,11 +486,23 @@ const mediaSourceDto = (
 const streamPath = (canonicalId: string, mediaSourceId: string) =>
   `/Videos/${encodeURIComponent(canonicalId)}/stream?MediaSourceId=${encodeURIComponent(mediaSourceId)}`;
 
+const artworkRevisionTag = (metadata: Readonly<Record<string, JsonValue>>) => {
+  const revision =
+    typeof metadata.ExternalArtworkRevision === "number"
+      ? `-art-${metadata.ExternalArtworkRevision}`
+      : "";
+  const language =
+    typeof metadata.ExternalArtworkLanguage === "string"
+      ? `-lang-${metadata.ExternalArtworkLanguage}`
+      : "";
+  return revision + language;
+};
+
 const imageTagTypes = (metadata: Readonly<Record<string, JsonValue>>) =>
   Object.fromEntries(
     Object.entries(object(metadata.ImageTags ?? null)).flatMap(([type, tag]) =>
       /^[A-Za-z][A-Za-z0-9_-]{0,31}$/.test(type) && typeof tag === "string" && tag.length > 0
-        ? [[type, "local"]]
+        ? [[type, `local${artworkRevisionTag(metadata)}`]]
         : [],
     ),
   );
@@ -488,7 +510,7 @@ const imageTagTypes = (metadata: Readonly<Record<string, JsonValue>>) =>
 const backdropImageTags = (metadata: Readonly<Record<string, JsonValue>>) =>
   Array.isArray(metadata.BackdropImageTags)
     ? metadata.BackdropImageTags.flatMap((tag) =>
-        typeof tag === "string" && tag.length > 0 ? ["local"] : [],
+        typeof tag === "string" && tag.length > 0 ? [`local${artworkRevisionTag(metadata)}`] : [],
       )
     : [];
 
@@ -496,29 +518,60 @@ const externalImageTags = (metadata: Readonly<Record<string, JsonValue>>) => {
   const images = object(metadata.ExternalImages ?? null);
   return {
     primary: typeof images.Primary === "string" && images.Primary.length > 0,
+    logo: typeof images.Logo === "string" && images.Logo.length > 0,
     backdrops: Array.isArray(images.Backdrop)
       ? images.Backdrop.flatMap((image, index) =>
-          typeof image === "string" && image.length > 0 ? [`external-${index}`] : [],
+          typeof image === "string" && image.length > 0
+            ? [`external-${index}${artworkRevisionTag(metadata)}`]
+            : [],
         )
       : [],
   };
 };
 
 const itemDto = (item: CanonicalItemView, serverId: string): EmbyItemDtoValue => {
+  if (item.itemType === "BoxSet")
+    return collectionDto(
+      {
+        id: item.id,
+        displayMetadata: item.displayMetadata,
+        childCount: item.collection?.childCount ?? 0,
+        incompleteSourceIds: item.incompleteSourceIds,
+      },
+      serverId,
+    );
   const metadata = object(item.displayMetadata);
   const upstreamImageTags = imageTagTypes(metadata);
   const upstreamBackdrops = backdropImageTags(metadata);
   const external = externalImageTags(metadata);
-  const imageTags =
-    external.primary && upstreamImageTags.Primary === undefined
-      ? { ...upstreamImageTags, Primary: "external" }
-      : upstreamImageTags;
+  const imageTags = {
+    ...upstreamImageTags,
+    ...(external.primary && upstreamImageTags.Primary === undefined
+      ? { Primary: `external${artworkRevisionTag(metadata)}` }
+      : {}),
+    ...(external.logo && upstreamImageTags.Logo === undefined
+      ? { Logo: `external${artworkRevisionTag(metadata)}` }
+      : {}),
+  };
   const backdrops = upstreamBackdrops.length > 0 ? upstreamBackdrops : external.backdrops;
   return {
     ...pickScalars(metadata, itemScalarFields),
     Id: item.id,
     ServerId: serverId,
     Type: item.itemType,
+    ...(item.hierarchy === undefined
+      ? {}
+      : {
+          SeriesId: item.hierarchy.seriesId,
+          ParentId: item.hierarchy.parentId,
+          ...(item.hierarchy.seriesName === undefined
+            ? {}
+            : { SeriesName: item.hierarchy.seriesName }),
+          ...(item.hierarchy.seasonId === undefined ? {} : { SeasonId: item.hierarchy.seasonId }),
+          ...(item.hierarchy.seasonName === undefined
+            ? {}
+            : { SeasonName: item.hierarchy.seasonName }),
+        }),
     ...(Object.keys(imageTags).length > 0 ? { ImageTags: imageTags } : {}),
     ...(backdrops.length > 0 ? { BackdropImageTags: backdrops } : {}),
     ...(Array.isArray(metadata.Genres) &&
@@ -534,7 +587,13 @@ const itemDto = (item: CanonicalItemView, serverId: string): EmbyItemDtoValue =>
       });
       if (mapped === null) return [];
       const path = streamPath(item.id, version.id);
-      return [{ ...mapped, Path: path, DirectStreamUrl: path }];
+      return [
+        {
+          ...mapped,
+          Path: mediaFilePath(item.id, version.id, object(version.capabilities).Name) ?? path,
+          DirectStreamUrl: path,
+        },
+      ];
     }),
   } as EmbyItemDtoValue;
 };
@@ -543,6 +602,20 @@ const safeVideoPath = (value: JsonValue | undefined): string | null =>
   typeof value === "string" && /^\/Videos\/[^/?#]+\/stream\?MediaSourceId=[^&#]+$/.test(value)
     ? value
     : null;
+
+const safeNamedVideoPath = (value: JsonValue | undefined): string | null => {
+  if (typeof value !== "string") return null;
+  const match = value.match(/^\/Videos\/([^/?#]+)\/files\/([^/?#]+)\/([^/?#]+)$/);
+  if (match === null) return null;
+  try {
+    const canonicalId = decodeURIComponent(match[1]!);
+    const versionId = decodeURIComponent(match[2]!);
+    const filename = match[3]!;
+    return mediaFilePath(canonicalId, versionId, filename) === value ? value : null;
+  } catch {
+    return null;
+  }
+};
 
 const safeSubtitlePath = (value: JsonValue | undefined): string | null =>
   typeof value === "string" &&
@@ -556,7 +629,8 @@ const playbackInfoDto = (info: PlaybackInfoBoundary | PlaybackInfo): EmbyPlaybac
     const mapped = mediaSourceDto(source);
     if (mapped === null) return [];
     const raw = object(source);
-    const path = safeVideoPath(raw.Path) ?? safeVideoPath(raw.DirectStreamUrl);
+    const stream = safeVideoPath(raw.DirectStreamUrl) ?? safeVideoPath(raw.Path);
+    const path = safeNamedVideoPath(raw.Path) ?? stream;
     const streams = Array.isArray(raw.MediaStreams)
       ? raw.MediaStreams.flatMap((entry) => {
           const publicStream = mediaStreamDto(entry);
@@ -570,7 +644,7 @@ const playbackInfoDto = (info: PlaybackInfoBoundary | PlaybackInfo): EmbyPlaybac
     return [
       {
         ...mapped,
-        ...(path === null ? {} : { Path: path, DirectStreamUrl: path }),
+        ...(stream === null || path === null ? {} : { Path: path, DirectStreamUrl: stream }),
         MediaStreams: streams,
       } as EmbyMediaSourceDtoValue,
     ];
@@ -608,7 +682,11 @@ const query = (
   return {
     userId: principal.username,
     deviceId: principal.deviceId,
-    virtualLibraryId: input.ParentId ?? null,
+    virtualLibraryId:
+      input.ParentId && !isCollectionsRoot(input.ParentId) && !isCollectionId(input.ParentId)
+        ? input.ParentId
+        : null,
+    ...(input.ParentId && isCollectionId(input.ParentId) ? { collectionId: input.ParentId } : {}),
     startIndex: input.StartIndex ?? 0,
     limit: input.Limit ?? 100,
     sort,
@@ -616,9 +694,59 @@ const query = (
       ...(input.Filters ?? []).map(filter),
       ...(input.Studios === undefined ? [] : [{ field: "Studios", value: input.Studios }]),
     ],
-    itemTypes: [...new Set(input.IncludeItemTypes ?? [])],
+    itemTypes: [
+      ...new Set(
+        input.IncludeItemTypes ??
+          (input.ParentId && isCollectionsRoot(input.ParentId)
+            ? ["BoxSet"]
+            : input.ParentId && isCollectionId(input.ParentId)
+              ? ["Movie"]
+              : []),
+      ),
+    ],
     ...(input.Fields === undefined ? {} : { fields: input.Fields }),
   };
+};
+
+const countProbeParameters = new Set([
+  "UserId",
+  "userId",
+  "api_key",
+  "apiKey",
+  "X-Emby-Token",
+  "StartIndex",
+  "Limit",
+  "Recursive",
+  "IncludeItemTypes",
+  "EnableTotalRecordCount",
+  "Fields",
+  "SortBy",
+  "SortOrder",
+  "EnableImageTypes",
+  "EnableImages",
+  "ImageTypeLimit",
+  "EnableUserData",
+]);
+
+// Server cards request one item (or none) and read TotalRecordCount as a whole-server statistic.
+// A federated page's has-more estimate must not be used as that statistic.
+const countProbeKeys = (url: URL, input: FederatedQuery) => {
+  if (
+    input.virtualLibraryId !== null ||
+    input.startIndex !== 0 ||
+    input.limit > 1 ||
+    url.searchParams.get("Recursive")?.toLowerCase() !== "true" ||
+    url.searchParams.get("EnableTotalRecordCount")?.toLowerCase() === "false" ||
+    [...url.searchParams.keys()].some((key) => !countProbeParameters.has(key)) ||
+    input.itemTypes.length === 0 ||
+    input.itemTypes.some((type) => !["Movie", "Series", "Episode"].includes(type))
+  )
+    return null;
+  return input.itemTypes.map((type) => {
+    if (type === "Movie") return "MovieCount" as const;
+    if (type === "Series") return "SeriesCount" as const;
+    return "EpisodeCount" as const;
+  });
 };
 
 const principalFor = (services: EmbyServices, request: Request, url: URL) => {
@@ -675,7 +803,7 @@ const playbackEvent = (
 const serverInfo = (services: EmbyServices) => ({
   Id: services.config.serverId,
   ServerName: services.config.serverName,
-  ProductName: "oh-my-emby",
+  ProductName: "OhMyEmby",
   Version: services.config.version,
   OperatingSystem: "Unknown",
   StartupWizardCompleted: true,
@@ -685,14 +813,13 @@ const user = (services: EmbyServices, userId: string) => ({
   Id: userId,
   Name: userId,
   ServerId: services.config.serverId,
+  PrimaryImageTag: "ohmyemby-logo-png-v1",
+  PrimaryImageAspectRatio: 1,
   HasPassword: true,
   HasConfiguredPassword: true,
   Configuration: {},
   Policy: { IsAdministrator: true, IsDisabled: false },
 });
-
-const defaultUserLogo = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><path fill="#00c950" d="M391.915 157.252c10.723-7.791 13.201-22.924 4.134-32.592a192 192 0 0 0-227.215-39.733 192 192 0 0 0-52.883 39.733c-9.067 9.668-6.589 24.801 4.134 32.592s25.611 5.235 35.073-4.047A144 144 0 0 1 256 112a144 144 0 0 1 100.842 41.205c9.462 9.282 24.349 11.838 35.073 4.047"/><path fill="#262626" d="M105.003 182.354c-11.914-5.811-26.439-.894-30.719 11.651a191.995 191.995 0 0 0 71.589 219.272 192 192 0 0 0 59.909 28.039c12.794 3.467 24.992-5.825 26.837-18.951s-7.401-25.07-20.039-29.067a143.987 143.987 0 0 1-83.724-69.694 144 144 0 0 1-10.961-108.383c3.753-12.712-.979-27.057-12.892-32.867"/><path fill="#737373" d="M276.474 422.748c1.615 13.156 13.65 22.66 26.502 19.417a192.02 192.02 0 0 0 120.951-93.082 191.98 191.98 0 0 0 14.843-151.897c-4.06-12.618-18.497-17.788-30.51-12.186s-16.995 19.862-13.464 32.637a144 144 0 0 1-12.851 108.176 144 144 0 0 1-84.928 68.222c-12.705 3.775-22.158 15.557-20.543 28.713"/><path fill="#00c950" d="M328 242.144c10.667 6.158 10.667 21.554 0 27.712l-96 55.426c-10.667 6.158-24-1.54-24-13.856V200.574c0-12.316 13.333-20.014 24-13.856z"/></svg>`;
-const defaultUserLogoBytes = new TextEncoder().encode(defaultUserLogo);
 
 const loadFlags = (services: EmbyServices, ids: ReadonlyArray<string>) =>
   services.compat === undefined || ids.length === 0
@@ -1033,6 +1160,10 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
       method === "GET" || method === "HEAD"
         ? path.match(/^\/Videos\/([^/]+)\/stream(?:\.[^/]+)?$/)
         : null;
+    const namedVideo =
+      method === "GET" || method === "HEAD"
+        ? path.match(/^\/Videos\/([^/]+)\/files\/([^/]+)\/([^/]+)$/)
+        : null;
     const videoDownload =
       method === "GET" || method === "HEAD" ? path.match(/^\/Items\/([^/]+)\/Download$/) : null;
     const image =
@@ -1099,6 +1230,7 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
       !played &&
       !playbackInfo &&
       !videoStream &&
+      !namedVideo &&
       !videoDownload &&
       !image &&
       !userImage &&
@@ -1143,11 +1275,10 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
       });
     }
     if (itemCounts) {
-      return json(
-        services.compat === undefined
-          ? { MovieCount: 0, SeriesCount: 0, EpisodeCount: 0, ItemCount: 0 }
-          : yield* services.compat.counts(),
-      );
+      if (services.federation.counts === undefined) {
+        return yield* Effect.fail(new FederationUnavailable({ sourceIds: [] }));
+      }
+      return json(yield* services.federation.counts(clientUserAgent));
     }
     if (genres) {
       const bounds = pageBounds(url);
@@ -1203,7 +1334,9 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
     if (views) {
       yield* requireUser(principal, views[1]!);
       const libraries = yield* services.libraries.list();
-      const items = libraries
+      const items: Array<
+        ReturnType<typeof collectionsRootDto> & { UserData: ReturnType<typeof userData> }
+      > = libraries
         .filter(({ enabled }) => enabled)
         .map((library) => ({
           Id: library.id,
@@ -1214,6 +1347,14 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
           IsFolder: true,
           UserData: userData(null, library.id),
         }));
+      if (
+        services.federation.collectionsAvailable &&
+        (yield* services.federation.collectionsAvailable())
+      )
+        items.push({
+          ...collectionsRootDto(services.config.serverId),
+          UserData: userData(null, "collections:movies"),
+        });
       return json({ Items: items, TotalRecordCount: items.length, StartIndex: 0 });
     }
 
@@ -1246,6 +1387,7 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
       const base = query(principal, decoded);
       const input: FederatedQuery = {
         ...base,
+        ...(clientUserAgent?.toLowerCase().includes("infuse") ? { indexedPagination: true } : {}),
         ...(resumeItems
           ? {
               filters: [...base.filters, { field: "resume", value: true }],
@@ -1257,8 +1399,27 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
           : {}),
         ...(clientUserAgent === undefined ? {} : { clientUserAgent }),
       };
+      const probeKeys = !resumeItems && !studios ? countProbeKeys(url, input) : null;
+      let probeTotal: number | undefined;
+      if (probeKeys !== null) {
+        if (services.federation.counts === undefined) {
+          return yield* Effect.fail(new FederationUnavailable({ sourceIds: [] }));
+        }
+        const counts = yield* services.federation.counts(clientUserAgent);
+        probeTotal = probeKeys.reduce((total, key) => total + counts[key], 0);
+        if (!Number.isSafeInteger(probeTotal)) {
+          return yield* Effect.fail(new FederationUnavailable({ sourceIds: [] }));
+        }
+      }
       let page: FederatedPage;
-      if (studios) {
+      if (probeTotal !== undefined && input.limit === 0) {
+        page = {
+          items: [],
+          totalRecordCount: probeTotal,
+          exhausted: true,
+          incompleteSourceIds: [],
+        };
+      } else if (studios) {
         page = yield* services.federation.studios(input);
       } else if (decoded.SearchTerm) {
         page = yield* services.federation.search({ ...input, searchTerm: decoded.SearchTerm });
@@ -1286,7 +1447,7 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
             ? itemDto(item, services.config.serverId)
             : paintItem(services, itemDto(item, services.config.serverId), flags),
         ),
-        TotalRecordCount: page.totalRecordCount - (page.items.length - items.length),
+        TotalRecordCount: probeTotal ?? page.totalRecordCount - (page.items.length - items.length),
         StartIndex: input.startIndex,
       });
     }
@@ -1294,6 +1455,17 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
     if (userDetail || itemDetail) {
       if (userDetail) yield* requireUser(principal, userDetail[1]!);
       const canonicalId = yield* pathSegment((userDetail?.[2] ?? itemDetail?.[1])!);
+      if (isCollectionsRoot(canonicalId)) {
+        if (
+          !services.federation.collectionsAvailable ||
+          !(yield* services.federation.collectionsAvailable())
+        )
+          return yield* Effect.fail(new EmbyNotFound());
+        return json({
+          ...collectionsRootDto(services.config.serverId),
+          UserData: userData(null, canonicalId),
+        });
+      }
       const library = (yield* services.libraries.list()).find(
         ({ id, enabled }) => enabled && id === canonicalId,
       );
@@ -1324,6 +1496,8 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
     if (userDataRoute) {
       yield* requireUser(principal, userDataRoute[1]!);
       const canonicalId = yield* pathSegment(userDataRoute[2]!);
+      if (isCollectionId(canonicalId) || isCollectionsRoot(canonicalId))
+        return yield* Effect.fail(new EmbyNotFound());
       const body = yield* readJson(request).pipe(
         Effect.flatMap((value) => decode(EmbyUserDataPatch, value)),
       );
@@ -1341,6 +1515,8 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
     if (favorite && (method === "POST" || method === "DELETE")) {
       yield* requireUser(principal, favorite[1]!);
       const canonicalId = yield* pathSegment(favorite[2]!);
+      if (isCollectionId(canonicalId) || isCollectionsRoot(canonicalId))
+        return yield* Effect.fail(new EmbyNotFound());
       const membership = yield* services.federation.lookupMembership(canonicalId);
       if (membership === null) return yield* Effect.fail(new EmbyNotFound());
       const written = yield* services.userState.write(membership.item.id, {
@@ -1353,6 +1529,8 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
     if (played && (method === "POST" || method === "DELETE")) {
       yield* requireUser(principal, played[1]!);
       const canonicalId = yield* pathSegment(played[2]!);
+      if (isCollectionId(canonicalId) || isCollectionsRoot(canonicalId))
+        return yield* Effect.fail(new EmbyNotFound());
       const membership = yield* services.federation.lookupMembership(canonicalId);
       if (membership === null) return yield* Effect.fail(new EmbyNotFound());
       const patch: UserStatePatch =
@@ -1366,6 +1544,8 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
 
     if (playbackInfo) {
       const canonicalId = yield* pathSegment(playbackInfo[1]!);
+      if (isCollectionId(canonicalId) || isCollectionsRoot(canonicalId))
+        return yield* Effect.fail(new EmbyNotFound());
       const body =
         method === "POST"
           ? yield* readOptionalJson(request).pipe(
@@ -1400,12 +1580,18 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
         };
         if (typeof current.Path !== "string" || !current.Path.startsWith("/Videos/"))
           return [source];
-        const absolute = new URL(current.Path, request.url).href;
+        // Infuse may omit a non-default port from Host. Let it resolve the stream
+        // against its configured server instead of constructing an incorrect origin.
+        const infuse = clientUserAgent?.toLowerCase().includes("infuse") ?? false;
+        const streamUrl = infuse
+          ? (current.DirectStreamUrl ?? current.Path)
+          : new URL(current.DirectStreamUrl ?? current.Path, request.url).href;
+        const displayPath = infuse ? current.Path : new URL(current.Path, request.url).href;
         return [
           {
             ...current,
-            Path: absolute,
-            DirectStreamUrl: absolute,
+            Path: displayPath,
+            DirectStreamUrl: streamUrl,
             ...(playbackUserAgent === undefined
               ? {}
               : { RequiredHttpHeaders: { "User-Agent": playbackUserAgent } }),
@@ -1418,10 +1604,23 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
       return json({ ...dto, MediaSources: sources });
     }
 
-    if (videoStream || videoDownload) {
+    if (videoStream || videoDownload || namedVideo) {
       if (services.playback.resolveVideoRedirect === undefined) return notFound();
-      const canonicalId = yield* pathSegment((videoStream?.[1] ?? videoDownload?.[1])!);
-      const mediaSourceId = url.searchParams.get("MediaSourceId")?.trim() || undefined;
+      const canonicalId = yield* pathSegment(
+        (videoStream?.[1] ?? videoDownload?.[1] ?? namedVideo?.[1])!,
+      );
+      const requestedSource = url.searchParams.get("MediaSourceId")?.trim() || undefined;
+      const namedSource = namedVideo ? yield* pathSegment(namedVideo[2]!) : undefined;
+      if (namedVideo) {
+        const filename = yield* pathSegment(namedVideo[3]!);
+        if (
+          mediaFileName(filename) !== filename ||
+          (requestedSource !== undefined && requestedSource !== namedSource)
+        ) {
+          return yield* Effect.fail(new InvalidEmbyRequest());
+        }
+      }
+      const mediaSourceId = namedSource ?? requestedSource;
       const location = yield* services.playback.resolveVideoRedirect({
         canonicalId,
         ...(mediaSourceId === undefined ? {} : { mediaSourceId }),
@@ -1473,11 +1672,11 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
       const imageType = yield* pathSegment(userImage[2]!);
       const index = userImage[3] === undefined ? 0 : Number(userImage[3]);
       if (imageType !== "Primary" || index !== 0) return yield* Effect.fail(new EmbyNotFound());
-      return new Response(method === "HEAD" ? null : defaultUserLogoBytes, {
+      return new Response(method === "HEAD" ? null : userAvatarPng, {
         status: 200,
         headers: {
-          "content-type": "image/svg+xml",
-          "content-length": String(defaultUserLogoBytes.byteLength),
+          "content-type": "image/png",
+          "content-length": String(userAvatarPng.byteLength),
           "cache-control": "private, no-store",
         },
       });
@@ -1774,6 +1973,7 @@ export const makeEmbyHandler =
   (request: Request): Effect.Effect<Response> => {
     const startedAt = Date.now();
     return handle(services, request).pipe(
+      Effect.provideService(ClientLanguage, clientLanguage(request.headers.get("accept-language"))),
       Effect.tap((response) => Effect.sync(() => logRequest(request, response, startedAt))),
       Effect.catch((error) =>
         Effect.sync(() => {

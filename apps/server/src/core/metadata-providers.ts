@@ -1,445 +1,905 @@
-import { Context, Effect, Layer, Result, Schema } from "effect"
+import type { TmdbCollectionPayload } from "./collection-model.js";
+import { Context, Effect, Layer, Result, Schema, Semaphore } from "effect";
 
-import { METADATA_FRESH_MS, METADATA_STALE_MS } from "./limits.js"
-import type {
-  ExternalMetadataCacheEntry,
-  JsonValue,
-  MetadataProviderSetting
-} from "./model.js"
-import { Repositories, type CatalogItemRecord } from "./repositories.js"
+import { ClientLanguage } from "./client-language.js";
+import { METADATA_FRESH_MS, METADATA_STALE_MS } from "./limits.js";
+import type { ExternalMetadataCacheEntry, JsonValue, MetadataProviderSetting } from "./model.js";
+import { Repositories, type CatalogItemRecord } from "./repositories.js";
+import { artworkLanguage, selectArtworkPath } from "./tmdb-artwork.js";
 
-const PROVIDER_DEADLINE_MS = 5_000
-const MAX_PROVIDER_RESPONSE_BYTES = 1024 * 1024
-const PRODUCT_USER_AGENT = "oh-my-emby/0.0.0"
+const PROVIDER_DEADLINE_MS = 5_000;
+const MAX_PROVIDER_RESPONSE_BYTES = 1024 * 1024;
+const PRODUCT_USER_AGENT = "oh-my-emby/0.0.0";
 
-type ProviderId = MetadataProviderSetting["id"]
-type FailureReason = "credential" | "rate-limit" | "timeout" | "unavailable" | "invalid-response"
+type ProviderId = MetadataProviderSetting["id"];
+type FailureReason = "credential" | "rate-limit" | "timeout" | "unavailable" | "invalid-response";
 
 export interface ExternalMetadataPayload {
-  readonly Name?: string
-  readonly Overview?: string
+  readonly TmdbMovieId?: string;
+  readonly TmdbCollectionId?: string | null;
+  readonly Name?: string;
+  readonly Overview?: string;
   readonly ExternalImages?: {
-    readonly Primary?: string
-    readonly Backdrop?: ReadonlyArray<string>
-  }
+    readonly Primary?: string;
+    readonly Logo?: string;
+    readonly Backdrop?: ReadonlyArray<string>;
+  };
+  readonly ExternalArtworkRevision?: number;
+  readonly ExternalArtworkLanguage?: string;
 }
 
 export class MetadataProviderFailure extends Schema.TaggedError<MetadataProviderFailure>()(
   "MetadataProviderFailure",
   {
     providerId: Schema.Literals(["tmdb", "trakt"]),
-    reason: Schema.Literals(["credential", "rate-limit", "timeout", "unavailable", "invalid-response"])
-  }
+    reason: Schema.Literals([
+      "credential",
+      "rate-limit",
+      "timeout",
+      "unavailable",
+      "invalid-response",
+    ]),
+  },
 ) {}
 
 export interface MetadataProvidersApi {
+  readonly readTmdbCollection: (
+    id: string,
+    cachedOnly?: boolean,
+  ) => Effect.Effect<TmdbCollectionPayload | null, import("./errors.js").RepositoryError>;
   readonly refresh: (
-    record: CatalogItemRecord
-  ) => Effect.Effect<CatalogItemRecord, import("./errors.js").RepositoryError>
+    record: CatalogItemRecord,
+  ) => Effect.Effect<CatalogItemRecord, import("./errors.js").RepositoryError>;
   readonly overlayCached: (
-    record: CatalogItemRecord
-  ) => Effect.Effect<CatalogItemRecord, import("./errors.js").RepositoryError>
+    record: CatalogItemRecord,
+  ) => Effect.Effect<CatalogItemRecord, import("./errors.js").RepositoryError>;
   readonly resolveCachedImage: (
     record: CatalogItemRecord,
     imageType: string,
-    imageIndex?: number
-  ) => Effect.Effect<URL | null, import("./errors.js").RepositoryError>
+    imageIndex?: number,
+  ) => Effect.Effect<URL | null, import("./errors.js").RepositoryError>;
 }
 
 export class MetadataProviders extends Context.Service<MetadataProviders, MetadataProvidersApi>()(
-  "oh-my-emby/MetadataProviders"
+  "oh-my-emby/MetadataProviders",
 ) {}
 
 export interface MetadataProvidersConfig {
-  readonly fetch: typeof globalThis.fetch
-  readonly now?: () => number
-  readonly deadlineMs?: number
-  readonly maxResponseBytes?: number
+  readonly fetch: typeof globalThis.fetch;
+  readonly now?: () => number;
+  readonly deadlineMs?: number;
+  readonly maxResponseBytes?: number;
 }
 
 const object = (value: unknown): value is Readonly<Record<string, unknown>> =>
-  typeof value === "object" && value !== null && !Array.isArray(value)
+  typeof value === "object" && value !== null && !Array.isArray(value);
 
 const text = (value: unknown): string | undefined => {
-  if (typeof value !== "string") return undefined
-  const normalized = value.trim()
-  return normalized === "" ? undefined : normalized
-}
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim();
+  return normalized === "" ? undefined : normalized;
+};
 
 const allowedImage = (
   providerId: ProviderId,
   value: string,
-  tmdbSize?: "w780" | "w1280"
+  tmdbSize?: "w500" | "w780" | "w1280",
 ): string | undefined => {
-  let url: URL
+  let url: URL;
   try {
-    url = new URL(value)
+    url = new URL(value);
   } catch {
-    return undefined
+    return undefined;
   }
-  const hostname = providerId === "tmdb" ? "image.tmdb.org" : "walter-r2.trakt.tv"
+  const hostname = providerId === "tmdb" ? "image.tmdb.org" : "walter-r2.trakt.tv";
   return url.protocol === "https:" &&
     url.hostname === hostname &&
     url.port === "" &&
     url.username === "" &&
     url.password === "" &&
-    (providerId !== "tmdb" || tmdbSize === undefined || url.pathname.startsWith(`/t/p/${tmdbSize}/`))
+    (providerId !== "tmdb" ||
+      tmdbSize === undefined ||
+      url.pathname.startsWith(`/t/p/${tmdbSize}/`))
     ? url.href
-    : undefined
-}
+    : undefined;
+};
 
-const tmdbImage = (path: unknown, size: "w780" | "w1280"): string | undefined => {
-  const value = text(path)
-  if (value === undefined || !/^\/[A-Za-z0-9_./-]+$/.test(value)) return undefined
-  return allowedImage("tmdb", `https://image.tmdb.org/t/p/${size}${value}`, size)
-}
+const tmdbImage = (path: unknown, size: "w500" | "w780" | "w1280"): string | undefined => {
+  const value = text(path);
+  if (value === undefined || !/^\/[A-Za-z0-9_./-]+$/.test(value)) return undefined;
+  return allowedImage("tmdb", `https://image.tmdb.org/t/p/${size}${value}`, size);
+};
 
 const imageValues = (value: unknown): ReadonlyArray<string> => {
-  if (typeof value === "string") return [value]
-  if (Array.isArray(value)) return value.filter((entry): entry is string => typeof entry === "string")
-  if (object(value) && typeof value.full === "string") return [value.full]
-  return []
-}
+  if (typeof value === "string") return [value];
+  if (Array.isArray(value))
+    return value.filter((entry): entry is string => typeof entry === "string");
+  if (object(value) && typeof value.full === "string") return [value.full];
+  return [];
+};
 
-const traktImages = (value: unknown): ReadonlyArray<string> => imageValues(value).flatMap((raw) => {
-  const normalized = raw.startsWith("//") ? `https:${raw}` : raw
-  const accepted = allowedImage("trakt", normalized)
-  return accepted === undefined ? [] : [accepted]
-})
+const traktImages = (value: unknown): ReadonlyArray<string> =>
+  imageValues(value).flatMap((raw) => {
+    const normalized = raw.startsWith("//") ? `https:${raw}` : raw;
+    const accepted = allowedImage("trakt", normalized);
+    return accepted === undefined ? [] : [accepted];
+  });
 
 const payload = (
   name: string | undefined,
   overview: string | undefined,
   primary: string | undefined,
-  backdrops: ReadonlyArray<string>
+  backdrops: ReadonlyArray<string>,
+  logo?: string,
+  revision?: number,
+  language?: string,
 ): ExternalMetadataPayload => ({
   ...(name === undefined ? {} : { Name: name }),
   ...(overview === undefined ? {} : { Overview: overview }),
-  ...(primary === undefined && backdrops.length === 0
+  ...(revision === undefined ? {} : { ExternalArtworkRevision: revision }),
+  ...(language === undefined ? {} : { ExternalArtworkLanguage: language }),
+  ...(primary === undefined && logo === undefined && backdrops.length === 0
     ? {}
-    : { ExternalImages: {
-        ...(primary === undefined ? {} : { Primary: primary }),
-        ...(backdrops.length === 0 ? {} : { Backdrop: backdrops })
-      } })
-})
+    : {
+        ExternalImages: {
+          ...(primary === undefined ? {} : { Primary: primary }),
+          ...(logo === undefined ? {} : { Logo: logo }),
+          ...(backdrops.length === 0 ? {} : { Backdrop: backdrops }),
+        },
+      }),
+});
 
+const collectionFields = (
+  value: unknown,
+): Pick<ExternalMetadataPayload, "TmdbMovieId" | "TmdbCollectionId"> => {
+  if (!object(value)) return {};
+  const fields: { TmdbMovieId?: string; TmdbCollectionId?: string | null } = {};
+  if (typeof value.id === "number" && Number.isSafeInteger(value.id) && value.id > 0)
+    fields.TmdbMovieId = String(value.id);
+  if (value.belongs_to_collection === null) fields.TmdbCollectionId = null;
+  else if (
+    object(value.belongs_to_collection) &&
+    typeof value.belongs_to_collection.id === "number" &&
+    Number.isSafeInteger(value.belongs_to_collection.id) &&
+    value.belongs_to_collection.id > 0
+  )
+    fields.TmdbCollectionId = String(value.belongs_to_collection.id);
+  return fields;
+};
+const cachedCollectionFields = (
+  value: unknown,
+): Pick<ExternalMetadataPayload, "TmdbMovieId" | "TmdbCollectionId"> => {
+  if (!object(value)) return {};
+  const fields: { TmdbMovieId?: string; TmdbCollectionId?: string | null } = {};
+  if (typeof value.TmdbMovieId === "string" && /^[1-9]\d*$/.test(value.TmdbMovieId))
+    fields.TmdbMovieId = value.TmdbMovieId;
+  if (value.TmdbCollectionId === null) fields.TmdbCollectionId = null;
+  else if (typeof value.TmdbCollectionId === "string" && /^[1-9]\d*$/.test(value.TmdbCollectionId))
+    fields.TmdbCollectionId = value.TmdbCollectionId;
+  return fields;
+};
 const tmdbPayload = (value: unknown, itemType: string): ExternalMetadataPayload | null => {
-  if (!object(value)) throw new TypeError("invalid TMDB response")
-  const results = itemType === "Movie" ? value.movie_results : value.tv_results
-  if (!Array.isArray(results)) throw new TypeError("invalid TMDB response")
-  if (results.length === 0) return null
-  const first = results[0]
-  if (!object(first)) throw new TypeError("invalid TMDB result")
+  if (!object(value)) throw new TypeError("invalid TMDB response");
+  const results = itemType === "Movie" ? value.movie_results : value.tv_results;
+  if (!Array.isArray(results)) throw new TypeError("invalid TMDB response");
+  if (results.length === 0) return null;
+  const first = results[0];
+  if (!object(first)) throw new TypeError("invalid TMDB result");
   return payload(
     text(itemType === "Movie" ? first.title : first.name),
     text(first.overview),
     tmdbImage(first.poster_path, "w780"),
-    [tmdbImage(first.backdrop_path, "w1280")].filter((entry): entry is string => entry !== undefined)
-  )
-}
+    [tmdbImage(first.backdrop_path, "w1280")].filter(
+      (entry): entry is string => entry !== undefined,
+    ),
+  );
+};
 
 const traktPayload = (value: unknown, requestedImdbId: string): ExternalMetadataPayload => {
   if (!object(value) || !object(value.ids) || value.ids.imdb !== requestedImdbId) {
-    throw new TypeError("invalid Trakt response")
+    throw new TypeError("invalid Trakt response");
   }
-  const images = object(value.images) ? value.images : {}
+  const images = object(value.images) ? value.images : {};
   return payload(
     text(value.title),
     text(value.overview),
     traktImages(images.poster)[0],
-    traktImages(images.fanart)
-  )
-}
+    traktImages(images.fanart),
+  );
+};
 
 const cachedPayload = (
   providerId: ProviderId,
-  value: JsonValue | null
+  value: JsonValue | null,
 ): ExternalMetadataPayload | null => {
-  if (!object(value)) return null
-  const images = object(value.ExternalImages) ? value.ExternalImages : {}
-  const primary = text(images.Primary)
+  if (!object(value)) return null;
+  const images = object(value.ExternalImages) ? value.ExternalImages : {};
+  const primary = text(images.Primary);
+  const logo = text(images.Logo);
   const backdrops = Array.isArray(images.Backdrop)
     ? images.Backdrop.flatMap((entry) => {
-        const candidate = text(entry)
-        const accepted = candidate === undefined
-          ? undefined
-          : allowedImage(providerId, candidate, providerId === "tmdb" ? "w1280" : undefined)
-        return accepted === undefined ? [] : [accepted]
+        const candidate = text(entry);
+        const accepted =
+          candidate === undefined
+            ? undefined
+            : allowedImage(providerId, candidate, providerId === "tmdb" ? "w1280" : undefined);
+        return accepted === undefined ? [] : [accepted];
       })
-    : []
-  const acceptedPrimary = primary === undefined
-    ? undefined
-    : allowedImage(providerId, primary, providerId === "tmdb" ? "w780" : undefined)
-  return payload(text(value.Name), text(value.Overview), acceptedPrimary, backdrops)
-}
+    : [];
+  const acceptedPrimary =
+    primary === undefined
+      ? undefined
+      : allowedImage(providerId, primary, providerId === "tmdb" ? "w780" : undefined);
+  const acceptedLogo =
+    logo === undefined || providerId !== "tmdb"
+      ? undefined
+      : allowedImage(providerId, logo, "w500");
+  return {
+    ...payload(text(value.Name), text(value.Overview), acceptedPrimary, backdrops, acceptedLogo),
+    ...cachedCollectionFields(value),
+  };
+};
 
 const mergePayloads = (
-  payloads: ReadonlyArray<ExternalMetadataPayload>
+  payloads: ReadonlyArray<ExternalMetadataPayload>,
 ): ExternalMetadataPayload => {
   const first = <A>(pick: (entry: ExternalMetadataPayload) => A | undefined): A | undefined => {
     for (const entry of payloads) {
-      const value = pick(entry)
-      if (value !== undefined && (!Array.isArray(value) || value.length > 0)) return value
+      const value = pick(entry);
+      if (value !== undefined && (!Array.isArray(value) || value.length > 0)) return value;
     }
-  }
-  return payload(
-    first(({ Name }) => Name),
-    first(({ Overview }) => Overview),
-    first(({ ExternalImages }) => ExternalImages?.Primary),
-    first(({ ExternalImages }) => ExternalImages?.Backdrop) ?? []
-  )
-}
+  };
+  return {
+    ...payload(
+      first(({ Name }) => Name),
+      first(({ Overview }) => Overview),
+      first(({ ExternalImages }) => ExternalImages?.Primary),
+      first(({ ExternalImages }) => ExternalImages?.Backdrop) ?? [],
+      first(({ ExternalImages }) => ExternalImages?.Logo),
+      payloads.reduce<number | undefined>(
+        (revision, entry) =>
+          entry.ExternalArtworkRevision === undefined
+            ? revision
+            : Math.max(revision ?? 0, entry.ExternalArtworkRevision),
+        undefined,
+      ),
+      first(({ ExternalArtworkLanguage }) => ExternalArtworkLanguage),
+    ),
+    ...payloads
+      .map(cachedCollectionFields)
+      .reduce((result, fields) => ({ ...fields, ...result }), {}),
+  };
+};
 
 const readBoundedJson = async (
   response: Response,
   maxBytes: number,
-  signal: AbortSignal
+  signal: AbortSignal,
 ): Promise<unknown> => {
-  const advertised = response.headers.get("content-length")
+  const advertised = response.headers.get("content-length");
   if (advertised !== null && /^\d+$/.test(advertised) && Number(advertised) > maxBytes) {
-    throw new TypeError("provider response too large")
+    throw new TypeError("provider response too large");
   }
-  if (response.body === null) throw new TypeError("provider response body missing")
-  const reader = response.body.getReader()
-  const abort = () => { void reader.cancel().catch(() => undefined) }
-  signal.addEventListener("abort", abort, { once: true })
-  const chunks: Array<Uint8Array> = []
-  let length = 0
+  if (response.body === null) throw new TypeError("provider response body missing");
+  const reader = response.body.getReader();
+  const abort = () => {
+    void reader.cancel().catch(() => undefined);
+  };
+  signal.addEventListener("abort", abort, { once: true });
+  const chunks: Array<Uint8Array> = [];
+  let length = 0;
   try {
     while (true) {
-      const next = await reader.read()
-      if (next.done) break
-      length += next.value.byteLength
+      const next = await reader.read();
+      if (next.done) break;
+      length += next.value.byteLength;
       if (length > maxBytes) {
-        await reader.cancel()
-        throw new TypeError("provider response too large")
+        await reader.cancel();
+        throw new TypeError("provider response too large");
       }
-      chunks.push(next.value)
+      chunks.push(next.value);
     }
   } finally {
-    signal.removeEventListener("abort", abort)
+    signal.removeEventListener("abort", abort);
   }
-  const body = new Uint8Array(length)
-  let offset = 0
+  const body = new Uint8Array(length);
+  let offset = 0;
   for (const chunk of chunks) {
-    body.set(chunk, offset)
-    offset += chunk.byteLength
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
   }
-  return JSON.parse(new TextDecoder().decode(body))
-}
+  return JSON.parse(new TextDecoder().decode(body));
+};
 
 const providerFailure = (providerId: ProviderId, reason: FailureReason) =>
-  new MetadataProviderFailure({ providerId, reason })
+  new MetadataProviderFailure({ providerId, reason });
 
 export const makeMetadataProvidersLayer = (
-  config: MetadataProvidersConfig
-): Layer.Layer<MetadataProviders, never, Repositories> => Layer.effect(
-  MetadataProviders,
-  Effect.gen(function*() {
-    const repositories = yield* Repositories
-    const now = config.now ?? Date.now
-    const deadlineMs = config.deadlineMs ?? PROVIDER_DEADLINE_MS
-    const maxResponseBytes = config.maxResponseBytes ?? MAX_PROVIDER_RESPONSE_BYTES
+  config: MetadataProvidersConfig,
+): Layer.Layer<MetadataProviders, never, Repositories> =>
+  Layer.effect(
+    MetadataProviders,
+    Effect.gen(function* () {
+      const repositories = yield* Repositories;
+      const now = config.now ?? Date.now;
+      const deadlineMs = config.deadlineMs ?? PROVIDER_DEADLINE_MS;
+      const maxResponseBytes = config.maxResponseBytes ?? MAX_PROVIDER_RESPONSE_BYTES;
 
-    const updateStatus = (setting: MetadataProviderSetting, status: "ready" | "degraded") =>
-      setting.status === status || setting.credential === null
-        ? Effect.void
-        : repositories.updateMetadataProviderStatus({
+      const updateStatus = (setting: MetadataProviderSetting, status: "ready" | "degraded") =>
+        setting.status === status || setting.credential === null
+          ? Effect.void
+          : repositories
+              .updateMetadataProviderStatus({
+                providerId: setting.id,
+                expectedUpdatedAtMs: setting.updatedAtMs,
+                status,
+              })
+              .pipe(Effect.asVoid);
+
+      const requestJson = (
+        setting: MetadataProviderSetting,
+        request: Request,
+      ): Effect.Effect<
+        { readonly found: boolean; readonly value: unknown },
+        MetadataProviderFailure
+      > =>
+        Effect.gen(function* () {
+          const response = yield* Effect.tryPromise({
+            try: (signal) => config.fetch(new Request(request, { signal, redirect: "manual" })),
+            catch: () => providerFailure(setting.id, "unavailable"),
+          });
+          if (response.status === 404) return { found: false, value: null };
+          if (response.status === 401 || response.status === 403) {
+            return yield* Effect.fail(providerFailure(setting.id, "credential"));
+          }
+          if (response.status === 429)
+            return yield* Effect.fail(providerFailure(setting.id, "rate-limit"));
+          if (response.status < 200 || response.status >= 300) {
+            return yield* Effect.fail(providerFailure(setting.id, "unavailable"));
+          }
+          const value = yield* Effect.tryPromise({
+            try: (signal) => readBoundedJson(response, maxResponseBytes, signal),
+            catch: () => providerFailure(setting.id, "invalid-response"),
+          });
+          return { found: true, value };
+        }).pipe(
+          Effect.timeout(deadlineMs),
+          Effect.catchTag("TimeoutError", () =>
+            Effect.fail(providerFailure(setting.id, "timeout")),
+          ),
+        );
+
+      const fetchPayload = (
+        setting: MetadataProviderSetting,
+        itemType: string,
+        key: { readonly namespace: string; readonly value: string },
+      ): Effect.Effect<ExternalMetadataPayload | null, MetadataProviderFailure> =>
+        Effect.gen(function* () {
+          if (setting.credential === null) return null;
+          if (setting.id === "tmdb") {
+            const direct = key.namespace !== "imdb:title";
+            const url = new URL(
+              direct
+                ? `https://api.themoviedb.org/3/${itemType === "Movie" ? "movie" : "tv"}/${encodeURIComponent(key.value)}`
+                : `https://api.themoviedb.org/3/find/${encodeURIComponent(key.value)}`,
+            );
+            if (!direct) url.searchParams.set("external_source", "imdb_id");
+            const metadataLanguage = setting.language?.trim() || (yield* ClientLanguage);
+            url.searchParams.set("language", metadataLanguage);
+            const result = yield* requestJson(
+              setting,
+              new Request(url, {
+                headers: {
+                  authorization: `Bearer ${setting.credential}`,
+                  accept: "application/json",
+                },
+              }),
+            );
+            if (!result.found) return null;
+            let base = yield* Effect.try({
+              try: () => {
+                if (direct && (!object(result.value) || result.value.id !== Number(key.value))) {
+                  throw new TypeError("mismatched TMDB detail identity");
+                }
+                return tmdbPayload(
+                  direct
+                    ? { [itemType === "Movie" ? "movie_results" : "tv_results"]: [result.value] }
+                    : result.value,
+                  itemType,
+                );
+              },
+              catch: () => providerFailure(setting.id, "invalid-response"),
+            });
+            if (base === null) return null;
+            let item = result.value;
+            if (!direct && object(result.value)) {
+              const results = result.value[itemType === "Movie" ? "movie_results" : "tv_results"];
+              item = Array.isArray(results) ? results[0] : null;
+            }
+            if (
+              itemType === "Movie" &&
+              !direct &&
+              object(item) &&
+              typeof item.id === "number" &&
+              Number.isSafeInteger(item.id) &&
+              item.id > 0
+            ) {
+              const movieUrl = new URL(`https://api.themoviedb.org/3/movie/${item.id}`);
+              movieUrl.searchParams.set("language", metadataLanguage);
+              const details = yield* requestJson(
+                setting,
+                new Request(movieUrl, {
+                  headers: {
+                    authorization: `Bearer ${setting.credential}`,
+                    accept: "application/json",
+                  },
+                }),
+              ).pipe(Effect.result);
+              if (
+                Result.isSuccess(details) &&
+                details.success.found &&
+                object(details.success.value) &&
+                details.success.value.id === item.id
+              ) {
+                item = details.success.value;
+              }
+            }
+            if (itemType === "Movie") base = { ...base, ...collectionFields(item) };
+            if (setting.logoLanguage === undefined && setting.posterLanguage === undefined)
+              return base;
+            if (
+              !object(item) ||
+              typeof item.id !== "number" ||
+              !Number.isSafeInteger(item.id) ||
+              item.id <= 0
+            ) {
+              return yield* Effect.fail(providerFailure(setting.id, "invalid-response"));
+            }
+            const originalLanguage =
+              typeof item.original_language === "string" &&
+              /^[a-z]{2,3}$/.test(item.original_language)
+                ? item.original_language
+                : undefined;
+            const posterLanguage = artworkLanguage(
+              setting.posterLanguage,
+              metadataLanguage,
+              originalLanguage,
+            );
+            const logoLanguage = artworkLanguage(
+              setting.logoLanguage,
+              metadataLanguage,
+              originalLanguage,
+            );
+            const imagesUrl = new URL(
+              `https://api.themoviedb.org/3/${itemType === "Movie" ? "movie" : "tv"}/${item.id}/images`,
+            );
+            imagesUrl.searchParams.set(
+              "include_image_language",
+              [
+                ...new Set(
+                  [posterLanguage, logoLanguage, originalLanguage, "null"].filter(
+                    (language): language is string => language !== undefined,
+                  ),
+                ),
+              ].join(","),
+            );
+            const images = yield* requestJson(
+              setting,
+              new Request(imagesUrl, {
+                headers: {
+                  authorization: `Bearer ${setting.credential}`,
+                  accept: "application/json",
+                },
+              }),
+            );
+            if (!images.found) return base;
+            if (
+              !object(images.value) ||
+              images.value.id !== item.id ||
+              !Array.isArray(images.value.posters) ||
+              !Array.isArray(images.value.logos)
+            ) {
+              return yield* Effect.fail(providerFailure(setting.id, "invalid-response"));
+            }
+            const poster =
+              tmdbImage(
+                selectArtworkPath(images.value.posters, posterLanguage, originalLanguage),
+                "w780",
+              ) ?? base.ExternalImages?.Primary;
+            const logo = tmdbImage(
+              selectArtworkPath(images.value.logos, logoLanguage, originalLanguage),
+              "w500",
+            );
+            return {
+              ...payload(
+                base.Name,
+                base.Overview,
+                poster,
+                base.ExternalImages?.Backdrop ?? [],
+                logo,
+              ),
+              ...cachedCollectionFields(base),
+            };
+          }
+          const kind = itemType === "Movie" ? "movies" : "shows";
+          const url = new URL(`https://api.trakt.tv/${kind}/${encodeURIComponent(key.value)}`);
+          url.searchParams.set("extended", "full");
+          const result = yield* requestJson(
+            setting,
+            new Request(url, {
+              headers: {
+                accept: "application/json",
+                "content-type": "application/json",
+                "trakt-api-key": setting.credential,
+                "trakt-api-version": "2",
+                "user-agent": PRODUCT_USER_AGENT,
+              },
+            }),
+          );
+          if (!result.found) return null;
+          return yield* Effect.try({
+            try: () => traktPayload(result.value, key.value),
+            catch: () => providerFailure(setting.id, "invalid-response"),
+          });
+        }).pipe(
+          Effect.timeout(deadlineMs),
+          Effect.catchTag("TimeoutError", () =>
+            Effect.fail(providerFailure(setting.id, "timeout")),
+          ),
+        );
+
+      const identity = (record: CatalogItemRecord, providerId: ProviderId) => {
+        if (record.canonical.itemType !== "Movie" && record.canonical.itemType !== "Series")
+          return null;
+        if (providerId === "tmdb") {
+          const namespace = record.canonical.itemType === "Movie" ? "tmdb:movie" : "tmdb:tv";
+          const tmdb = record.claims.find(
+            (claim) => claim.namespace === namespace && claim.state === "exact",
+          );
+          if (
+            tmdb !== undefined &&
+            /^[1-9]\d*$/.test(tmdb.value) &&
+            Number.isSafeInteger(Number(tmdb.value))
+          ) {
+            return { namespace, value: tmdb.value };
+          }
+        }
+        const imdb = record.claims.find(
+          ({ namespace, state }) => namespace === "imdb:title" && state === "exact",
+        );
+        return imdb !== undefined && /^tt\d+$/.test(imdb.value)
+          ? { namespace: imdb.namespace, value: imdb.value }
+          : null;
+      };
+
+      const cacheIdentity = (setting: MetadataProviderSetting, value: string) =>
+        Effect.map(ClientLanguage, (language) =>
+          setting.id === "tmdb" && !setting.language?.trim()
+            ? `${value}|client-language:${language}`
+            : value,
+        );
+
+      const readCached = (
+        setting: MetadataProviderSetting,
+        key: { readonly namespace: string; readonly value: string },
+        freshOnly: boolean,
+      ) =>
+        Effect.gen(function* () {
+          const value = yield* cacheIdentity(setting, key.value);
+          const entry = yield* repositories.readExternalMetadata(setting.id, key.namespace, value);
+          if (entry === null || entry.fetchedAtMs < setting.updatedAtMs) return null;
+          const usableUntil = freshOnly ? entry.freshUntilMs : entry.staleUntilMs;
+          return usableUntil > now() ? entry : null;
+        });
+
+      const writeCache = (
+        setting: MetadataProviderSetting,
+        key: { readonly namespace: string; readonly value: string },
+        value: ExternalMetadataPayload | null,
+      ) =>
+        Effect.gen(function* () {
+          const fetchedAtMs = now();
+          const entry: ExternalMetadataCacheEntry = {
             providerId: setting.id,
-            expectedUpdatedAtMs: setting.updatedAtMs,
-            status
-          }).pipe(Effect.asVoid)
+            identityNamespace: key.namespace,
+            identityValue: yield* cacheIdentity(setting, key.value),
+            payload: value as JsonValue | null,
+            found: value !== null,
+            fetchedAtMs,
+            freshUntilMs: fetchedAtMs + METADATA_FRESH_MS,
+            staleUntilMs: fetchedAtMs + (value === null ? METADATA_FRESH_MS : METADATA_STALE_MS),
+          };
+          return yield* repositories.writeExternalMetadata(entry);
+        });
 
-    const requestJson = (
-      setting: MetadataProviderSetting,
-      request: Request
-    ): Effect.Effect<{ readonly found: boolean; readonly value: unknown }, MetadataProviderFailure> => Effect.gen(function*() {
-      const response = yield* Effect.tryPromise({
-        try: (signal) => config.fetch(new Request(request, { signal, redirect: "manual" })),
-        catch: () => providerFailure(setting.id, "unavailable")
-      })
-      if (response.status === 404) return { found: false, value: null }
-      if (response.status === 401 || response.status === 403) {
-        return yield* Effect.fail(providerFailure(setting.id, "credential"))
-      }
-      if (response.status === 429) return yield* Effect.fail(providerFailure(setting.id, "rate-limit"))
-      if (response.status < 200 || response.status >= 300) {
-        return yield* Effect.fail(providerFailure(setting.id, "unavailable"))
-      }
-      const value = yield* Effect.tryPromise({
-        try: (signal) => readBoundedJson(response, maxResponseBytes, signal),
-        catch: () => providerFailure(setting.id, "invalid-response")
-      })
-      return { found: true, value }
-    }).pipe(
-      Effect.timeout(deadlineMs),
-      Effect.catchTag("TimeoutError", () => Effect.fail(providerFailure(setting.id, "timeout")))
-    )
+      const configured = () =>
+        repositories
+          .readMetadataSettings()
+          .pipe(
+            Effect.map((providers) =>
+              [...providers]
+                .sort((left, right) => left.order - right.order)
+                .filter(({ enabled, credential }) => enabled && credential !== null),
+            ),
+          );
 
-    const fetchPayload = (
-      setting: MetadataProviderSetting,
-      itemType: string,
-      imdbId: string
-    ): Effect.Effect<ExternalMetadataPayload | null, MetadataProviderFailure> => Effect.gen(function*() {
-      if (setting.credential === null) return null
-      if (setting.id === "tmdb") {
-        const url = new URL(`https://api.themoviedb.org/3/find/${encodeURIComponent(imdbId)}`)
-        url.searchParams.set("external_source", "imdb_id")
-        if (setting.language?.trim()) url.searchParams.set("language", setting.language.trim())
-        const result = yield* requestJson(setting, new Request(url, { headers: {
-          authorization: `Bearer ${setting.credential}`,
-          accept: "application/json"
-        } }))
-        if (!result.found) return null
-        return yield* Effect.try({
-          try: () => tmdbPayload(result.value, itemType),
-          catch: () => providerFailure(setting.id, "invalid-response")
-        })
-      }
-      const kind = itemType === "Movie" ? "movies" : "shows"
-      const url = new URL(`https://api.trakt.tv/${kind}/${encodeURIComponent(imdbId)}`)
-      url.searchParams.set("extended", "full")
-      const result = yield* requestJson(setting, new Request(url, { headers: {
-        accept: "application/json",
-        "content-type": "application/json",
-        "trakt-api-key": setting.credential,
-        "trakt-api-version": "2",
-        "user-agent": PRODUCT_USER_AGENT
-      } }))
-      if (!result.found) return null
-      return yield* Effect.try({
-        try: () => traktPayload(result.value, imdbId),
-        catch: () => providerFailure(setting.id, "invalid-response")
-      })
-    })
-
-    const identity = (record: CatalogItemRecord) => {
-      if (record.canonical.itemType !== "Movie" && record.canonical.itemType !== "Series") return null
-      const claim = record.claims.find(({ namespace, state }) => namespace === "imdb:title" && state === "exact")
-      return claim === undefined || !/^tt\d+$/.test(claim.value)
-        ? null
-        : { namespace: claim.namespace, value: claim.value }
-    }
-
-    const readCached = (
-      setting: MetadataProviderSetting,
-      key: { readonly namespace: string; readonly value: string },
-      freshOnly: boolean
-    ) => repositories.readExternalMetadata(setting.id, key.namespace, key.value).pipe(Effect.map((entry) => {
-      if (entry === null || entry.fetchedAtMs < setting.updatedAtMs) return null
-      const usableUntil = freshOnly ? entry.freshUntilMs : entry.staleUntilMs
-      return usableUntil > now() ? entry : null
-    }))
-
-    const writeCache = (
-      setting: MetadataProviderSetting,
-      key: { readonly namespace: string; readonly value: string },
-      value: ExternalMetadataPayload | null
-    ) => {
-      const fetchedAtMs = now()
-      const entry: ExternalMetadataCacheEntry = {
-        providerId: setting.id,
-        identityNamespace: key.namespace,
-        identityValue: key.value,
-        payload: value as JsonValue | null,
-        found: value !== null,
-        fetchedAtMs,
-        freshUntilMs: fetchedAtMs + METADATA_FRESH_MS,
-        staleUntilMs: fetchedAtMs + (value === null ? METADATA_FRESH_MS : METADATA_STALE_MS)
-      }
-      return repositories.writeExternalMetadata(entry)
-    }
-
-    const configured = () => repositories.readMetadataSettings().pipe(Effect.map((providers) =>
-      [...providers]
-        .sort((left, right) => left.order - right.order)
-        .filter(({ enabled, credential }) => enabled && credential !== null)
-    ))
-
-    const cachedPayloads = (record: CatalogItemRecord) => Effect.gen(function*() {
-      const key = identity(record)
-      if (key === null) return []
-      const values: Array<ExternalMetadataPayload> = []
-      for (const setting of yield* configured()) {
-        const entry = yield* readCached(setting, key, false)
-        const normalized = entry?.found ? cachedPayload(setting.id, entry.payload) : null
-        if (normalized !== null) values.push(normalized)
-      }
-      return values
-    })
-
-    const overlayCached: MetadataProvidersApi["overlayCached"] = (record) => Effect.gen(function*() {
-      const external = mergePayloads(yield* cachedPayloads(record))
-      return {
-        ...record,
-        canonical: {
-          ...record.canonical,
-          displayMetadata: {
-            ...(object(record.canonical.displayMetadata) ? record.canonical.displayMetadata : {}),
-            ...external
+      const cachedPayloads = (record: CatalogItemRecord) =>
+        Effect.gen(function* () {
+          const values: Array<ExternalMetadataPayload> = [];
+          for (const setting of yield* configured()) {
+            const key = identity(record, setting.id);
+            if (key === null) continue;
+            if (
+              setting.id === "tmdb" &&
+              (setting.logoLanguage !== undefined || setting.posterLanguage !== undefined)
+            )
+              values.push({ ExternalArtworkRevision: setting.updatedAtMs });
+            if (setting.id === "tmdb" && !setting.language?.trim())
+              values.push({ ExternalArtworkLanguage: yield* ClientLanguage });
+            const entry = yield* readCached(setting, key, false);
+            const normalized = entry?.found ? cachedPayload(setting.id, entry.payload) : null;
+            if (normalized !== null) values.push(normalized);
           }
-        }
-      }
-    })
+          return values;
+        });
 
-    const refresh: MetadataProvidersApi["refresh"] = (record) => Effect.gen(function*() {
-      const key = identity(record)
-      if (key === null) return record
-      const values: Array<ExternalMetadataPayload> = []
-      for (const setting of yield* configured()) {
-        const fresh = yield* readCached(setting, key, true)
-        if (fresh !== null) {
-          const normalized = fresh.found ? cachedPayload(setting.id, fresh.payload) : null
-          if (normalized !== null) values.push(normalized)
-          continue
-        }
-        const stale = yield* readCached(setting, key, false)
-        const attempted = yield* fetchPayload(setting, record.canonical.itemType, key.value).pipe(Effect.result)
-        if (Result.isFailure(attempted)) {
-          yield* updateStatus(setting, "degraded")
-          const normalized = stale?.found ? cachedPayload(setting.id, stale.payload) : null
-          if (normalized !== null) values.push(normalized)
-          continue
-        }
-        yield* writeCache(setting, key, attempted.success)
-        yield* updateStatus(setting, "ready")
-        if (attempted.success !== null) values.push(attempted.success)
-      }
-      const external = mergePayloads(values)
-      return {
-        ...record,
-        canonical: {
-          ...record.canonical,
-          displayMetadata: {
-            ...(object(record.canonical.displayMetadata) ? record.canonical.displayMetadata : {}),
-            ...external
+      const overlayCached: MetadataProvidersApi["overlayCached"] = (record) =>
+        Effect.gen(function* () {
+          const external = mergePayloads(yield* cachedPayloads(record));
+          return {
+            ...record,
+            canonical: {
+              ...record.canonical,
+              displayMetadata: {
+                ...(object(record.canonical.displayMetadata)
+                  ? record.canonical.displayMetadata
+                  : {}),
+                ...external,
+              },
+            },
+          };
+        });
+
+      const associate = (
+        record: CatalogItemRecord,
+        value: ExternalMetadataPayload,
+        observedAtMs: number,
+      ) =>
+        Effect.gen(function* () {
+          if (
+            record.canonical.itemType !== "Movie" ||
+            value.TmdbCollectionId === undefined ||
+            record.sourceItems.length === 0
+          )
+            return;
+          const collection =
+            value.TmdbCollectionId !== null
+              ? yield* readTmdbCollection(value.TmdbCollectionId)
+              : null;
+          if (value.TmdbCollectionId !== null)
+            yield* repositories.upsertCollection({
+              tmdbCollectionId: value.TmdbCollectionId,
+              metadata: (collection as unknown as JsonValue) ?? {},
+              observedAtMs,
+            });
+          for (const source of record.sourceItems)
+            yield* repositories.replaceTmdbCollectionMembership({
+              sourceItemId: source.id,
+              tmdbCollectionId: value.TmdbCollectionId,
+              expectedGeneration: source.serverGeneration,
+              observedAtMs,
+            });
+        });
+
+      const refresh: MetadataProvidersApi["refresh"] = (record) =>
+        Effect.gen(function* () {
+          const values: Array<ExternalMetadataPayload> = [];
+          for (const setting of yield* configured()) {
+            const key = identity(record, setting.id);
+            if (key === null) continue;
+            if (
+              setting.id === "tmdb" &&
+              (setting.logoLanguage !== undefined || setting.posterLanguage !== undefined)
+            )
+              values.push({ ExternalArtworkRevision: setting.updatedAtMs });
+            if (setting.id === "tmdb" && !setting.language?.trim())
+              values.push({ ExternalArtworkLanguage: yield* ClientLanguage });
+            let fresh = yield* readCached(setting, key, true);
+            if (
+              setting.id === "tmdb" &&
+              record.canonical.itemType === "Movie" &&
+              record.sourceItems.length > 0 &&
+              fresh?.found &&
+              object(fresh.payload) &&
+              fresh.payload.TmdbCollectionId === undefined
+            )
+              fresh = null;
+            if (fresh !== null) {
+              const normalized = fresh.found ? cachedPayload(setting.id, fresh.payload) : null;
+              if (normalized !== null) {
+                values.push(normalized);
+                if (setting.id === "tmdb") yield* associate(record, normalized, fresh.fetchedAtMs);
+              }
+              continue;
+            }
+            const stale = yield* readCached(setting, key, false);
+            const attempted = yield* fetchPayload(setting, record.canonical.itemType, key).pipe(
+              Effect.result,
+            );
+            if (Result.isFailure(attempted)) {
+              yield* updateStatus(setting, "degraded");
+              const normalized = stale?.found ? cachedPayload(setting.id, stale.payload) : null;
+              if (normalized !== null) values.push(normalized);
+              continue;
+            }
+            yield* writeCache(setting, key, attempted.success);
+            yield* updateStatus(setting, "ready");
+            if (attempted.success !== null) {
+              values.push(attempted.success);
+              if (setting.id === "tmdb") yield* associate(record, attempted.success, now());
+            }
           }
-        }
-      }
-    })
+          const external = mergePayloads(values);
+          return {
+            ...record,
+            canonical: {
+              ...record.canonical,
+              displayMetadata: {
+                ...(object(record.canonical.displayMetadata)
+                  ? record.canonical.displayMetadata
+                  : {}),
+                ...external,
+              },
+            },
+          };
+        });
 
-    const resolveCachedImage: MetadataProvidersApi["resolveCachedImage"] = (
-      record,
-      imageType,
-      imageIndex
-    ) => Effect.gen(function*() {
-      if (imageType !== "Primary" && imageType !== "Backdrop") return null
-      if (imageIndex !== undefined && (!Number.isSafeInteger(imageIndex) || imageIndex < 0)) return null
-      const images = mergePayloads(yield* cachedPayloads(record)).ExternalImages
-      if (!object(images)) return null
-      const selected = imageType === "Primary"
-        ? ((imageIndex ?? 0) === 0 ? text(images.Primary) : undefined)
-        : (Array.isArray(images.Backdrop) ? text(images.Backdrop[imageIndex ?? 0]) : undefined)
-      if (selected === undefined) return null
-      const providerId = selected.includes("image.tmdb.org") ? "tmdb" : "trakt"
-      const accepted = allowedImage(
-        providerId,
-        selected,
-        providerId === "tmdb" ? (imageType === "Primary" ? "w780" : "w1280") : undefined
-      )
-      return accepted === undefined ? null : new URL(accepted)
-    })
+      const resolveCachedImage: MetadataProvidersApi["resolveCachedImage"] = (
+        record,
+        imageType,
+        imageIndex,
+      ) =>
+        Effect.gen(function* () {
+          if (imageType !== "Primary" && imageType !== "Backdrop" && imageType !== "Logo")
+            return null;
+          if (imageIndex !== undefined && (!Number.isSafeInteger(imageIndex) || imageIndex < 0))
+            return null;
+          const images = mergePayloads(yield* cachedPayloads(record)).ExternalImages;
+          if (!object(images)) return null;
+          let selected: string | undefined;
+          if (imageType === "Primary" || imageType === "Logo") {
+            if ((imageIndex ?? 0) === 0) selected = text(images[imageType]);
+          } else if (Array.isArray(images.Backdrop)) {
+            selected = text(images.Backdrop[imageIndex ?? 0]);
+          }
+          if (selected === undefined) return null;
+          const providerId = selected.includes("image.tmdb.org") ? "tmdb" : "trakt";
+          let size: "w500" | "w780" | "w1280" = "w1280";
+          if (imageType === "Primary") size = "w780";
+          if (imageType === "Logo") size = "w500";
+          const accepted = allowedImage(
+            providerId,
+            selected,
+            providerId === "tmdb" ? size : undefined,
+          );
+          return accepted === undefined ? null : new URL(accepted);
+        });
 
-    return MetadataProviders.of({ refresh, overlayCached, resolveCachedImage })
-  })
-)
+      const collectionLocks = new Map<
+        string,
+        { semaphore: ReturnType<typeof Semaphore.makeUnsafe>; users: number }
+      >();
+      const readTmdbCollection: MetadataProvidersApi["readTmdbCollection"] = (
+        id,
+        cachedOnly = false,
+      ) =>
+        Effect.gen(function* () {
+          if (!/^[1-9]\d*$/.test(id)) return null;
+          const setting = (yield* configured()).find((setting) => setting.id === "tmdb");
+          if (!setting) return null;
+          const key = { namespace: "tmdb:collection", value: id };
+          const language = setting.language?.trim() || (yield* ClientLanguage);
+          const lockKey = `${id}:${language}:${setting.updatedAtMs}`;
+          const lock = collectionLocks.get(lockKey) ?? {
+            semaphore: Semaphore.makeUnsafe(1),
+            users: 0,
+          };
+          lock.users++;
+          collectionLocks.set(lockKey, lock);
+          return yield* lock.semaphore
+            .withPermit(
+              Effect.gen(function* () {
+                const fresh = yield* readCached(setting, key, true);
+                if (fresh)
+                  return fresh.found ? (fresh.payload as unknown as TmdbCollectionPayload) : null;
+                const stale = yield* readCached(setting, key, false);
+                if (cachedOnly)
+                  return stale?.found ? (stale.payload as unknown as TmdbCollectionPayload) : null;
+                const url = new URL(`https://api.themoviedb.org/3/collection/${id}`);
+                url.searchParams.set("language", language);
+                const result = yield* requestJson(
+                  setting,
+                  new Request(url, {
+                    headers: {
+                      authorization: `Bearer ${setting.credential}`,
+                      accept: "application/json",
+                    },
+                  }),
+                ).pipe(Effect.result);
+                if (Result.isFailure(result)) {
+                  yield* updateStatus(setting, "degraded");
+                  return stale?.found ? (stale.payload as unknown as TmdbCollectionPayload) : null;
+                }
+                let value: TmdbCollectionPayload | null = null;
+                if (result.success.found) {
+                  const raw = result.success.value;
+                  if (
+                    !object(raw) ||
+                    raw.id !== Number(id) ||
+                    typeof raw.name !== "string" ||
+                    !Array.isArray(raw.parts)
+                  )
+                    return stale?.found
+                      ? (stale.payload as unknown as TmdbCollectionPayload)
+                      : null;
+                  value = {
+                    id,
+                    Name: raw.name,
+                    ...payload(
+                      undefined,
+                      text(raw.overview),
+                      tmdbImage(raw.poster_path, "w780"),
+                      [tmdbImage(raw.backdrop_path, "w1280")].filter(
+                        (p): p is string => p !== undefined,
+                      ),
+                    ),
+                    movieIds: [
+                      ...new Set(
+                        raw.parts.flatMap((part) =>
+                          object(part) &&
+                          typeof part.id === "number" &&
+                          Number.isSafeInteger(part.id) &&
+                          part.id > 0
+                            ? [String(part.id)]
+                            : [],
+                        ),
+                      ),
+                    ],
+                    ExternalArtworkRevision: setting.updatedAtMs,
+                    ExternalArtworkLanguage: language,
+                  };
+                }
+                const fetchedAtMs = now();
+                yield* repositories.writeExternalMetadata({
+                  providerId: "tmdb",
+                  identityNamespace: key.namespace,
+                  identityValue: yield* cacheIdentity(setting, id),
+                  payload: value as unknown as JsonValue,
+                  found: value !== null,
+                  fetchedAtMs,
+                  freshUntilMs: fetchedAtMs + METADATA_FRESH_MS,
+                  staleUntilMs:
+                    fetchedAtMs + (value === null ? METADATA_FRESH_MS : METADATA_STALE_MS),
+                });
+                return value;
+              }),
+            )
+            .pipe(
+              Effect.ensuring(
+                Effect.sync(() => {
+                  lock.users--;
+                  if (lock.users === 0 && collectionLocks.get(lockKey) === lock)
+                    collectionLocks.delete(lockKey);
+                }),
+              ),
+            );
+        });
+
+      return MetadataProviders.of({
+        refresh,
+        overlayCached,
+        resolveCachedImage,
+        readTmdbCollection,
+      });
+    }),
+  );

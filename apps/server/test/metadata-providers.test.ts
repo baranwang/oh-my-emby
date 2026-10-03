@@ -1,15 +1,10 @@
-import { Effect, Layer } from "effect"
-import { describe, expect, it } from "vitest"
+import { Effect, Layer } from "effect";
+import { describe, expect, it } from "vitest";
 
-import {
-  MetadataProviders,
-  makeMetadataProvidersLayer
-} from "../src/core/metadata-providers.js"
-import type {
-  ExternalMetadataCacheEntry,
-  MetadataProviderSetting
-} from "../src/core/model.js"
-import { Repositories, type CatalogItemRecord } from "../src/core/repositories.js"
+import { ClientLanguage } from "../src/core/client-language.js";
+import { MetadataProviders, makeMetadataProvidersLayer } from "../src/core/metadata-providers.js";
+import type { ExternalMetadataCacheEntry, MetadataProviderSetting } from "../src/core/model.js";
+import { Repositories, type CatalogItemRecord } from "../src/core/repositories.js";
 
 const record = (itemType: "Movie" | "Series" = "Movie"): CatalogItemRecord => ({
   canonical: {
@@ -19,10 +14,10 @@ const record = (itemType: "Movie" | "Series" = "Movie"): CatalogItemRecord => ({
     displayMetadata: {
       Name: "Upstream title",
       Overview: "Upstream overview",
-      Tagline: "Upstream tagline"
+      Tagline: "Upstream tagline",
     },
     createdAtMs: 1,
-    updatedAtMs: 1
+    updatedAtMs: 1,
   },
   claims: [
     {
@@ -30,102 +25,576 @@ const record = (itemType: "Movie" | "Series" = "Movie"): CatalogItemRecord => ({
       value: "tt1104001",
       state: "exact",
       sourceItemId: "source-1",
-      createdAtMs: 1
+      createdAtMs: 1,
     },
     {
       namespace: itemType === "Movie" ? "tmdb:movie" : "tmdb:tv",
       value: "20526",
       state: "exact",
       sourceItemId: "source-1",
-      createdAtMs: 1
-    }
+      createdAtMs: 1,
+    },
   ],
   sourceItems: [],
   mediaVersions: [],
-  userState: null
-})
+  userState: null,
+});
+
+// IMDb adapter cases deliberately omit TMDB claims to exercise the fallback path.
+const imdbRecord = (itemType: "Movie" | "Series" = "Movie"): CatalogItemRecord => {
+  const original = record(itemType);
+  return {
+    ...original,
+    claims: original.claims.filter((claim) => claim.namespace === "imdb:title"),
+  };
+};
 
 const settings = (
-  order: readonly ["tmdb" | "trakt", "tmdb" | "trakt"] = ["tmdb", "trakt"]
-): [MetadataProviderSetting, MetadataProviderSetting] => order.map((id, index) => ({
-  id,
-  enabled: true,
-  order: index,
-  language: id === "tmdb" ? "zh-CN" : null,
-  credential: `${id}-secret`,
-  status: "ready",
-  updatedAtMs: 1
-})) as [MetadataProviderSetting, MetadataProviderSetting]
+  order: readonly ["tmdb" | "trakt", "tmdb" | "trakt"] = ["tmdb", "trakt"],
+): [MetadataProviderSetting, MetadataProviderSetting] =>
+  order.map((id, index) => ({
+    id,
+    enabled: true,
+    order: index,
+    language: id === "tmdb" ? "zh-CN" : null,
+    credential: `${id}-secret`,
+    status: "ready",
+    updatedAtMs: 1,
+  })) as [MetadataProviderSetting, MetadataProviderSetting];
 
 const fixture = (options: {
-  readonly providerSettings?: [MetadataProviderSetting, MetadataProviderSetting]
-  readonly fetch: typeof fetch
-  readonly now?: () => number
-  readonly deadlineMs?: number
-  readonly maxResponseBytes?: number
+  readonly providerSettings?: [MetadataProviderSetting, MetadataProviderSetting];
+  readonly fetch: typeof fetch;
+  readonly now?: () => number;
+  readonly deadlineMs?: number;
+  readonly maxResponseBytes?: number;
   readonly beforeStatusMutation?: (
-    current: [MetadataProviderSetting, MetadataProviderSetting]
-  ) => [MetadataProviderSetting, MetadataProviderSetting]
+    current: [MetadataProviderSetting, MetadataProviderSetting],
+  ) => [MetadataProviderSetting, MetadataProviderSetting];
 }) => {
-  let providerSettings = options.providerSettings ?? settings()
-  let beforeStatusMutation = options.beforeStatusMutation
+  let providerSettings = options.providerSettings ?? settings();
+  let beforeStatusMutation = options.beforeStatusMutation;
   const mutateBeforeStatus = () => {
-    if (beforeStatusMutation === undefined) return
-    providerSettings = beforeStatusMutation(providerSettings)
-    beforeStatusMutation = undefined
-  }
-  const cache = new Map<string, ExternalMetadataCacheEntry>()
-  const writes: Array<ExternalMetadataCacheEntry> = []
-  const repositories = Layer.succeed(Repositories, Repositories.of({
-    readMetadataSettings: () => Effect.succeed(providerSettings),
-    writeMetadataSettings: (next) => Effect.sync(() => {
-      mutateBeforeStatus()
-      providerSettings = [...next] as [MetadataProviderSetting, MetadataProviderSetting]
-      return providerSettings
-    }),
-    updateMetadataProviderStatus: ({ providerId, expectedUpdatedAtMs, status }) => Effect.sync(() => {
-      mutateBeforeStatus()
-      const provider = providerSettings.find(({ id }) => id === providerId)
-      if (
-        provider === undefined ||
-        provider.updatedAtMs !== expectedUpdatedAtMs ||
-        provider.credential === null
-      ) return false
-      providerSettings = providerSettings.map((setting) => setting.id === providerId
-        ? { ...setting, status }
-        : setting
-      ) as [MetadataProviderSetting, MetadataProviderSetting]
-      return true
-    }),
-    readExternalMetadata: (providerId, namespace, value) =>
-      Effect.succeed(cache.get(`${providerId}:${namespace}:${value}`) ?? null),
-    writeExternalMetadata: (entry) => Effect.sync(() => {
-      cache.set(`${entry.providerId}:${entry.identityNamespace}:${entry.identityValue}`, entry)
-      writes.push(entry)
-    })
-  } as any))
+    if (beforeStatusMutation === undefined) return;
+    providerSettings = beforeStatusMutation(providerSettings);
+    beforeStatusMutation = undefined;
+  };
+  const cache = new Map<string, ExternalMetadataCacheEntry>();
+  const writes: Array<ExternalMetadataCacheEntry> = [];
+  const repositories = Layer.succeed(
+    Repositories,
+    Repositories.of({
+      readMetadataSettings: () => Effect.succeed(providerSettings),
+      writeMetadataSettings: (next) =>
+        Effect.sync(() => {
+          mutateBeforeStatus();
+          providerSettings = [...next] as [MetadataProviderSetting, MetadataProviderSetting];
+          return providerSettings;
+        }),
+      updateMetadataProviderStatus: ({ providerId, expectedUpdatedAtMs, status }) =>
+        Effect.sync(() => {
+          mutateBeforeStatus();
+          const provider = providerSettings.find(({ id }) => id === providerId);
+          if (
+            provider === undefined ||
+            provider.updatedAtMs !== expectedUpdatedAtMs ||
+            provider.credential === null
+          )
+            return false;
+          providerSettings = providerSettings.map((setting) =>
+            setting.id === providerId ? { ...setting, status } : setting,
+          ) as [MetadataProviderSetting, MetadataProviderSetting];
+          return true;
+        }),
+      readExternalMetadata: (providerId, namespace, value) =>
+        Effect.succeed(cache.get(`${providerId}:${namespace}:${value}`) ?? null),
+      writeExternalMetadata: (entry) =>
+        Effect.sync(() => {
+          cache.set(`${entry.providerId}:${entry.identityNamespace}:${entry.identityValue}`, entry);
+          writes.push(entry);
+        }),
+    } as any),
+  );
   const layer = makeMetadataProvidersLayer({
     fetch: options.fetch,
     now: options.now ?? (() => 10_000),
     ...(options.deadlineMs === undefined ? {} : { deadlineMs: options.deadlineMs }),
-    ...(options.maxResponseBytes === undefined ? {} : { maxResponseBytes: options.maxResponseBytes })
-  }).pipe(Layer.provide(repositories))
+    ...(options.maxResponseBytes === undefined
+      ? {}
+      : { maxResponseBytes: options.maxResponseBytes }),
+  }).pipe(Layer.provide(repositories));
   const run = <A>(effect: Effect.Effect<A, any, MetadataProviders>) =>
-    Effect.runPromise(effect.pipe(Effect.provide(layer)))
+    Effect.runPromise(effect.pipe(Effect.provide(layer)));
   return {
     run,
     cache,
     writes,
-    get settings() { return providerSettings }
-  }
-}
+    get settings() {
+      return providerSettings;
+    },
+  };
+};
 
 describe("MetadataProviders", () => {
+  it("reads movie details after IMDb find and retains the collection association", async () => {
+    const paths: string[] = [];
+    const configured = settings();
+    configured[1] = { ...configured[1], enabled: false };
+    const test = fixture({
+      providerSettings: configured,
+      fetch: async (request) => {
+        const url = new URL((request as Request).url);
+        paths.push(url.pathname);
+        if (url.pathname.includes("/find/"))
+          return Response.json({ movie_results: [{ id: 10, title: "Film" }], tv_results: [] });
+        return Response.json({
+          id: 10,
+          title: "Film",
+          belongs_to_collection: { id: 20, name: "Set" },
+        });
+      },
+    });
+    const result = await test.run(
+      Effect.gen(function* () {
+        return yield* (yield* MetadataProviders).refresh(imdbRecord());
+      }),
+    );
+    expect(result.canonical.displayMetadata).toMatchObject({
+      TmdbMovieId: "10",
+      TmdbCollectionId: "20",
+    });
+    expect(paths).toEqual(["/3/find/tt1104001", "/3/movie/10"]);
+  });
+
+  it("caches localized TMDB collection parts without duplicates or invalid IDs", async () => {
+    const configured = settings();
+    configured[0] = { ...configured[0], language: null };
+    configured[1] = { ...configured[1], enabled: false };
+    let requests = 0;
+    const test = fixture({
+      providerSettings: configured,
+      fetch: async (request) => {
+        requests++;
+        const language = new URL((request as Request).url).searchParams.get("language");
+        return Response.json({
+          id: 20,
+          name: language === "en-US" ? "Set" : "合集",
+          poster_path: "/set.jpg",
+          parts: [{ id: 10 }, { id: 11 }, { id: 10 }, { id: 0 }, { id: "bad" }],
+        });
+      },
+    });
+    const read = (language: string) =>
+      test.run(
+        Effect.gen(function* () {
+          return yield* (yield* MetadataProviders).readTmdbCollection("20");
+        }).pipe(Effect.provideService(ClientLanguage, language)),
+      );
+    const [english, chinese] = await Promise.all([read("en-US"), read("zh-CN")]);
+    expect(english).toMatchObject({ id: "20", Name: "Set", movieIds: ["10", "11"] });
+    expect(chinese).toMatchObject({ id: "20", Name: "合集", movieIds: ["10", "11"] });
+    expect(await read("en-US")).toEqual(english);
+    expect(requests).toBe(2);
+  });
+
+  it("isolates client-language metadata and artwork caches across concurrent requests", async () => {
+    const configured = settings();
+    configured[0] = {
+      ...configured[0],
+      language: null,
+      systemLanguage: "zh-CN",
+      posterLanguage: "metadata",
+      logoLanguage: "metadata",
+    };
+    configured[1] = { ...configured[1], enabled: false };
+    const requested: string[] = [];
+    const test = fixture({
+      providerSettings: configured,
+      fetch: async (request) => {
+        const url = new URL(request.url);
+        const language = url.searchParams.get("language");
+        if (url.pathname.endsWith("/images"))
+          return Response.json({
+            id: 20526,
+            posters: [
+              { file_path: "/zh.jpg", iso_639_1: "zh" },
+              { file_path: "/en.jpg", iso_639_1: "en" },
+            ],
+            logos: [],
+          });
+        requested.push(language!);
+        return Response.json({
+          id: 20526,
+          title: language,
+          overview: language,
+          original_language: "en",
+        });
+      },
+    });
+    const get = (language: string) =>
+      test.run(
+        Effect.gen(function* () {
+          const providers = yield* MetadataProviders;
+          return yield* providers.refresh(record());
+        }).pipe(Effect.provideService(ClientLanguage, language)),
+      );
+    const [chinese, english] = await Promise.all([get("zh-CN"), get("en-US")]);
+    expect(chinese.canonical.displayMetadata).toMatchObject({
+      Name: "zh-CN",
+      ExternalImages: { Primary: "https://image.tmdb.org/t/p/w780/zh.jpg" },
+    });
+    expect(english.canonical.displayMetadata).toMatchObject({
+      Name: "en-US",
+      ExternalImages: { Primary: "https://image.tmdb.org/t/p/w780/en.jpg" },
+    });
+    await get("zh-CN");
+    await get("en-US");
+    expect(requested.sort()).toEqual(["en-US", "zh-CN"]);
+    expect(test.writes).toHaveLength(2);
+    expect(new Set(test.writes.map((entry) => entry.identityValue)).size).toBe(2);
+  });
+  it("uses English for client-default requests without a header and ignores the old dashboard preference", async () => {
+    const configured = settings();
+    configured[0] = { ...configured[0], language: null, systemLanguage: "zh-CN" };
+    configured[1] = { ...configured[1], enabled: false };
+    let requested: string | null = null;
+    const test = fixture({
+      providerSettings: configured,
+      fetch: async (request) => {
+        requested = new URL(request.url).searchParams.get("language");
+        return Response.json({ id: 20526, title: "English" });
+      },
+    });
+    await test.run(
+      Effect.gen(function* () {
+        const providers = yield* MetadataProviders;
+        yield* providers.refresh(record());
+      }),
+    );
+    expect(requested).toBe("en-US");
+  });
+  it("keeps explicit metadata language independent of the client", async () => {
+    const configured = settings();
+    configured[1] = { ...configured[1], enabled: false };
+    let requested: string | null = null;
+    const test = fixture({
+      providerSettings: configured,
+      fetch: async (request) => {
+        requested = new URL(request.url).searchParams.get("language");
+        return Response.json({ id: 20526, title: "Chinese" });
+      },
+    });
+    await test.run(
+      Effect.gen(function* () {
+        const providers = yield* MetadataProviders;
+        yield* providers.refresh(record());
+      }).pipe(Effect.provideService(ClientLanguage, "ja-JP")),
+    );
+    expect(requested).toBe("zh-CN");
+  });
+
+  it.each([
+    ["metadata", "original", "/zh.jpg", "/ja-logo.png"],
+    ["original", "metadata", "/ja.jpg", "/zh-logo.png"],
+    ["en-US", "zh-TW", "/en.jpg", "/zh-logo.png"],
+  ] as const)(
+    "selects poster %s and logo %s languages independently",
+    async (posterLanguage, logoLanguage, poster, logo) => {
+      const configured = settings();
+      configured[0] = {
+        ...configured[0],
+        language: "zh-HK",
+        posterLanguage,
+        logoLanguage,
+        systemLanguage: "en-US",
+      };
+      configured[1] = { ...configured[1], enabled: false };
+      const requests: Array<Request> = [];
+      const test = fixture({
+        providerSettings: configured,
+        fetch: async (input, init) => {
+          const request = new Request(input, init);
+          requests.push(request);
+          return new URL(request.url).pathname.endsWith("/images")
+            ? Response.json({
+                id: 20526,
+                posters: [
+                  { iso_639_1: "en", file_path: "/en.jpg" },
+                  { iso_639_1: "zh", file_path: "/zh.jpg" },
+                  { iso_639_1: "ja", file_path: "/ja.jpg" },
+                  { iso_639_1: null, file_path: "/neutral.jpg" },
+                ],
+                logos: [
+                  { iso_639_1: "zh", file_path: "/zh-logo.png" },
+                  { iso_639_1: "ja", file_path: "/ja-logo.png" },
+                ],
+              })
+            : Response.json({
+                id: 20526,
+                title: "Localized title",
+                original_language: "ja",
+                poster_path: "/default.jpg",
+                backdrop_path: "/backdrop.jpg",
+              });
+        },
+      });
+      await test.run(
+        Effect.gen(function* () {
+          const providers = yield* MetadataProviders;
+          const enriched = yield* providers.refresh(record());
+          expect(enriched.canonical.displayMetadata).toMatchObject({
+            Name: "Localized title",
+            ExternalImages: {
+              Primary: `https://image.tmdb.org/t/p/w780${poster}`,
+              Logo: `https://image.tmdb.org/t/p/w500${logo}`,
+            },
+          });
+          expect((yield* providers.resolveCachedImage(record(), "Logo"))?.href).toBe(
+            `https://image.tmdb.org/t/p/w500${logo}`,
+          );
+          yield* providers.refresh(record());
+        }),
+      );
+      expect(requests).toHaveLength(2);
+      expect(new URL(requests[0]!.url).searchParams.get("language")).toBe("zh-HK");
+      expect(new URL(requests[1]!.url).searchParams.get("include_image_language")).toContain("ja");
+    },
+  );
+
+  it("uses client language and refreshes artwork after preferences change", async () => {
+    const configured = settings();
+    configured[0] = {
+      ...configured[0],
+      language: null,
+      systemLanguage: "zh-CN",
+      posterLanguage: "metadata",
+      logoLanguage: "original",
+    };
+    configured[1] = { ...configured[1], enabled: false };
+    const requests: Array<Request> = [];
+    let now = 10000;
+    const test = fixture({
+      providerSettings: configured,
+      now: () => now,
+      fetch: async (input, init) => {
+        const request = new Request(input, init);
+        requests.push(request);
+        return new URL(request.url).pathname.endsWith("/images")
+          ? Response.json({
+              id: 20526,
+              posters: [
+                { iso_639_1: "zh", file_path: "/zh.jpg" },
+                { iso_639_1: "en", file_path: "/en.jpg" },
+              ],
+              logos: [],
+            })
+          : Response.json({ id: 20526, original_language: "en", title: "Title" });
+      },
+    });
+    await test.run(
+      Effect.gen(function* () {
+        yield* (yield* MetadataProviders).refresh(record());
+      }).pipe(Effect.provideService(ClientLanguage, "zh-CN")),
+    );
+    expect(new URL(requests[0]!.url).searchParams.get("language")).toBe("zh-CN");
+    test.settings[0] = { ...test.settings[0], posterLanguage: "original", updatedAtMs: 10001 };
+    now = 10002;
+    const result = await test.run(
+      Effect.gen(function* () {
+        return yield* (yield* MetadataProviders).refresh(record());
+      }).pipe(Effect.provideService(ClientLanguage, "zh-CN")),
+    );
+    expect(result.canonical.displayMetadata).toMatchObject({
+      ExternalImages: { Primary: "https://image.tmdb.org/t/p/w780/en.jpg" },
+      ExternalArtworkRevision: 10001,
+    });
+    expect(requests).toHaveLength(4);
+  });
+
+  it("keeps upstream fallback when localized artwork requests fail without caching a partial response", async () => {
+    const configured = settings();
+    configured[0] = { ...configured[0], posterLanguage: "zh-CN", logoLanguage: "original" };
+    configured[1] = { ...configured[1], enabled: false };
+    const test = fixture({
+      providerSettings: configured,
+      fetch: async (input) =>
+        new URL(new Request(input).url).pathname.endsWith("/images")
+          ? new Response(null, { status: 503 })
+          : Response.json({ id: 20526, original_language: "en", title: "New" }),
+    });
+    const result = await test.run(
+      Effect.gen(function* () {
+        return yield* (yield* MetadataProviders).refresh(record());
+      }),
+    );
+    expect(result.canonical.displayMetadata).not.toHaveProperty("ExternalImages");
+    expect(test.writes).toHaveLength(0);
+    expect(test.settings[0].status).toBe("degraded");
+  });
+
+  it.each(["Movie", "Series"] as const)(
+    "prefers the typed TMDB ID over IMDb for %s",
+    async (itemType) => {
+      const requests: Array<Request> = [];
+      const test = fixture({
+        fetch: async (input, init) => {
+          requests.push(new Request(input, init));
+          return Response.json({
+            id: 20526,
+            title: "Movie",
+            name: "Series",
+            poster_path: "/poster.jpg",
+          });
+        },
+      });
+      await test.run(
+        Effect.gen(function* () {
+          yield* (yield* MetadataProviders).refresh(record(itemType));
+        }),
+      );
+      expect(new URL(requests[0]!.url).pathname).toBe(
+        itemType === "Movie" ? "/3/movie/20526" : "/3/tv/20526",
+      );
+      expect(requests.some((request) => new URL(request.url).pathname.includes("/find/"))).toBe(
+        false,
+      );
+      expect(new URL(requests[1]!.url).pathname).toBe(
+        itemType === "Movie" ? "/movies/tt1104001" : "/shows/tt1104001",
+      );
+    },
+  );
+
+  it.each(["missing", "invalid", "ambiguous", "wrong-type"])(
+    "falls back to IMDb when the TMDB identity is %s",
+    async (reason) => {
+      const original = record();
+      const claims = original.claims.filter((claim) => claim.namespace !== "tmdb:movie");
+      if (reason !== "missing")
+        claims.push({
+          ...original.claims[1]!,
+          value: reason === "invalid" ? "invalid" : "20526",
+          state: reason === "ambiguous" ? "ambiguous" : "exact",
+          namespace: reason === "wrong-type" ? "tmdb:tv" : "tmdb:movie",
+        });
+      const requests: Array<Request> = [];
+      const test = fixture({
+        fetch: async (input, init) => {
+          const request = new Request(input, init);
+          requests.push(request);
+          return request.url.includes("themoviedb")
+            ? Response.json({ movie_results: [], tv_results: [] })
+            : new Response(null, { status: 404 });
+        },
+      });
+      await test.run(
+        Effect.gen(function* () {
+          yield* (yield* MetadataProviders).refresh({ ...original, claims });
+        }),
+      );
+      expect(new URL(requests[0]!.url).pathname).toBe("/3/find/tt1104001");
+      expect(test.writes[0]?.identityNamespace).toBe("imdb:title");
+    },
+  );
+
+  it.each(["Movie", "Series"])(
+    "loads TMDB artwork using a typed %s ID when IMDb is absent",
+    async (itemType) => {
+      const requests: Array<Request> = [];
+      const original = record(itemType);
+      const withoutImdb = {
+        ...original,
+        claims: original.claims.filter((claim) => claim.namespace !== "imdb:title"),
+      };
+      const test = fixture({
+        fetch: async (input, init) => {
+          const request = new Request(input, init);
+          requests.push(request);
+          return Response.json({
+            id: 20526,
+            title: "Movie",
+            name: "Series",
+            poster_path: "/poster.jpg",
+            backdrop_path: "/backdrop.jpg",
+          });
+        },
+      });
+      await test.run(
+        Effect.gen(function* () {
+          const providers = yield* MetadataProviders;
+          const enriched = yield* providers.refresh(withoutImdb);
+          expect(enriched.canonical.displayMetadata).toMatchObject({
+            ExternalImages: { Primary: "https://image.tmdb.org/t/p/w780/poster.jpg" },
+          });
+          expect((yield* providers.resolveCachedImage(withoutImdb, "Primary"))?.hostname).toBe(
+            "image.tmdb.org",
+          );
+          yield* providers.refresh(withoutImdb);
+        }),
+      );
+      expect(requests).toHaveLength(1);
+      expect(new URL(requests[0]!.url).pathname).toBe(
+        itemType === "Movie" ? "/3/movie/20526" : "/3/tv/20526",
+      );
+      expect(requests[0]!.headers.get("authorization")).toBe("Bearer tmdb-secret");
+      expect(test.writes[0]?.identityNamespace).toBe(
+        itemType === "Movie" ? "tmdb:movie" : "tmdb:tv",
+      );
+    },
+  );
+
+  it.each([
+    ["tmdb:movie", "20526", "exact"],
+    ["tmdb:tv", "20526", "ambiguous"],
+    ["tmdb:tv", "../movie/20526", "exact"],
+    ["tmdb:tv", "9007199254740993", "exact"],
+  ])(
+    "does not query TMDB with an incompatible %s claim (%s, %s)",
+    async (namespace, value, state) => {
+      let calls = 0;
+      const original = record("Series");
+      const invalid = {
+        ...original,
+        claims: [{ ...original.claims[1]!, namespace, value, state }],
+      } as CatalogItemRecord;
+      const test = fixture({
+        fetch: async () => {
+          calls++;
+          return Response.json({ id: 20526 });
+        },
+      });
+      await test.run(
+        Effect.gen(function* () {
+          yield* (yield* MetadataProviders).refresh(invalid);
+        }),
+      );
+      expect(calls).toBe(0);
+      expect(test.writes).toHaveLength(0);
+    },
+  );
+
+  it("rejects mismatched TMDB detail identities", async () => {
+    const original = record("Series");
+    const withoutImdb = {
+      ...original,
+      claims: original.claims.filter((claim) => claim.namespace !== "imdb:title"),
+    };
+    const test = fixture({
+      fetch: async () => Response.json({ id: 99999, name: "Wrong", poster_path: "/wrong.jpg" }),
+    });
+    const result = await test.run(
+      Effect.gen(function* () {
+        return yield* (yield* MetadataProviders).refresh(withoutImdb);
+      }),
+    );
+    expect(result.canonical.displayMetadata).toEqual(original.canonical.displayMetadata);
+    expect(test.writes).toHaveLength(0);
+    expect(test.settings.find((setting) => setting.id === "tmdb")?.status).toBe("degraded");
+  });
   it("uses exact IMDb adapters and merges the first non-empty configured fields", async () => {
-    const requests: Array<Request> = []
+    const requests: Array<Request> = [];
     const fetch: typeof globalThis.fetch = async (input, init) => {
-      const request = new Request(input, init)
-      requests.push(request)
+      const request = new Request(input, init);
+      requests.push(request);
       if (request.url.startsWith("https://api.trakt.tv/")) {
         return Response.json({
           title: "Trakt title",
@@ -133,26 +602,30 @@ describe("MetadataProviders", () => {
           ids: { imdb: "tt1104001" },
           images: {
             poster: ["//walter-r2.trakt.tv/images/poster.jpg"],
-            fanart: ["https://images.example.com/rejected.jpg"]
-          }
-        })
+            fanart: ["https://images.example.com/rejected.jpg"],
+          },
+        });
       }
       return Response.json({
-        movie_results: [{
-          title: "TMDB title",
-          overview: "TMDB overview",
-          poster_path: "/tmdb-poster.jpg",
-          backdrop_path: "/tmdb-backdrop.jpg"
-        }],
-        tv_results: []
-      })
-    }
-    const test = fixture({ fetch, providerSettings: settings(["trakt", "tmdb"]) })
+        movie_results: [
+          {
+            title: "TMDB title",
+            overview: "TMDB overview",
+            poster_path: "/tmdb-poster.jpg",
+            backdrop_path: "/tmdb-backdrop.jpg",
+          },
+        ],
+        tv_results: [],
+      });
+    };
+    const test = fixture({ fetch, providerSettings: settings(["trakt", "tmdb"]) });
 
-    const original = record()
-    const enriched = await test.run(Effect.gen(function*() {
-      return yield* (yield* MetadataProviders).refresh(original)
-    }))
+    const original = imdbRecord();
+    const enriched = await test.run(
+      Effect.gen(function* () {
+        return yield* (yield* MetadataProviders).refresh(original);
+      }),
+    );
 
     expect(enriched.canonical.displayMetadata).toEqual({
       Name: "Trakt title",
@@ -160,61 +633,65 @@ describe("MetadataProviders", () => {
       Tagline: "Upstream tagline",
       ExternalImages: {
         Primary: "https://walter-r2.trakt.tv/images/poster.jpg",
-        Backdrop: ["https://image.tmdb.org/t/p/w1280/tmdb-backdrop.jpg"]
-      }
-    })
-    expect(enriched.claims).toBe(original.claims)
-    expect(enriched.sourceItems).toBe(original.sourceItems)
+        Backdrop: ["https://image.tmdb.org/t/p/w1280/tmdb-backdrop.jpg"],
+      },
+    });
+    expect(enriched.claims).toBe(original.claims);
+    expect(enriched.sourceItems).toBe(original.sourceItems);
     expect(requests.map(({ url }) => url)).toEqual([
       "https://api.trakt.tv/movies/tt1104001?extended=full",
-      "https://api.themoviedb.org/3/find/tt1104001?external_source=imdb_id&language=zh-CN"
-    ])
-    expect(requests[0]?.headers.get("trakt-api-key")).toBe("trakt-secret")
-    expect(requests[0]?.headers.get("trakt-api-version")).toBe("2")
-    expect(requests[0]?.headers.get("accept")).toBe("application/json")
-    expect(requests[0]?.headers.get("content-type")).toBe("application/json")
-    expect(requests[0]?.headers.get("user-agent")).toMatch(/^oh-my-emby\//)
-    expect(requests[1]?.headers.get("authorization")).toBe("Bearer tmdb-secret")
-  })
+      "https://api.themoviedb.org/3/find/tt1104001?external_source=imdb_id&language=zh-CN",
+    ]);
+    expect(requests[0]?.headers.get("trakt-api-key")).toBe("trakt-secret");
+    expect(requests[0]?.headers.get("trakt-api-version")).toBe("2");
+    expect(requests[0]?.headers.get("accept")).toBe("application/json");
+    expect(requests[0]?.headers.get("content-type")).toBe("application/json");
+    expect(requests[0]?.headers.get("user-agent")).toMatch(/^oh-my-emby\//);
+    expect(requests[1]?.headers.get("authorization")).toBe("Bearer tmdb-secret");
+  });
 
   it("uses fresh positive and negative cache entries without provider fan-out", async () => {
-    let calls = 0
+    let calls = 0;
     const test = fixture({
       fetch: async (input) => {
-        calls++
+        calls++;
         return new Request(input).url.includes("themoviedb")
           ? Response.json({ movie_results: [], tv_results: [] })
-          : new Response(null, { status: 404 })
-      }
-    })
-    const original = record()
+          : new Response(null, { status: 404 });
+      },
+    });
+    const original = imdbRecord();
 
-    const before = await test.run(Effect.gen(function*() {
-      return yield* (yield* MetadataProviders).overlayCached(original)
-    }))
-    expect(before.canonical.displayMetadata).toEqual(original.canonical.displayMetadata)
-    expect(calls).toBe(0)
+    const before = await test.run(
+      Effect.gen(function* () {
+        return yield* (yield* MetadataProviders).overlayCached(original);
+      }),
+    );
+    expect(before.canonical.displayMetadata).toEqual(original.canonical.displayMetadata);
+    expect(calls).toBe(0);
 
-    await test.run(Effect.gen(function*() {
-      const providers = yield* MetadataProviders
-      yield* providers.refresh(original)
-      yield* providers.refresh(original)
-    }))
-    expect(calls).toBe(2)
-    expect(test.writes).toHaveLength(2)
-    expect(test.writes.every(({ found, payload }) => !found && payload === null)).toBe(true)
-  })
+    await test.run(
+      Effect.gen(function* () {
+        const providers = yield* MetadataProviders;
+        yield* providers.refresh(original);
+        yield* providers.refresh(original);
+      }),
+    );
+    expect(calls).toBe(2);
+    expect(test.writes).toHaveLength(2);
+    expect(test.writes.every(({ found, payload }) => !found && payload === null)).toBe(true);
+  });
 
   it("bounds provider failures, falls back upstream, and recovers degraded status on success", async () => {
-    let healthy = false
+    let healthy = false;
     const test = fixture({
       fetch: async (input) => {
-        const url = new Request(input).url
+        const url = new Request(input).url;
         if (!healthy) {
           if (url.includes("themoviedb")) {
-            return new Response("{".repeat(100), { headers: { "content-length": "100" } })
+            return new Response("{".repeat(100), { headers: { "content-length": "100" } });
           }
-          return new Response(null, { status: 429 })
+          return new Response(null, { status: 429 });
         }
         return url.includes("themoviedb")
           ? Response.json({ movie_results: [{ title: "Recovered" }], tv_results: [] })
@@ -222,263 +699,314 @@ describe("MetadataProviders", () => {
               title: "Trakt recovered",
               overview: "",
               ids: { imdb: "tt1104001" },
-              images: {}
-            })
+              images: {},
+            });
       },
-      maxResponseBytes: 80
-    })
-    const original = record()
+      maxResponseBytes: 80,
+    });
+    const original = imdbRecord();
 
-    const fallback = await test.run(Effect.gen(function*() {
-      return yield* (yield* MetadataProviders).refresh(original)
-    }))
-    expect(fallback.canonical.displayMetadata).toEqual(original.canonical.displayMetadata)
-    expect(test.settings.map(({ status }) => status)).toEqual(["degraded", "degraded"])
-    expect(JSON.stringify(test.settings)).not.toContain("Provider")
+    const fallback = await test.run(
+      Effect.gen(function* () {
+        return yield* (yield* MetadataProviders).refresh(original);
+      }),
+    );
+    expect(fallback.canonical.displayMetadata).toEqual(original.canonical.displayMetadata);
+    expect(test.settings.map(({ status }) => status)).toEqual(["degraded", "degraded"]);
+    expect(JSON.stringify(test.settings)).not.toContain("Provider");
 
-    healthy = true
-    const recovered = await test.run(Effect.gen(function*() {
-      return yield* (yield* MetadataProviders).refresh(original)
-    }))
-    expect(recovered.canonical.displayMetadata).toMatchObject({ Name: "Recovered" })
-    expect(test.settings.map(({ status }) => status)).toEqual(["ready", "ready"])
-  })
+    healthy = true;
+    const recovered = await test.run(
+      Effect.gen(function* () {
+        return yield* (yield* MetadataProviders).refresh(original);
+      }),
+    );
+    expect(recovered.canonical.displayMetadata).toMatchObject({ Name: "Recovered" });
+    expect(test.settings.map(({ status }) => status)).toEqual(["ready", "ready"]);
+  });
 
   it("does not overwrite a concurrent credential clear while observing degraded status", async () => {
-    const configured = settings()
-    configured[1] = { ...configured[1], enabled: false }
+    const configured = settings();
+    configured[1] = { ...configured[1], enabled: false };
     const test = fixture({
       providerSettings: configured,
       fetch: async () => new Response(null, { status: 429 }),
-      beforeStatusMutation: ([tmdb, trakt]) => [{
-        ...tmdb,
-        enabled: false,
-        credential: null,
-        status: "unconfigured",
-        updatedAtMs: 2
-      }, trakt]
-    })
+      beforeStatusMutation: ([tmdb, trakt]) => [
+        {
+          ...tmdb,
+          enabled: false,
+          credential: null,
+          status: "unconfigured",
+          updatedAtMs: 2,
+        },
+        trakt,
+      ],
+    });
 
-    await test.run(Effect.gen(function*() {
-      yield* (yield* MetadataProviders).refresh(record())
-    }))
+    await test.run(
+      Effect.gen(function* () {
+        yield* (yield* MetadataProviders).refresh(imdbRecord());
+      }),
+    );
     expect(test.settings[0]).toMatchObject({
       enabled: false,
       credential: null,
       status: "unconfigured",
-      updatedAtMs: 2
-    })
-  })
+      updatedAtMs: 2,
+    });
+  });
 
   it("does not call providers for a malformed IMDb title claim", async () => {
-    const configured = settings(["trakt", "tmdb"])
-    configured[1] = { ...configured[1], enabled: false }
-    let calls = 0
+    const configured = settings(["trakt", "tmdb"]);
+    configured[1] = { ...configured[1], enabled: false };
+    let calls = 0;
     const test = fixture({
       providerSettings: configured,
       fetch: async () => {
-        calls++
-        return Response.json({ title: "Wrong", ids: { imdb: "slug-like" } })
-      }
-    })
-    const original = record()
+        calls++;
+        return Response.json({ title: "Wrong", ids: { imdb: "slug-like" } });
+      },
+    });
+    const original = imdbRecord();
     const malformed: CatalogItemRecord = {
       ...original,
-      claims: original.claims.map((claim) => claim.namespace === "imdb:title"
-        ? { ...claim, value: "tron-legacy-2010" }
-        : claim)
-    }
+      claims: original.claims.map((claim) =>
+        claim.namespace === "imdb:title" ? { ...claim, value: "tron-legacy-2010" } : claim,
+      ),
+    };
 
-    const result = await test.run(Effect.gen(function*() {
-      return yield* (yield* MetadataProviders).refresh(malformed)
-    }))
-    expect(result.canonical.displayMetadata).toEqual(original.canonical.displayMetadata)
-    expect(calls).toBe(0)
-    expect(test.writes).toEqual([])
-  })
+    const result = await test.run(
+      Effect.gen(function* () {
+        return yield* (yield* MetadataProviders).refresh(malformed);
+      }),
+    );
+    expect(result.canonical.displayMetadata).toEqual(original.canonical.displayMetadata);
+    expect(calls).toBe(0);
+    expect(test.writes).toEqual([]);
+  });
 
   it.each([
     ["mismatched", { imdb: "tt9999999" }],
-    ["missing", {}]
+    ["missing", {}],
   ] as const)("does not cache or recover a %s Trakt identity", async (_case, ids) => {
-    const configured = settings(["trakt", "tmdb"])
-    configured[0] = { ...configured[0], status: "degraded" }
-    configured[1] = { ...configured[1], enabled: false }
+    const configured = settings(["trakt", "tmdb"]);
+    configured[0] = { ...configured[0], status: "degraded" };
+    configured[1] = { ...configured[1], enabled: false };
     const test = fixture({
       providerSettings: configured,
-      fetch: async () => Response.json({ title: "Wrong", ids })
-    })
+      fetch: async () => Response.json({ title: "Wrong", ids }),
+    });
 
-    const result = await test.run(Effect.gen(function*() {
-      return yield* (yield* MetadataProviders).refresh(record())
-    }))
-    expect(result.canonical.displayMetadata).toMatchObject({ Name: "Upstream title" })
-    expect(test.writes).toEqual([])
-    expect(test.settings[0].status).toBe("degraded")
-  })
+    const result = await test.run(
+      Effect.gen(function* () {
+        return yield* (yield* MetadataProviders).refresh(imdbRecord());
+      }),
+    );
+    expect(result.canonical.displayMetadata).toMatchObject({ Name: "Upstream title" });
+    expect(test.writes).toEqual([]);
+    expect(test.settings[0].status).toBe("degraded");
+  });
 
   it.each([
-    ["timeout", (request: Request) => new Promise<Response>((_resolve, reject) => {
-      request.signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")))
-    })],
-    ["malformed JSON", () => Promise.resolve(new Response("{"))]
+    [
+      "timeout",
+      (request: Request) =>
+        new Promise<Response>((_resolve, reject) => {
+          request.signal.addEventListener("abort", () =>
+            reject(new DOMException("aborted", "AbortError")),
+          );
+        }),
+    ],
+    ["malformed JSON", () => Promise.resolve(new Response("{"))],
   ] as const)("treats %s as a degraded provider fallback", async (_failure, fetchTmdb) => {
-    const configured = settings()
-    configured[1] = { ...configured[1], enabled: false }
+    const configured = settings();
+    configured[1] = { ...configured[1], enabled: false };
     const test = fixture({
       providerSettings: configured,
       fetch: ((input: RequestInfo | URL) => fetchTmdb(new Request(input))) as typeof fetch,
-      deadlineMs: 5
-    })
-    const original = record()
+      deadlineMs: 5,
+    });
+    const original = imdbRecord();
 
-    const fallback = await test.run(Effect.gen(function*() {
-      return yield* (yield* MetadataProviders).refresh(original)
-    }))
-    expect(fallback.canonical.displayMetadata).toEqual(original.canonical.displayMetadata)
-    expect(test.settings[0].status).toBe("degraded")
-  })
+    const fallback = await test.run(
+      Effect.gen(function* () {
+        return yield* (yield* MetadataProviders).refresh(original);
+      }),
+    );
+    expect(fallback.canonical.displayMetadata).toEqual(original.canonical.displayMetadata);
+    expect(test.settings[0].status).toBe("degraded");
+  });
 
   it("applies the provider deadline while reading the response body", async () => {
-    const configured = settings()
-    configured[1] = { ...configured[1], enabled: false }
-    let timer: ReturnType<typeof setTimeout>
+    const configured = settings();
+    configured[1] = { ...configured[1], enabled: false };
+    let timer: ReturnType<typeof setTimeout>;
     const test = fixture({
       providerSettings: configured,
       deadlineMs: 5,
-      fetch: async () => new Response(new ReadableStream({
-        start(controller) {
-          timer = setTimeout(() => {
-            controller.enqueue(new TextEncoder().encode(JSON.stringify({
-              movie_results: [{ title: "Too late" }],
-              tv_results: []
-            })))
-            controller.close()
-          }, 30)
-        },
-        cancel() { clearTimeout(timer) }
-      }))
-    })
+      fetch: async () =>
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              timer = setTimeout(() => {
+                controller.enqueue(
+                  new TextEncoder().encode(
+                    JSON.stringify({
+                      movie_results: [{ title: "Too late" }],
+                      tv_results: [],
+                    }),
+                  ),
+                );
+                controller.close();
+              }, 30);
+            },
+            cancel() {
+              clearTimeout(timer);
+            },
+          }),
+        ),
+    });
 
-    const fallback = await test.run(Effect.gen(function*() {
-      return yield* (yield* MetadataProviders).refresh(record())
-    }))
-    expect(fallback.canonical.displayMetadata).toMatchObject({ Name: "Upstream title" })
-    expect(test.settings[0].status).toBe("degraded")
-  })
+    const fallback = await test.run(
+      Effect.gen(function* () {
+        return yield* (yield* MetadataProviders).refresh(imdbRecord());
+      }),
+    );
+    expect(fallback.canonical.displayMetadata).toMatchObject({ Name: "Upstream title" });
+    expect(test.settings[0].status).toBe("degraded");
+  });
 
   it("returns only allowlisted HTTPS cached artwork by image type and index", async () => {
     const test = fixture({
       providerSettings: settings(["trakt", "tmdb"]),
-      fetch: async (input) => new Request(input).url.includes("trakt.tv")
-        ? Response.json({
-            title: "Trakt",
-            ids: { imdb: "tt1104001" },
-            images: {
-              poster: "http://walter-r2.trakt.tv/insecure.jpg",
-              fanart: [
-                "//walter-r2.trakt.tv/backdrop-1.jpg",
-                "https://walter-r2.trakt.tv.evil.example/backdrop-2.jpg"
-              ]
-            }
-          })
-        : Response.json({
-            movie_results: [{
-              title: "TMDB",
-              poster_path: "https://evil.example/poster.jpg",
-              backdrop_path: "/backdrop-2.jpg"
-            }],
-            tv_results: []
-          })
-    })
-    const original = record()
-    await test.run(Effect.gen(function*() {
-      yield* (yield* MetadataProviders).refresh(original)
-    }))
+      fetch: async (input) =>
+        new Request(input).url.includes("trakt.tv")
+          ? Response.json({
+              title: "Trakt",
+              ids: { imdb: "tt1104001" },
+              images: {
+                poster: "http://walter-r2.trakt.tv/insecure.jpg",
+                fanart: [
+                  "//walter-r2.trakt.tv/backdrop-1.jpg",
+                  "https://walter-r2.trakt.tv.evil.example/backdrop-2.jpg",
+                ],
+              },
+            })
+          : Response.json({
+              movie_results: [
+                {
+                  title: "TMDB",
+                  poster_path: "https://evil.example/poster.jpg",
+                  backdrop_path: "/backdrop-2.jpg",
+                },
+              ],
+              tv_results: [],
+            }),
+    });
+    const original = imdbRecord();
+    await test.run(
+      Effect.gen(function* () {
+        yield* (yield* MetadataProviders).refresh(original);
+      }),
+    );
 
-    const images = await test.run(Effect.gen(function*() {
-      const providers = yield* MetadataProviders
-      return yield* Effect.all([
-        providers.resolveCachedImage(original, "Primary"),
-        providers.resolveCachedImage(original, "Backdrop"),
-        providers.resolveCachedImage(original, "Backdrop", 1),
-        providers.resolveCachedImage(original, "Logo")
-      ])
-    }))
+    const images = await test.run(
+      Effect.gen(function* () {
+        const providers = yield* MetadataProviders;
+        return yield* Effect.all([
+          providers.resolveCachedImage(original, "Primary"),
+          providers.resolveCachedImage(original, "Backdrop"),
+          providers.resolveCachedImage(original, "Backdrop", 1),
+          providers.resolveCachedImage(original, "Logo"),
+        ]);
+      }),
+    );
     expect(images.map((image) => image?.href ?? null)).toEqual([
       null,
       "https://walter-r2.trakt.tv/backdrop-1.jpg",
       null,
-      null
-    ])
-  })
+      null,
+    ]);
+  });
 
   it("rejects a cached TMDB image outside the required size path", async () => {
-    const configured = settings()
-    configured[1] = { ...configured[1], enabled: false }
-    const test = fixture({ providerSettings: configured, fetch: async () => Effect.die("unused") as never })
+    const configured = settings();
+    configured[1] = { ...configured[1], enabled: false };
+    const test = fixture({
+      providerSettings: configured,
+      fetch: async () => Effect.die("unused") as never,
+    });
     test.cache.set("tmdb:imdb:title:tt1104001", {
       providerId: "tmdb",
       identityNamespace: "imdb:title",
       identityValue: "tt1104001",
       payload: {
-        ExternalImages: { Primary: "https://image.tmdb.org/t/p/original/poster.jpg" }
+        ExternalImages: { Primary: "https://image.tmdb.org/t/p/original/poster.jpg" },
       },
       found: true,
       fetchedAtMs: 9_000,
       freshUntilMs: 20_000,
-      staleUntilMs: 30_000
-    })
+      staleUntilMs: 30_000,
+    });
 
-    const image = await test.run(Effect.gen(function*() {
-      return yield* (yield* MetadataProviders).resolveCachedImage(record(), "Primary")
-    }))
-    expect(image).toBeNull()
-  })
+    const image = await test.run(
+      Effect.gen(function* () {
+        return yield* (yield* MetadataProviders).resolveCachedImage(imdbRecord(), "Primary");
+      }),
+    );
+    expect(image).toBeNull();
+  });
 
   it("does not treat upstream display metadata as an external image cache entry", async () => {
-    const configured = settings()
-    configured[1] = { ...configured[1], enabled: false }
-    const test = fixture({ providerSettings: configured, fetch: async () => Effect.die("unused") as never })
-    const original = record()
+    const configured = settings();
+    configured[1] = { ...configured[1], enabled: false };
+    const test = fixture({
+      providerSettings: configured,
+      fetch: async () => Effect.die("unused") as never,
+    });
+    const original = imdbRecord();
     const injected: CatalogItemRecord = {
       ...original,
       canonical: {
         ...original.canonical,
         displayMetadata: {
-          ...original.canonical.displayMetadata as Record<string, unknown>,
-          ExternalImages: { Primary: "https://image.tmdb.org/t/p/w780/injected.jpg" }
-        } as any
-      }
-    }
+          ...(original.canonical.displayMetadata as Record<string, unknown>),
+          ExternalImages: { Primary: "https://image.tmdb.org/t/p/w780/injected.jpg" },
+        } as any,
+      },
+    };
 
-    const image = await test.run(Effect.gen(function*() {
-      return yield* (yield* MetadataProviders).resolveCachedImage(injected, "Primary")
-    }))
-    expect(image).toBeNull()
-  })
+    const image = await test.run(
+      Effect.gen(function* () {
+        return yield* (yield* MetadataProviders).resolveCachedImage(injected, "Primary");
+      }),
+    );
+    expect(image).toBeNull();
+  });
 
   it("uses the Trakt show endpoint for exact series metadata", async () => {
-    const urls: Array<string> = []
+    const urls: Array<string> = [];
     const test = fixture({
       providerSettings: settings(["trakt", "tmdb"]),
       fetch: async (input) => {
-        urls.push(new Request(input).url)
+        urls.push(new Request(input).url);
         return Response.json({
           title: "Show",
           overview: "Overview",
           ids: { imdb: "tt1104001" },
-          images: {}
-        })
-      }
-    })
-    await test.run(Effect.gen(function*() {
-      const providers = yield* MetadataProviders
-      yield* providers.refresh(record("Series"))
-    }))
+          images: {},
+        });
+      },
+    });
+    await test.run(
+      Effect.gen(function* () {
+        const providers = yield* MetadataProviders;
+        yield* providers.refresh(imdbRecord("Series"));
+      }),
+    );
     expect(urls).toEqual([
       "https://api.trakt.tv/shows/tt1104001?extended=full",
-      "https://api.themoviedb.org/3/find/tt1104001?external_source=imdb_id&language=zh-CN"
-    ])
-  })
-})
+      "https://api.themoviedb.org/3/find/tt1104001?external_source=imdb_id&language=zh-CN",
+    ]);
+  });
+});

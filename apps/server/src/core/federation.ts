@@ -1,3 +1,7 @@
+import { ClientLanguage } from "./client-language.js";
+import { Collections, type CollectionFailure } from "./collections.js";
+import type { CollectionView } from "./collection-model.js";
+import { providerIds, sourceItemCandidate as candidate } from "./source-item-candidate.js";
 import { Context, Effect, Layer, Result, Schema } from "effect";
 
 import {
@@ -9,12 +13,7 @@ import {
   type IdentityFailure,
   type UpstreamFailure,
 } from "./errors.js";
-import {
-  Identity,
-  type ProviderIds,
-  type ProviderNamespace,
-  type SourceItemCandidate,
-} from "./identity.js";
+import { Identity, stableCanonicalId, type ProviderNamespace } from "./identity.js";
 import {
   DB_BATCH_SIZE,
   MAX_FANOUT_CONCURRENCY,
@@ -50,6 +49,7 @@ export interface CatalogFilter {
 }
 
 export interface FederatedQuery {
+  readonly collectionId?: string;
   readonly userId: string;
   readonly deviceId: string;
   readonly virtualLibraryId: string | null;
@@ -60,6 +60,7 @@ export interface FederatedQuery {
   readonly itemTypes: ReadonlyArray<string>;
   readonly fields?: ReadonlyArray<string>;
   readonly clientUserAgent?: string;
+  readonly indexedPagination?: boolean;
 }
 
 export interface SearchQuery extends FederatedQuery {
@@ -67,12 +68,20 @@ export interface SearchQuery extends FederatedQuery {
 }
 
 export interface CanonicalItemView {
+  readonly collection?: { readonly childCount: number };
   readonly id: string;
   readonly itemType: string;
   readonly displayMetadata: JsonValue;
   readonly mediaVersions: ReadonlyArray<SourceMediaVersion>;
   readonly userState: UserStateRecord | null;
   readonly incompleteSourceIds: ReadonlyArray<string>;
+  readonly hierarchy?: {
+    readonly seriesId: string;
+    readonly seriesName?: string;
+    readonly seasonId?: string;
+    readonly seasonName?: string;
+    readonly parentId: string;
+  };
 }
 
 export interface ShowChildrenQuery {
@@ -97,6 +106,13 @@ export interface CatalogMembership {
   readonly version: SourceMediaVersion | null;
 }
 
+export interface FederatedItemCounts {
+  readonly MovieCount: number;
+  readonly SeriesCount: number;
+  readonly EpisodeCount: number;
+  readonly ItemCount?: number;
+}
+
 export class FederationLimitExceeded extends Schema.TaggedError<FederationLimitExceeded>()(
   "FederationLimitExceeded",
   { requestedEnd: Schema.Int, maximum: Schema.Int },
@@ -111,9 +127,14 @@ export type FederationFailure =
   | FederationLimitExceeded
   | FederationUnavailable
   | IdentityFailure
-  | RepositoryError;
+  | RepositoryError
+  | CollectionFailure;
 
 export interface FederationService {
+  readonly collectionsAvailable: () => Effect.Effect<boolean, FederationFailure>;
+  readonly counts: (
+    clientUserAgent?: string,
+  ) => Effect.Effect<FederatedItemCounts, FederationFailure>;
   readonly list: (query: FederatedQuery) => Effect.Effect<FederatedPage, FederationFailure>;
   readonly search: (query: SearchQuery) => Effect.Effect<FederatedPage, FederationFailure>;
   readonly studios: (query: FederatedQuery) => Effect.Effect<FederatedPage, FederationFailure>;
@@ -210,6 +231,26 @@ const parsePage = (value: unknown): UpstreamPage => {
   };
 };
 
+const parseItemCounts = (value: unknown): FederatedItemCounts => {
+  const counts = toJson(value);
+  if (!jsonObject(counts)) throw new TypeError("upstream counts must be an object");
+  const read = (key: string): number => {
+    const count = counts[key];
+    if (typeof count !== "number" || !Number.isSafeInteger(count) || count < 0) {
+      throw new TypeError(`upstream ${key} must be a non-negative safe integer`);
+    }
+    return count;
+  };
+  return {
+    MovieCount: read("MovieCount"),
+    SeriesCount: read("SeriesCount"),
+    EpisodeCount: read("EpisodeCount"),
+    ...(counts.ItemCount === undefined ? {} : { ItemCount: read("ItemCount") }),
+  };
+};
+
+const supportedItemTypes: ReadonlyArray<string> = ["Movie", "Series", "Season", "Episode"];
+
 const canonicalJson = (value: JsonValue): string =>
   JSON.stringify(value, (_key, entry) => {
     if (entry === null || Array.isArray(entry) || typeof entry !== "object") return entry;
@@ -284,48 +325,6 @@ const sameParticipation = (
 const projectionKey = (query: FederatedQuery): string =>
   `list:${[...new Set(query.fields ?? [])].sort().join(",")}`;
 
-const providerIds = (item: Record<string, JsonValue>): ProviderIds => {
-  const raw = item.ProviderIds;
-  const ids: { readonly [key: string]: JsonValue } =
-    raw !== undefined && jsonObject(raw) ? raw : {};
-  const read = (name: string) => (typeof ids[name] === "string" ? ids[name] : null);
-  return { tmdbMovie: read("Tmdb"), tmdbTv: read("Tmdb"), imdbTitle: read("Imdb") };
-};
-
-const mediaVersions = (item: Record<string, JsonValue>, provider: string) =>
-  Array.isArray(item.MediaSources)
-    ? item.MediaSources.flatMap((entry) => {
-        if (!jsonObject(entry) || typeof entry.Id !== "string") return [];
-        const name = typeof entry.Name === "string" ? entry.Name : entry.Id;
-        return [
-          {
-            upstreamMediaSourceId: entry.Id,
-            label: `[${provider}] ${name}`,
-            capabilities: entry,
-            streams: Array.isArray(entry.MediaStreams) ? entry.MediaStreams : [],
-          },
-        ];
-      })
-    : [];
-
-const candidate = (
-  source: EligibleSource,
-  item: Record<string, JsonValue>,
-  observedAtMs: number,
-): SourceItemCandidate => ({
-  serverId: source.serverId,
-  catalogNamespace: source.catalogNamespace,
-  verifiedCatalogId: source.verifiedCatalogId,
-  serverGeneration: source.serverGeneration,
-  sourceLibraryId: source.sourceLibraryId,
-  upstreamItemId: item.Id as string,
-  itemType: item.Type as SourceItemCandidate["itemType"],
-  providerIds: providerIds(item),
-  displayMetadata: item,
-  mediaVersions: mediaVersions(item, source.name),
-  observedAtMs,
-});
-
 const stateDependent = (query: FederatedQuery) =>
   query.filters.some(
     ({ field }) => field === "favorite" || field === "resume" || field === "played",
@@ -378,7 +377,9 @@ const sortValues = (
   return sort.map(({ field }) => {
     if (field === "DatePlayed") return record.userState?.updatedAtMs ?? null;
     if (field === "IsFavoriteOrLiked") return record.userState?.favorite ? 1 : 0;
-    return jsonObject(metadata) ? (metadata[field] ?? null) : null;
+    if (!jsonObject(metadata)) return null;
+    if (field === "SortName") return metadata.SortName ?? metadata.Name ?? null;
+    return metadata[field] ?? null;
   });
 };
 
@@ -501,7 +502,11 @@ const view = (
 
 export const makeFederationLayer = (
   config: FederationConfig = {},
-): Layer.Layer<Federation, never, Repositories | Identity | MetadataProviders | UpstreamClient> =>
+): Layer.Layer<
+  Federation,
+  never,
+  Repositories | Identity | MetadataProviders | UpstreamClient | Collections
+> =>
   Layer.effect(
     Federation,
     Effect.gen(function* () {
@@ -509,12 +514,113 @@ export const makeFederationLayer = (
       const identity = yield* Identity;
       const metadataProviders = yield* MetadataProviders;
       const upstream = yield* UpstreamClient;
+      const collections = yield* Collections;
       const now = config.now ?? Date.now;
       const listDeadlineMs = config.listDeadlineMs ?? UPSTREAM_LIST_DEADLINE_MS;
       const detailDeadlineMs = config.detailDeadlineMs ?? UPSTREAM_DETAIL_DEADLINE_MS;
 
+      // Public relationships must reference local identities, never upstream IDs.
+      const hierarchyView = (
+        record: CatalogItemRecord,
+        incomplete: ReadonlyArray<string>,
+        knownSeriesId?: string,
+      ) =>
+        Effect.gen(function* () {
+          const result = view(record, incomplete);
+          if (record.canonical.itemType !== "Season" && record.canonical.itemType !== "Episode")
+            return result;
+          const metadata = jsonObject(record.canonical.displayMetadata)
+            ? record.canonical.displayMetadata
+            : {};
+          const relatedId = (type: "Series" | "Season") =>
+            Effect.gen(function* () {
+              for (const source of record.sourceItems) {
+                // IDs must come from this exact source's payload, not merged metadata.
+                const projection =
+                  (yield* repositories.readMetadataProjection(source.id, "show-hierarchy")) ??
+                  (yield* repositories.readMetadataProjection(source.id, "detail"));
+                if (!projection || !jsonObject(projection.payload)) continue;
+                const raw = projection.payload;
+                const upstreamId =
+                  type === "Series" ? raw.SeriesId : (raw.SeasonId ?? raw.ParentId);
+                if (typeof upstreamId !== "string") continue;
+                const mapped = yield* repositories.lookupSourceCanonicalId(
+                  source,
+                  upstreamId,
+                  type,
+                );
+                if (mapped !== null) return yield* identity.lookupCanonicalId(mapped);
+              }
+              return null;
+            });
+          let seriesId = knownSeriesId;
+          const claim = record.claims.find(
+            (claim) =>
+              claim.namespace === `fallback:${record.canonical.itemType.toLowerCase()}` &&
+              claim.state === "exact",
+          );
+          if (seriesId === undefined && claim) {
+            try {
+              const key: unknown = JSON.parse(claim.value);
+              if (Array.isArray(key) && typeof key[0] === "string") seriesId = key[0];
+            } catch {
+              /* An invalid identity claim cannot provide a public relationship. */
+            }
+          }
+          if (seriesId === undefined) seriesId = (yield* relatedId("Series")) ?? undefined;
+          if (seriesId === undefined) return result;
+          const activeSeries = yield* identity.lookupCanonicalId(seriesId);
+          if (activeSeries === null) return result;
+          const series = (yield* repositories.readCatalogItems([activeSeries]))[0];
+          if (series?.canonical.itemType !== "Series") return result;
+
+          const seriesMetadata = jsonObject(series.canonical.displayMetadata)
+            ? series.canonical.displayMetadata
+            : {};
+          let seasonId =
+            record.canonical.itemType === "Episode" ? yield* relatedId("Season") : null;
+          let seasonName: string | undefined;
+          if (
+            seasonId === null &&
+            record.canonical.itemType === "Episode" &&
+            typeof metadata.ParentIndexNumber === "number" &&
+            Number.isSafeInteger(metadata.ParentIndexNumber) &&
+            metadata.ParentIndexNumber >= 0
+          ) {
+            const proposed = yield* Effect.promise(() =>
+              stableCanonicalId([
+                "fallback:season",
+                JSON.stringify([seriesId, metadata.ParentIndexNumber]),
+              ]),
+            );
+            seasonId = yield* identity.lookupCanonicalId(proposed);
+          }
+          if (seasonId !== null) {
+            const season = (yield* repositories.readCatalogItems([seasonId]))[0];
+            if (season?.canonical.itemType !== "Season") seasonId = null;
+            else if (
+              jsonObject(season.canonical.displayMetadata) &&
+              typeof season.canonical.displayMetadata.Name === "string"
+            )
+              seasonName = season.canonical.displayMetadata.Name;
+          }
+
+          return {
+            ...result,
+            hierarchy: {
+              seriesId: activeSeries,
+              ...(typeof seriesMetadata.Name === "string"
+                ? { seriesName: seriesMetadata.Name }
+                : {}),
+              ...(seasonId === null ? {} : { seasonId }),
+              ...(seasonName === undefined ? {} : { seasonName }),
+              parentId: seasonId ?? activeSeries,
+            },
+          };
+        });
+
       const requestForUser = <A>(
-        source: EligibleSource,
+        source: Pick<EligibleSource, "serverId" | "serverGeneration">,
         path: string,
         schema: Schema.Schema<A>,
         clientUserAgent?: string,
@@ -540,6 +646,92 @@ export const makeFederationLayer = (
             },
             schema,
           );
+        });
+
+      const counts: FederationService["counts"] = (clientUserAgent) =>
+        Effect.gen(function* () {
+          const enabledServers = () =>
+            repositories
+              .listServers()
+              .pipe(Effect.map((servers) => servers.filter((server) => server.enabled)));
+          const servers = yield* enabledServers();
+          const catalogs = new Map(
+            servers.map((server) => [
+              server.verifiedCatalogId === null
+                ? `server:${server.id}`
+                : `catalog:${server.verifiedCatalogId}`,
+              server,
+            ]),
+          );
+
+          const results = yield* Effect.forEach(
+            [...catalogs.values()],
+            (server) =>
+              deadline(
+                requestForUser(
+                  { serverId: server.id, serverGeneration: server.generation },
+                  "/Items/Counts",
+                  Schema.Unknown,
+                  clientUserAgent,
+                ).pipe(
+                  Effect.flatMap((value) =>
+                    Effect.try({
+                      try: () => parseItemCounts(value),
+                      catch: () => new UpstreamInvalidResponse({ serverId: server.id }),
+                    }),
+                  ),
+                ),
+                server.id,
+                detailDeadlineMs,
+              ).pipe(
+                Effect.mapError(() => new FederationUnavailable({ sourceIds: [server.id] })),
+                Effect.result,
+              ),
+            { concurrency: MAX_FANOUT_CONCURRENCY },
+          );
+          const failedSourceIds = results.flatMap((result) =>
+            Result.isFailure(result) ? result.failure.sourceIds : [],
+          );
+          if (failedSourceIds.length > 0) {
+            return yield* Effect.fail(new FederationUnavailable({ sourceIds: failedSourceIds }));
+          }
+
+          const currentServers = yield* enabledServers();
+          if (
+            currentServers.length !== servers.length ||
+            servers.some(
+              (server) =>
+                !currentServers.some(
+                  (current) =>
+                    current.id === server.id &&
+                    current.generation === server.generation &&
+                    current.verifiedCatalogId === server.verifiedCatalogId,
+                ),
+            )
+          ) {
+            return yield* Effect.fail(
+              new FederationUnavailable({
+                sourceIds: [...new Set([...servers, ...currentServers].map(({ id }) => id))],
+              }),
+            );
+          }
+          const totals = results.flatMap((result) =>
+            Result.isSuccess(result) ? [result.success] : [],
+          );
+          const counts: FederatedItemCounts = {
+            MovieCount: totals.reduce((sum, total) => sum + total.MovieCount, 0),
+            SeriesCount: totals.reduce((sum, total) => sum + total.SeriesCount, 0),
+            EpisodeCount: totals.reduce((sum, total) => sum + total.EpisodeCount, 0),
+            ...(totals.every((total) => total.ItemCount !== undefined)
+              ? { ItemCount: totals.reduce((sum, total) => sum + total.ItemCount!, 0) }
+              : {}),
+          };
+          if (!Object.values(counts).every(Number.isSafeInteger)) {
+            return yield* Effect.fail(
+              new FederationUnavailable({ sourceIds: servers.map(({ id }) => id) }),
+            );
+          }
+          return counts;
         });
 
       const readCatalog = (ids: ReadonlyArray<string>) =>
@@ -613,9 +805,18 @@ export const makeFederationLayer = (
         Effect.gen(function* () {
           const resolved: Array<BufferedItem> = [];
           for (const raw of items) {
-            if (!["Movie", "Series", "Season", "Episode"].includes(raw.Type as string)) continue;
+            if (!supportedItemTypes.includes(raw.Type as string)) continue;
             const result = yield* identity.resolve(candidate(source, raw, observedAtMs));
             if (writeCache) yield* cacheItem(result, projection, raw, observedAtMs);
+            // A list explicitly requesting MediaSources is also a resource snapshot.
+            // Preserve omission, but let an empty array withdraw previous versions.
+            if (
+              writeCache &&
+              query.fields?.includes("MediaSources") &&
+              Array.isArray(raw.MediaSources)
+            ) {
+              yield* cacheItem(result, "detail", raw, observedAtMs);
+            }
             const records = yield* repositories.readCatalogItems([result.canonical.id], now());
             const record = records[0];
             if (
@@ -654,10 +855,14 @@ export const makeFederationLayer = (
         });
 
       const list = (
-        query: FederatedQuery,
+        requestedQuery: FederatedQuery,
         searchTerm?: string,
       ): Effect.Effect<FederatedPage, FederationFailure> =>
         Effect.gen(function* () {
+          const query = {
+            ...requestedQuery,
+            itemTypes: requestedQuery.itemTypes.filter((type) => supportedItemTypes.includes(type)),
+          };
           const startIndex = Number.isSafeInteger(query.startIndex)
             ? Math.max(0, query.startIndex)
             : 0;
@@ -673,6 +878,9 @@ export const makeFederationLayer = (
               }),
             );
           }
+
+          if (requestedQuery.itemTypes.length > 0 && query.itemTypes.length === 0)
+            return { items: [], totalRecordCount: 0, exhausted: true, incompleteSourceIds: [] };
 
           const libraries = yield* scopedLibraries(query);
           if (libraries.length === 0)
@@ -985,9 +1193,25 @@ export const makeFederationLayer = (
                   .map(({ serverId }) => serverId),
               ),
             ].sort();
+            // Indexed clients need enough slots to request another whole page. Until
+            // deduplication completes, upstream totals are an upper bound, not an exact count.
+            const reportedTotal =
+              query.indexedPagination && !localMembershipOnly(query)
+                ? state.sources.reduce((total, cursor) => total + (cursor.reportedTotal ?? 0), 0)
+                : 0;
+            const unknownTotal = state.sources.some(
+              (cursor) => !cursor.exhausted && cursor.reportedTotal === null,
+            );
             const totalRecordCount = exhausted
               ? published.length
-              : Math.max(published.length, requestedEnd + 1);
+              : Math.min(
+                  MAX_MATERIALIZED_ITEMS,
+                  Math.max(
+                    published.length,
+                    requestedEnd + (query.indexedPagination && unknownTotal ? limit : 1),
+                    reportedTotal,
+                  ),
+                );
             const overlaid = yield* Effect.forEach(records, metadataProviders.overlayCached);
             return {
               items: overlaid.map((record) => view(record, incompleteSourceIds)),
@@ -1094,7 +1318,7 @@ export const makeFederationLayer = (
           if (!record) return null;
           const claim = exactClaim(record);
           if (claim === null || record.sourceItems.length === 0) {
-            return view(yield* metadataProviders.refresh(record), []);
+            return yield* hierarchyView(yield* metadataProviders.refresh(record), []);
           }
 
           const currentRecord = record;
@@ -1180,6 +1404,7 @@ export const makeFederationLayer = (
                                   replayPath: (refreshedUserId) =>
                                     directItemPath(refreshedUserId, known.upstreamItemId),
                                   method: "GET",
+                                  ...(clientUserAgent === undefined ? {} : { clientUserAgent }),
                                 },
                                 Schema.Unknown,
                               )
@@ -1264,6 +1489,17 @@ export const makeFederationLayer = (
                   if (attempted.failure instanceof RepositoryError)
                     return yield* Effect.fail(attempted.failure);
                   if (transient(attempted.failure)) {
+                    // Discovery can time out even when a known item's direct endpoint
+                    // is healthy. Fill missing detail resources without discarding
+                    // still-usable cached versions on a transient discovery failure.
+                    const hasUsableVersions = currentRecord.mediaVersions.some((version) =>
+                      knownSourceItems.some((known) => known.id === version.sourceItemId),
+                    );
+                    if (!hasUsableVersions && knownSourceItems.length > 0) {
+                      const refreshed = yield* refreshKnownItems();
+                      if (refreshed === "found") yield* cacheExactResult(true, now());
+                      if (refreshed === "invalid") yield* suppressStaleVersions(now());
+                    }
                     incomplete.add(source.serverId);
                     return;
                   }
@@ -1308,7 +1544,7 @@ export const makeFederationLayer = (
           );
           record = (yield* repositories.readCatalogItems([activeId], now()))[0];
           return record
-            ? view(yield* metadataProviders.refresh(record), [...incomplete].sort())
+            ? yield* hierarchyView(yield* metadataProviders.refresh(record), [...incomplete].sort())
             : null;
         });
 
@@ -1326,7 +1562,10 @@ export const makeFederationLayer = (
               ? null
               : (record.mediaVersions.find(({ id }) => id === versionId) ?? null);
           if (versionId !== undefined && version === null) return null;
-          return { item: view(yield* metadataProviders.overlayCached(record), []), version };
+          return {
+            item: yield* hierarchyView(yield* metadataProviders.overlayCached(record), []),
+            version,
+          };
         });
 
       const metadataNumber = (item: CanonicalItemView, key: string): number | null => {
@@ -1362,8 +1601,7 @@ export const makeFederationLayer = (
             seasonUpstreamIds = new Set(season.sourceItems.map((item) => item.upstreamItemId));
           }
           const sources = yield* repositories.resolveEligibleSourcesForCanonical(activeId);
-          const collected: Array<CanonicalItemView> = [];
-          const seen = new Set<string>();
+          const collected = new Map<string, CanonicalItemView>();
           for (const sourceItem of series.sourceItems) {
             const source = sources.find(
               (candidateSource) =>
@@ -1417,15 +1655,31 @@ export const makeFederationLayer = (
                 })
                 .pipe(Effect.result);
               if (Result.isFailure(resolved)) continue;
+              yield* repositories.writeMetadataProjection({
+                sourceItemId: resolved.success.sourceItem.id,
+                projectionKey: "show-hierarchy",
+                payload: {
+                  SeriesId: raw.SeriesId ?? null,
+                  SeasonId: raw.SeasonId ?? null,
+                  ParentId: raw.ParentId ?? null,
+                },
+                freshUntilMs: observedAtMs + METADATA_FRESH_MS,
+                staleUntilMs: observedAtMs + METADATA_STALE_MS,
+                updatedAtMs: observedAtMs,
+              });
+              // This endpoint explicitly requests MediaSources. Keep the playable-version
+              // projection alongside identity ingestion so catalog reads can use it.
+              if (Array.isArray(raw.MediaSources)) {
+                yield* cacheItem(resolved.success, "detail", raw, observedAtMs);
+              }
               const childId = yield* identity.lookupCanonicalId(resolved.success.canonical.id);
-              if (childId === null || seen.has(childId)) continue;
+              if (childId === null) continue;
               const current = (yield* repositories.readCatalogItems([childId], now()))[0];
               if (!current) continue;
-              seen.add(childId);
-              collected.push(view(current, []));
+              collected.set(childId, yield* hierarchyView(current, [], activeId));
             }
           }
-          let items = collected;
+          let items = [...collected.values()];
           if (query.kind === "Episode" && query.seasonNumber !== undefined) {
             items = items.filter(
               (item) => metadataNumber(item, "ParentIndexNumber") === query.seasonNumber,
@@ -1464,11 +1718,277 @@ export const makeFederationLayer = (
           };
         });
 
+      const collectionView = (item: CollectionView): CanonicalItemView => ({
+        id: item.id,
+        itemType: "BoxSet",
+        displayMetadata: {
+          ...(jsonObject(item.displayMetadata) ? item.displayMetadata : {}),
+          IsFolder: true,
+          ChildCount: item.childCount,
+        },
+        mediaVersions: [],
+        userState: null,
+        incompleteSourceIds: item.incompleteSourceIds,
+        collection: { childCount: item.childCount },
+      });
+      const listWithCollections = (
+        query: FederatedQuery,
+        searchTerm?: string,
+      ): Effect.Effect<FederatedPage, FederationFailure> =>
+        Effect.gen(function* () {
+          if (!query.collectionId && !query.itemTypes.includes("BoxSet"))
+            return yield* list(query, searchTerm);
+          const startIndex = Math.max(0, query.startIndex),
+            limit = Math.max(0, Math.min(MAX_PAGE_SIZE, query.limit));
+          if (startIndex + limit > MAX_MATERIALIZED_ITEMS)
+            return yield* Effect.fail(
+              new FederationLimitExceeded({
+                requestedEnd: startIndex + limit,
+                maximum: MAX_MATERIALIZED_ITEMS,
+              }),
+            );
+          const scope = { virtualLibraryId: query.virtualLibraryId };
+          const queryScope = yield* scopedLibraries(query),
+            participation = yield* scopedSources(queryScope);
+          const settings = yield* repositories.readMetadataSettings();
+          const baseKey = canonicalJson({
+            query: normalizedQuery(query, searchTerm),
+            collectionId: query.collectionId ?? null,
+            clientLanguage: yield* ClientLanguage,
+            userId: query.userId,
+            deviceId: query.deviceId,
+            scope: scope.virtualLibraryId,
+            settings: settings.map((s) => [s.id, s.enabled, s.updatedAtMs]),
+            sources: participation.map((s) => [s.serverId, s.serverGeneration, s.sourceLibraryId]),
+          });
+          const all = new Map<string, CanonicalItemView>(),
+            incomplete = new Set<string>();
+          let exhausted = true;
+          const addRecords = (records: ReadonlyArray<CatalogItemRecord>) =>
+            Effect.gen(function* () {
+              for (const record of records) {
+                if (
+                  !record.sourceItems.some(
+                    (si) =>
+                      si.quarantineReason === null &&
+                      participation.some(
+                        (s) =>
+                          s.serverId === si.serverId &&
+                          s.serverGeneration === si.serverGeneration &&
+                          s.sourceLibraryId === si.sourceLibraryId,
+                      ),
+                  )
+                )
+                  continue;
+                if (
+                  !matchesFilters(record, query.filters) ||
+                  !matchesItemTypes(
+                    record,
+                    query.itemTypes.filter((t) => t !== "BoxSet"),
+                  )
+                )
+                  continue;
+                if (
+                  searchTerm &&
+                  (!jsonObject(record.canonical.displayMetadata) ||
+                    !String(record.canonical.displayMetadata.Name ?? "")
+                      .toLocaleLowerCase()
+                      .includes(searchTerm.toLocaleLowerCase()))
+                )
+                  continue;
+                all.set(
+                  record.canonical.id,
+                  view(yield* metadataProviders.overlayCached(record), []),
+                );
+              }
+            });
+          if (query.collectionId) {
+            if (query.itemTypes.length > 0 && !query.itemTypes.includes("Movie"))
+              return { items: [], totalRecordCount: 0, exhausted: true, incompleteSourceIds: [] };
+            const memberPage = yield* collections.members(query.collectionId, {
+              scope,
+              startIndex: 0,
+              limit: limit === 0 ? 0 : MAX_PAGE_SIZE,
+              sort: query.sort,
+              ...(query.clientUserAgent ? { clientUserAgent: query.clientUserAgent } : {}),
+            });
+            if (!memberPage)
+              return { items: [], totalRecordCount: 0, exhausted: true, incompleteSourceIds: [] };
+            const records = yield* repositories.readCollectionMovies(query.collectionId, {
+              ...scope,
+              includeTmdb: settings.some(
+                (s) => s.id === "tmdb" && s.enabled && s.credential !== null,
+              ),
+            });
+            yield* addRecords(yield* readCatalog(records.map((r) => r.canonicalId)));
+            memberPage.incompleteSourceIds.forEach((id) => incomplete.add(id));
+            exhausted = memberPage.exhausted;
+          } else {
+            // Discover BoxSets first; subsequent pages render cached metadata only.
+            for (let offset = 0; offset < MAX_MATERIALIZED_ITEMS; offset += MAX_PAGE_SIZE) {
+              const boxes = yield* collections.list({
+                scope,
+                startIndex: offset,
+                limit: MAX_PAGE_SIZE,
+                discover: limit > 0,
+                sort: query.sort,
+                ...(searchTerm ? { searchTerm } : {}),
+                ...(query.clientUserAgent ? { clientUserAgent: query.clientUserAgent } : {}),
+              });
+              for (const box of boxes.items) {
+                const item = collectionView(box);
+                const pseudo = {
+                  canonical: {
+                    id: item.id,
+                    itemType: "BoxSet",
+                    displayMetadata: item.displayMetadata,
+                  },
+                  userState: null,
+                } as CatalogItemRecord;
+                if (matchesFilters(pseudo, query.filters)) all.set(item.id, item);
+              }
+              boxes.incompleteSourceIds.forEach((id) => incomplete.add(id));
+              exhausted = exhausted && boxes.exhausted;
+              if (offset + MAX_PAGE_SIZE >= boxes.totalRecordCount) break;
+            }
+            const revision = yield* repositories.readCollectionRevision();
+            const key = `${baseKey}:revision:${revision}`;
+            const saved = yield* repositories.readCollectionQuery(key);
+            if (!stateDependent(query) && saved && saved.expiresAtMs > now() && saved.exhausted) {
+              const movieIds = saved.ids.filter((id) => !id.startsWith("collection:"));
+              yield* addRecords(yield* readCatalog(movieIds));
+              const items = saved.ids.flatMap((id) => (all.get(id) ? [all.get(id)!] : []));
+              return {
+                items: items.slice(startIndex, startIndex + limit),
+                totalRecordCount: items.length,
+                exhausted: saved.exhausted,
+                incompleteSourceIds: saved.incompleteSourceIds,
+              };
+            }
+            if (
+              limit === 0 &&
+              query.itemTypes.some((t) => t !== "BoxSet" && supportedItemTypes.includes(t))
+            ) {
+              const ids = new Set<string>();
+              for (const library of queryScope) {
+                for (const id of yield* repositories.listStateMemberCanonicalIds({
+                  virtualLibraryId: library.id,
+                  includeWithoutState: true,
+                  limit: MAX_MATERIALIZED_ITEMS,
+                }))
+                  ids.add(id);
+              }
+              yield* addRecords(yield* readCatalog([...ids]));
+              exhausted = false;
+            }
+            if (
+              query.itemTypes.some((t) => t !== "BoxSet" && supportedItemTypes.includes(t)) &&
+              limit > 0
+            ) {
+              const scan = Effect.gen(function* () {
+                for (let offset = 0; offset < MAX_MATERIALIZED_ITEMS; offset += MAX_PAGE_SIZE) {
+                  const movies = yield* list(
+                    {
+                      ...query,
+                      itemTypes: query.itemTypes.filter((t) => t !== "BoxSet"),
+                      startIndex: offset,
+                      limit: MAX_PAGE_SIZE,
+                    },
+                    searchTerm,
+                  );
+                  movies.items.forEach((movie) => all.set(movie.id, movie));
+                  movies.incompleteSourceIds.forEach((id) => incomplete.add(id));
+                  if (movies.exhausted && offset + movies.items.length >= movies.totalRecordCount)
+                    break;
+                  if (movies.items.length === 0) {
+                    exhausted = movies.exhausted;
+                    break;
+                  }
+                  if (offset + MAX_PAGE_SIZE >= MAX_MATERIALIZED_ITEMS) exhausted = false;
+                }
+              }).pipe(
+                Effect.timeout(listDeadlineMs),
+                Effect.catchTag("TimeoutError", () =>
+                  Effect.sync(() => {
+                    exhausted = false;
+                    participation.forEach((s) => incomplete.add(s.serverId));
+                  }),
+                ),
+              );
+              yield* scan;
+            }
+          }
+          const items = [...all.values()];
+          items.sort((a, b) =>
+            compareBuffered(
+              {
+                canonicalId: a.id,
+                sortValues: sortValues(
+                  {
+                    canonical: { displayMetadata: a.displayMetadata },
+                    userState: a.userState,
+                  } as CatalogItemRecord,
+                  query.sort,
+                ),
+              },
+              {
+                canonicalId: b.id,
+                sortValues: sortValues(
+                  {
+                    canonical: { displayMetadata: b.displayMetadata },
+                    userState: b.userState,
+                  } as CatalogItemRecord,
+                  query.sort,
+                ),
+              },
+              query.sort,
+            ),
+          );
+          if (items.length > MAX_MATERIALIZED_ITEMS)
+            return yield* Effect.fail(
+              new FederationLimitExceeded({
+                requestedEnd: items.length,
+                maximum: MAX_MATERIALIZED_ITEMS,
+              }),
+            );
+          if (limit > 0 && !query.collectionId && !stateDependent(query)) {
+            const revision = yield* repositories.readCollectionRevision();
+            yield* repositories.writeCollectionQuery({
+              queryKey: `${baseKey}:revision:${revision}`,
+              ids: items.map((i) => i.id),
+              exhausted: exhausted && incomplete.size === 0,
+              incompleteSourceIds: [...incomplete],
+              expiresAtMs: now() + QUERY_GENERATION_TTL_MS,
+            });
+          }
+          return {
+            items: items.slice(startIndex, startIndex + limit),
+            totalRecordCount: items.length,
+            exhausted: exhausted && incomplete.size === 0,
+            incompleteSourceIds: [...incomplete],
+          };
+        });
       return Federation.of({
-        list: (query) => list(query),
-        search: (query) => list(query, query.searchTerm),
+        counts,
+        collectionsAvailable: () =>
+          Effect.map(
+            collections.list({
+              scope: { virtualLibraryId: null },
+              startIndex: 0,
+              limit: 1,
+              sort: [],
+            }),
+            (page) => page.totalRecordCount > 0,
+          ),
+        list: (query) => listWithCollections(query),
+        search: (query) => listWithCollections(query, query.searchTerm),
         studios,
-        detail: enrichVersions,
+        detail: (id, ua) =>
+          id.startsWith("collection:")
+            ? Effect.map(collections.detail(id, { virtualLibraryId: null }, ua), (result) =>
+                result ? collectionView(result) : null,
+              )
+            : enrichVersions(id, ua),
         lookupMembership,
         enrichVersions,
         showChildren,

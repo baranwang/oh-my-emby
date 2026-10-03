@@ -1,3 +1,4 @@
+import { makeCollectionsLayer } from "../src/core/collections.js";
 import { Effect, Layer, Schema } from "effect";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
@@ -238,7 +239,11 @@ const prepareFederation = async (app: AcceptanceApp) => {
     }),
   );
   const dependencies = Layer.mergeAll(app.repositories, identity, upstream, metadataProviders);
-  const federation = makeFederationLayer().pipe(Layer.provide(dependencies));
+  const federation = makeFederationLayer().pipe(
+    Layer.provide(
+      Layer.merge(dependencies, makeCollectionsLayer().pipe(Layer.provide(dependencies))),
+    ),
+  );
   const layer = Layer.mergeAll(dependencies, federation);
   const query = {
     userId: "owner",
@@ -649,11 +654,20 @@ export const crossPlatformAcceptance = (name: "workers" | "docker", harness: Acc
       expect(requests[0]?.redirect).toBe("manual");
       expect(new URL(requests[0]!.url).origin).toBe("https://api.themoviedb.org");
       expect(requests[0]?.headers.get("authorization")).toBe(`Bearer ${secret}`);
-      expect(refreshed.canonical.displayMetadata).toEqual(record!.canonical.displayMetadata);
+      expect(refreshed.canonical.displayMetadata).toEqual({
+        ...record!.canonical.displayMetadata,
+        ExternalArtworkLanguage: "en-US",
+      });
       expect(JSON.stringify(refreshed)).not.toContain(secret);
       await useRepositories(app.repositories, (repositories) =>
         Effect.gen(function* () {
-          expect(yield* repositories.readExternalMetadata("tmdb", "imdb:title", "tt10")).toBeNull();
+          expect(
+            yield* repositories.readExternalMetadata(
+              "tmdb",
+              "imdb:title",
+              "tt10|client-language:en-US",
+            ),
+          ).toBeNull();
           expect(
             (yield* repositories.readMetadataSettings()).find(({ id }) => id === "tmdb")?.status,
           ).toBe("degraded");
@@ -706,7 +720,14 @@ export const crossPlatformAcceptance = (name: "workers" | "docker", harness: Acc
         }),
       );
       await expect(app.inspectStorage()).resolves.toEqual({
-        migrationNames: ["initial", "dashboard_alignment", "drivemby_compat"],
+        migrationNames: [
+          "initial",
+          "dashboard_alignment",
+          "drivemby_compat",
+          "metadata_artwork_languages",
+          "movie_collections",
+          "collection_query_snapshots",
+        ],
         enabledEncoding: 1,
       });
     });

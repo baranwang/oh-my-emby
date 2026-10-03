@@ -1,4 +1,5 @@
 import { Schema } from "effect";
+import { TMDB_LANGUAGE_CODES } from "./metadata-languages.js";
 
 const decodeUrl = Schema.decodeUnknownSync(Schema.URLFromString);
 
@@ -184,7 +185,17 @@ export const ConnectionTestView = Schema.Struct({
     }),
   ),
 });
+const MetadataLanguagePreferences = {
+  logoLanguage: Schema.optionalKey(
+    Schema.Literals(["metadata", "original", ...TMDB_LANGUAGE_CODES]),
+  ),
+  posterLanguage: Schema.optionalKey(
+    Schema.Literals(["metadata", "original", ...TMDB_LANGUAGE_CODES]),
+  ),
+  systemLanguage: Schema.optionalKey(Schema.Literals(["en-US", "zh-CN"])),
+};
 const MetadataProviderInput = Schema.Struct({
+  ...MetadataLanguagePreferences,
   id: MetadataProviderId,
   enabled: Schema.Boolean,
   order: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 1 })),
@@ -192,6 +203,7 @@ const MetadataProviderInput = Schema.Struct({
   credential: SecretPatch,
 });
 const MetadataProviderView = Schema.Struct({
+  ...MetadataLanguagePreferences,
   id: MetadataProviderId,
   enabled: Schema.Boolean,
   order: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 1 })),

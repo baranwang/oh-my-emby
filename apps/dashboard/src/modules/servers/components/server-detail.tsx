@@ -80,7 +80,7 @@ const SourceLibraries = ({ sources }: { readonly sources: ReadonlyArray<SourceLi
     ) : (
       <ul className="grid gap-2 sm:grid-cols-2">
         {sources.map((source) => (
-          <li key={source.id} className="rounded-lg border px-3 py-2">
+          <li key={`${source.id}:${source.mediaType}`} className="rounded-lg border px-3 py-2">
             <p className="font-medium">{source.name}</p>
             <p className="text-muted-foreground text-sm">
               {source.mediaType === "movies" ? m.media_movies() : m.media_series()}

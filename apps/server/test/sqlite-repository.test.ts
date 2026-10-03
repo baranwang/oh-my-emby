@@ -16,6 +16,17 @@ const alignmentMigration = await Bun.file(
   new URL("../migrations/0002_dashboard_alignment.sql", import.meta.url),
 ).text();
 
+const artworkMigration = await Bun.file(
+  new URL("../migrations/0005_metadata_artwork_languages.sql", import.meta.url),
+).text();
+
+const collectionMigration = await Bun.file(
+  new URL("../migrations/0006_movie_collections.sql", import.meta.url),
+).text();
+
+const awaitedSnapshotMigration = await Bun.file(
+  new URL("../migrations/0007_collection_query_snapshots.sql", import.meta.url),
+).text();
 const withDatabase = <A>(filename: string, use: (database: Database) => A): A => {
   const database = new Database(filename);
   try {
@@ -32,6 +43,9 @@ const makeHarness = async (): Promise<RepositoryHarness> => {
   withDatabase(filename, (database) => {
     database.exec(migration);
     database.exec(alignmentMigration);
+    database.exec(artworkMigration);
+    database.exec(collectionMigration);
+    database.exec(awaitedSnapshotMigration);
   });
 
   return {
@@ -103,9 +117,9 @@ const makeHarness = async (): Promise<RepositoryHarness> => {
             upstream_item_id, item_type, canonical_id, quarantine_reason,
             created_at_ms, updated_at_ms
           ) VALUES ('source-item-1', 'server-1', 'catalog:server-1', 1, 'movies-1',
-            'upstream-item-1', 'Movie', ?, NULL, 1000, 1000)
+            'upstream-item-1', ?, ?, NULL, 1000, 1000)
         `,
-            [fixture.id],
+            [fixture.itemType, fixture.id],
           );
         })(),
       );

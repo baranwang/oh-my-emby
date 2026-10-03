@@ -1,3 +1,4 @@
+import { makeCollectionsLayer } from "../src/core/collections.js";
 import { Database } from "bun:sqlite";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -11,6 +12,7 @@ import {
   UpstreamRejected,
   UpstreamNotFound,
   UpstreamUnavailable,
+  UpstreamTimeout,
   type UpstreamFailure,
 } from "../src/core/errors.js";
 import { makeIdentityLayer } from "../src/core/identity.js";
@@ -22,12 +24,19 @@ import {
 } from "../src/core/limits.js";
 import type { UpstreamServer } from "../src/core/model.js";
 import { Repositories, type CatalogItemRecord } from "../src/core/repositories.js";
-import { UpstreamClient } from "../src/core/upstream-client.js";
+import { UpstreamClient, makeUpstreamClientLayer } from "../src/core/upstream-client.js";
 import { makeSqliteRepositoriesLayer } from "../src/platform/bun/sqlite-repositories.js";
 
 const migration = [
   await Bun.file(new URL("../migrations/0001_initial.sql", import.meta.url)).text(),
   await Bun.file(new URL("../migrations/0002_dashboard_alignment.sql", import.meta.url)).text(),
+  await Bun.file(
+    new URL("../migrations/0005_metadata_artwork_languages.sql", import.meta.url),
+  ).text(),
+  await Bun.file(new URL("../migrations/0006_movie_collections.sql", import.meta.url)).text(),
+  await Bun.file(
+    new URL("../migrations/0007_collection_query_snapshots.sql", import.meta.url),
+  ).text(),
 ].join("\n");
 
 const server = (index: number): UpstreamServer => ({
@@ -98,6 +107,7 @@ type RequestHandler = (
   serverId: string,
   path: string,
   replayPath?: (userId: string) => string,
+  clientUserAgent?: string,
 ) => Effect.Effect<unknown, UpstreamFailure>;
 
 describe("Federation", () => {
@@ -122,10 +132,12 @@ describe("Federation", () => {
     sourceCount: number,
     handle: RequestHandler,
     options: {
+      readonly mediaType?: "movies" | "series";
       readonly now?: () => number;
       readonly listDeadlineMs?: number;
       readonly detailDeadlineMs?: number;
       readonly metadataProviders?: MetadataProvidersApi;
+      readonly upstream?: ReturnType<typeof makeUpstreamClientLayer>;
     } = {},
   ) => {
     await Effect.runPromise(
@@ -136,7 +148,7 @@ describe("Federation", () => {
           {
             id: "library-1" as any,
             name: "Movies",
-            mediaType: "movies",
+            mediaType: options.mediaType ?? "movies",
             enabled: true,
             createdAtMs: 1_000,
             updatedAtMs: 1_000,
@@ -144,7 +156,7 @@ describe("Federation", () => {
               serverId: `server-${index}` as any,
               sourceLibraryId: `movies-${index}` as any,
               sourceLibraryName: `Movies ${index}`,
-              mediaType: "movies" as const,
+              mediaType: options.mediaType ?? "movies",
               sourceOrder: index,
               enabled: true,
             })),
@@ -157,16 +169,19 @@ describe("Federation", () => {
       }).pipe(Effect.provide(repositories)),
     );
 
-    const upstream = Layer.succeed(
-      UpstreamClient,
-      UpstreamClient.of({
-        request: ({ serverId, path, replayPath }) => handle(serverId, path, replayPath) as any,
-        authenticate: () => Effect.die("unused") as any,
-        getServerIdentity: () => Effect.die("unused") as any,
-        listSourceLibraries: () => Effect.die("unused") as any,
-        resolvePlayback: () => Effect.die("unused") as any,
-      }),
-    );
+    const upstream =
+      options.upstream?.pipe(Layer.provide(repositories)) ??
+      Layer.succeed(
+        UpstreamClient,
+        UpstreamClient.of({
+          request: ({ serverId, path, replayPath, clientUserAgent }) =>
+            handle(serverId, path, replayPath, clientUserAgent) as any,
+          authenticate: () => Effect.die("unused") as any,
+          getServerIdentity: () => Effect.die("unused") as any,
+          listSourceLibraries: () => Effect.die("unused") as any,
+          resolvePlayback: () => Effect.die("unused") as any,
+        }),
+      );
     const identity = makeIdentityLayer.pipe(Layer.provide(repositories));
     const metadataProviders = Layer.succeed(
       MetadataProviders,
@@ -179,8 +194,555 @@ describe("Federation", () => {
       ),
     );
     const dependencies = Layer.mergeAll(repositories, identity, upstream, metadataProviders);
-    return makeFederationLayer(options).pipe(Layer.provide(dependencies));
+    return makeFederationLayer(options).pipe(
+      Layer.provide(
+        Layer.merge(dependencies, makeCollectionsLayer().pipe(Layer.provide(dependencies))),
+      ),
+    );
   };
+
+  it.each([{}, { Imdb: "tt1234567" }])(
+    "projects canonical series and season relationships in lists and details with %j",
+    async (providerIds) => {
+      const layer = await setup(
+        1,
+        (_server, path) => {
+          let items;
+          if (path.includes("/Seasons")) {
+            items = [
+              item("season-1", "Season one", {
+                Type: "Season",
+                IndexNumber: 1,
+                SeriesId: "series-10",
+                ParentId: "series-10",
+                ProviderIds: {},
+              }),
+            ];
+          } else if (path.includes("/Episodes") || path.includes("AnyProviderIdEquals=imdb.")) {
+            items = [
+              item("episode-1", "Episode one", {
+                Type: "Episode",
+                IndexNumber: 1,
+                ParentIndexNumber: 1,
+                SeriesId: "series-10",
+                SeasonId: "season-1",
+                ParentId: "season-1",
+                ProviderIds: providerIds,
+              }),
+            ];
+          } else {
+            items = [
+              item("series-10", "Series", { Type: "Series" }),
+              item("unrelated-series", "Unrelated", {
+                Type: "Series",
+                ProviderIds: { Tmdb: "20" },
+              }),
+            ];
+          }
+          return Effect.succeed({ Items: items, TotalRecordCount: 1 });
+        },
+        { mediaType: "series" },
+      );
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const federation = yield* Federation;
+          const series = (yield* federation.list(typedQuery(["Series"]))).items.find(
+            (entry) => (entry.displayMetadata as any).Name === "Series",
+          )!;
+          const base = { seriesId: series.id, startIndex: 0, limit: 30 };
+          const season = (yield* federation.showChildren({ ...base, kind: "Season" }))!.items[0]!;
+          const episode = (yield* federation.showChildren({ ...base, kind: "Episode" }))!.items[0]!;
+          expect((season as any).hierarchy).toMatchObject({
+            seriesId: series.id,
+            parentId: series.id,
+            seriesName: "Series",
+          });
+          expect((episode as any).hierarchy).toMatchObject({
+            seriesId: series.id,
+            seasonId: season.id,
+            parentId: season.id,
+          });
+          const repo = yield* Repositories;
+          const record = (yield* repo.readCatalogItems([episode.id]))[0]!;
+          const source = record.sourceItems[0]!;
+          expect(yield* repo.lookupSourceCanonicalId(source, "season-1", "Season")).toBe(season.id);
+          expect(
+            yield* repo.lookupSourceCanonicalId(
+              { ...source, serverGeneration: source.serverGeneration + 1 },
+              "season-1",
+              "Season",
+            ),
+          ).toBeNull();
+          expect(
+            yield* repo.lookupSourceCanonicalId(
+              { ...source, sourceLibraryId: "unrelated-library" },
+              "season-1",
+              "Season",
+            ),
+          ).toBeNull();
+          expect(yield* repo.lookupSourceCanonicalId(source, "season-1", "Series")).toBeNull();
+          expect((yield* federation.detail(episode.id) as any)?.hierarchy).toMatchObject({
+            seriesId: series.id,
+            seasonId: season.id,
+          });
+          // Merged metadata must never supply IDs to a different source scope.
+          yield* repo.mergeCanonicalMetadata(
+            episode.id,
+            source.id,
+            {
+              ...(episode.displayMetadata as object),
+              SeriesId: "unrelated-series",
+              SeasonId: "wrong-season",
+              ParentId: "wrong-season",
+            },
+            Date.now(),
+          );
+          expect((yield* federation.lookupMembership(episode.id))?.item.hierarchy).toMatchObject({
+            seriesId: series.id,
+            seasonId: season.id,
+            parentId: season.id,
+          });
+        }).pipe(Effect.provide(Layer.merge(layer, repositories))),
+      );
+    },
+  );
+
+  it("keeps episode resources available in season listings and details, and drops withdrawn versions", async () => {
+    let media = [
+      { Id: "episode-media", Container: "mkv", Protocol: "Http", SupportsDirectPlay: true },
+    ];
+    const layer = await setup(
+      1,
+      (_serverId, path) =>
+        Effect.succeed(
+          path.includes("/Episodes")
+            ? {
+                Items: [
+                  item("episode-1", "Episode one", {
+                    Type: "Episode",
+                    ProviderIds: {},
+                    ParentIndexNumber: 1,
+                    IndexNumber: 1,
+                    SeriesId: "series-10",
+                    ImageTags: { Primary: "episode-image" },
+                    MediaSources: media,
+                  }),
+                ],
+                TotalRecordCount: 1,
+              }
+            : { Items: [item("series-10", "Series", { Type: "Series" })], TotalRecordCount: 1 },
+        ),
+      { mediaType: "series" },
+    );
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const federation = yield* Federation;
+        const series = (yield* federation.list(typedQuery(["Series"]))).items[0]!;
+        const children = {
+          seriesId: series.id,
+          kind: "Episode" as const,
+          seasonNumber: 1,
+          startIndex: 0,
+          limit: 30,
+        };
+        const page = yield* federation.showChildren(children);
+        expect(page?.items).toHaveLength(1);
+        expect(page!.items[0]!.mediaVersions).toHaveLength(1);
+        const episodeId = page!.items[0]!.id;
+        expect((yield* federation.detail(episodeId))?.mediaVersions).toHaveLength(1);
+        media = [];
+        const updated = yield* federation.showChildren(children);
+        expect(updated!.items[0]!.id).toBe(episodeId);
+        expect(updated!.items[0]!.mediaVersions).toHaveLength(0);
+        expect((yield* federation.detail(episodeId))?.mediaVersions).toHaveLength(0);
+      }).pipe(Effect.provide(layer)),
+    );
+  });
+
+  it.each([false, true])(
+    "merges episode resources from later sources when the first source is playable: %s",
+    async (firstPlayable) => {
+      const layer = await setup(
+        2,
+        (serverId, path) =>
+          Effect.succeed(
+            path.includes("/Episodes")
+              ? {
+                  Items: [
+                    item(`episode-${serverId}`, "Episode one", {
+                      Type: "Episode",
+                      ProviderIds: {},
+                      ParentIndexNumber: 1,
+                      IndexNumber: 1,
+                      MediaSources:
+                        serverId === "server-0" && !firstPlayable
+                          ? []
+                          : [{ Id: `media-${serverId}`, Container: "mkv" }],
+                    }),
+                  ],
+                  TotalRecordCount: 1,
+                }
+              : {
+                  Items: [
+                    item(`series-${serverId}`, "Series", {
+                      Type: "Series",
+                      ProviderIds: { Tmdb: "10" },
+                    }),
+                  ],
+                  TotalRecordCount: 1,
+                },
+          ),
+        { mediaType: "series" },
+      );
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const federation = yield* Federation;
+          const series = (yield* federation.list(typedQuery(["Series"]))).items[0]!;
+          const page = yield* federation.showChildren({
+            seriesId: series.id,
+            kind: "Episode",
+            seasonNumber: 1,
+            startIndex: 0,
+            limit: 30,
+          });
+          expect(page!.items).toHaveLength(1);
+          const versions = page!.items[0]!.mediaVersions;
+          expect(versions).toHaveLength(firstPlayable ? 2 : 1);
+          expect(versions.map((version) => version.upstreamMediaSourceId)).toContain(
+            "media-server-1",
+          );
+          expect((yield* federation.detail(page!.items[0]!.id))?.mediaVersions).toHaveLength(
+            versions.length,
+          );
+        }).pipe(Effect.provide(layer)),
+      );
+    },
+  );
+
+  describe("whole-server item counts", () => {
+    it("returns upstream totals with an empty local cache and no enabled library bindings", async () => {
+      const paths: Array<string> = [];
+      const agents: Array<string | undefined> = [];
+      const layer = await setup(1, (_id, path, replayPath, clientUserAgent) => {
+        paths.push(path, replayPath?.("refreshed-user") ?? "missing replay path");
+        agents.push(clientUserAgent);
+        return Effect.succeed({
+          MovieCount: 2802,
+          SeriesCount: 4385,
+          EpisodeCount: 147618,
+          ItemCount: 161033,
+        });
+      });
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const repo = yield* Repositories;
+          const library = (yield* repo.listVirtualLibraries())[0]!;
+          yield* repo.saveVirtualLibrary({ ...library, enabled: false }, []);
+        }).pipe(Effect.provide(repositories)),
+      );
+      const counts = await Effect.runPromise(
+        Effect.gen(function* () {
+          const federation = yield* Federation;
+          return yield* federation.counts("Rex-Standard/0.5.0");
+        }).pipe(Effect.provide(layer)),
+      );
+      expect(counts).toEqual({
+        MovieCount: 2802,
+        SeriesCount: 4385,
+        EpisodeCount: 147618,
+        ItemCount: 161033,
+      });
+      expect(paths).toEqual(["/Items/Counts?UserId=user-0", "/Items/Counts?UserId=refreshed-user"]);
+      expect(agents).toEqual(["Rex-Standard/0.5.0"]);
+    });
+
+    it("uses the refreshed UserId and token when a Counts replay switches to the backup endpoint", async () => {
+      const requests: Array<string> = [];
+      const layer = await setup(1, () => Effect.die("use the real upstream client"), {
+        upstream: makeUpstreamClientLayer({
+          destinationPolicy: { platform: "docker" },
+          fetch: async (input, init) => {
+            const request = new Request(input, init);
+            const url = new URL(request.url);
+            requests.push(`${url.hostname}${url.pathname}${url.search}`);
+            if (request.headers.get("user-agent") !== "Rex-Standard/0.5.0") {
+              return new Response(null, { status: 403 });
+            }
+            if (url.pathname === "/Users/AuthenticateByName") {
+              return Response.json({
+                AccessToken: "refreshed-token",
+                User: { Id: "refreshed-user" },
+              });
+            }
+            if (url.searchParams.get("UserId") === "user-0") {
+              return new Response(null, { status: 401 });
+            }
+            if (
+              url.searchParams.get("UserId") !== "refreshed-user" ||
+              request.headers.get("x-emby-token") !== "refreshed-token"
+            ) {
+              return new Response(null, { status: 404 });
+            }
+            return url.hostname === "server-0.example.com"
+              ? new Response(null, { status: 503 })
+              : Response.json({ MovieCount: 10, SeriesCount: 20, EpisodeCount: 30, ItemCount: 70 });
+          },
+        }),
+      });
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const repo = yield* Repositories;
+          const source = server(0);
+          yield* repo.saveServer({
+            ...source,
+            userAgentPolicy: "passthrough",
+            userAgent: null,
+            endpoints: [
+              source.endpoints[0]!,
+              {
+                ...source.endpoints[0]!,
+                id: "backup-endpoint",
+                host: "backup.example.com",
+                displayUrl: "https://backup.example.com" as any,
+                order: 1,
+              },
+            ],
+          });
+        }).pipe(Effect.provide(repositories)),
+      );
+      const counts = await Effect.runPromise(
+        Effect.gen(function* () {
+          return yield* (yield* Federation).counts("Rex-Standard/0.5.0");
+        }).pipe(Effect.provide(layer)),
+      );
+      expect(counts).toEqual({ MovieCount: 10, SeriesCount: 20, EpisodeCount: 30, ItemCount: 70 });
+      expect(requests).toEqual([
+        "server-0.example.com/Items/Counts?UserId=user-0",
+        "server-0.example.com/Users/AuthenticateByName",
+        "server-0.example.com/Items/Counts?UserId=refreshed-user",
+        "backup.example.com/Items/Counts?UserId=refreshed-user",
+      ]);
+    });
+
+    it("sums enabled servers and excludes disabled or deleted servers", async () => {
+      const requested: Array<string> = [];
+      const layer = await setup(4, (id) => {
+        requested.push(id);
+        return Effect.succeed(
+          id === "server-0"
+            ? { MovieCount: 2, SeriesCount: 3, EpisodeCount: 10, ItemCount: 20 }
+            : { MovieCount: 5, SeriesCount: 7, EpisodeCount: 30, ItemCount: 50 },
+        );
+      });
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const repo = yield* Repositories;
+          yield* repo.saveServer({ ...server(2), enabled: false });
+          yield* repo.saveServer({ ...server(3), deletedAtMs: 2000 });
+        }).pipe(Effect.provide(repositories)),
+      );
+      const counts = await Effect.runPromise(
+        Effect.gen(function* () {
+          return yield* (yield* Federation).counts();
+        }).pipe(Effect.provide(layer)),
+      );
+      expect(counts).toEqual({ MovieCount: 7, SeriesCount: 10, EpisodeCount: 40, ItemCount: 70 });
+      expect(requested.sort()).toEqual(["server-0", "server-1"]);
+    });
+
+    it("counts a verified catalog once across its configured endpoints", async () => {
+      const requested: Array<string> = [];
+      const layer = await setup(1, (id) => {
+        requested.push(id);
+        return Effect.succeed({ MovieCount: 10, SeriesCount: 20, EpisodeCount: 30, ItemCount: 70 });
+      });
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const repo = yield* Repositories;
+          const source = server(0);
+          yield* repo.saveServer({
+            ...source,
+            endpoints: [
+              source.endpoints[0]!,
+              {
+                ...source.endpoints[0]!,
+                id: "backup-endpoint",
+                host: "backup.example.com",
+                displayUrl: "https://backup.example.com" as any,
+                order: 1,
+              },
+            ],
+          });
+        }).pipe(Effect.provide(repositories)),
+      );
+      const counts = await Effect.runPromise(
+        Effect.gen(function* () {
+          return yield* (yield* Federation).counts();
+        }).pipe(Effect.provide(layer)),
+      );
+      expect(counts).toEqual({ MovieCount: 10, SeriesCount: 20, EpisodeCount: 30, ItemCount: 70 });
+      expect(requested).toEqual(["server-0"]);
+    });
+
+    it("does not merge servers with unknown catalog identities", async () => {
+      const layer = await setup(2, () =>
+        Effect.succeed({ MovieCount: 10, SeriesCount: 20, EpisodeCount: 30, ItemCount: 70 }),
+      );
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const repo = yield* Repositories;
+          for (let index = 0; index < 2; index++) {
+            yield* repo.saveServer({ ...server(index), verifiedCatalogId: null });
+          }
+        }).pipe(Effect.provide(repositories)),
+      );
+      const counts = await Effect.runPromise(
+        Effect.gen(function* () {
+          return yield* (yield* Federation).counts();
+        }).pipe(Effect.provide(layer)),
+      );
+      expect(counts).toEqual({ MovieCount: 20, SeriesCount: 40, EpisodeCount: 60, ItemCount: 140 });
+    });
+
+    it("returns zeros only when no upstream is enabled", async () => {
+      const layer = await setup(0, () => Effect.die("no upstream should be requested"));
+      const counts = await Effect.runPromise(
+        Effect.gen(function* () {
+          return yield* (yield* Federation).counts();
+        }).pipe(Effect.provide(layer)),
+      );
+      expect(counts).toEqual({ MovieCount: 0, SeriesCount: 0, EpisodeCount: 0, ItemCount: 0 });
+    });
+
+    it("does not invent ItemCount when an Emby server omits it", async () => {
+      const layer = await setup(2, (id) =>
+        Effect.succeed(
+          id === "server-0"
+            ? { MovieCount: 2, SeriesCount: 3, EpisodeCount: 10, ItemCount: 20 }
+            : { MovieCount: 5, SeriesCount: 7, EpisodeCount: 30 },
+        ),
+      );
+      const counts = await Effect.runPromise(
+        Effect.gen(function* () {
+          return yield* (yield* Federation).counts();
+        }).pipe(Effect.provide(layer)),
+      );
+      expect(counts).toEqual({ MovieCount: 7, SeriesCount: 10, EpisodeCount: 40 });
+    });
+
+    it("fails rather than reporting a partial total when an enabled upstream fails", async () => {
+      const layer = await setup(2, (id) =>
+        id === "server-0"
+          ? Effect.succeed({ MovieCount: 2, SeriesCount: 3, EpisodeCount: 10, ItemCount: 20 })
+          : Effect.fail(new UpstreamUnavailable({ serverId: id })),
+      );
+      const result = await Effect.runPromise(
+        Effect.gen(function* () {
+          return yield* (yield* Federation).counts().pipe(Effect.result);
+        }).pipe(Effect.provide(layer)),
+      );
+      expect(result).toMatchObject({
+        _tag: "Failure",
+        failure: { _tag: "FederationUnavailable", sourceIds: ["server-1"] },
+      });
+    });
+
+    it.each([{}, { MovieCount: -1 }, { MovieCount: 0.5 }, { MovieCount: "2" }, { ItemCount: -1 }])(
+      "rejects invalid counts instead of coercing or silently substituting zeros: %j",
+      async (invalid) => {
+        const layer = await setup(1, () =>
+          Effect.succeed(
+            Object.keys(invalid).length === 0
+              ? invalid
+              : { MovieCount: 2, SeriesCount: 3, EpisodeCount: 10, ItemCount: 20, ...invalid },
+          ),
+        );
+        const result = await Effect.runPromise(
+          Effect.gen(function* () {
+            return yield* (yield* Federation).counts().pipe(Effect.result);
+          }).pipe(Effect.provide(layer)),
+        );
+        expect(result).toMatchObject({
+          _tag: "Failure",
+          failure: { _tag: "FederationUnavailable", sourceIds: ["server-0"] },
+        });
+      },
+    );
+
+    it("bounds concurrent catalog requests and stops a stalled count request", async () => {
+      let active = 0;
+      let maximumActive = 0;
+      const layer = await setup(
+        6,
+        (id) =>
+          Effect.gen(function* () {
+            active++;
+            maximumActive = Math.max(maximumActive, active);
+            if (id === "server-5") return yield* Effect.never;
+            yield* Effect.sleep(5);
+            active--;
+            return { MovieCount: 2, SeriesCount: 3, EpisodeCount: 10, ItemCount: 20 };
+          }),
+        { detailDeadlineMs: 100 },
+      );
+      const result = await Effect.runPromise(
+        Effect.gen(function* () {
+          return yield* (yield* Federation).counts().pipe(Effect.result);
+        }).pipe(Effect.provide(layer)),
+      );
+      expect(maximumActive).toBeGreaterThan(1);
+      expect(maximumActive).toBeLessThanOrEqual(MAX_FANOUT_CONCURRENCY);
+      expect(result).toMatchObject({
+        _tag: "Failure",
+        failure: { _tag: "FederationUnavailable", sourceIds: ["server-5"] },
+      });
+    });
+
+    it("rejects a total if an upstream is disabled while counts are being fetched", async () => {
+      const layer = await setup(1, () =>
+        Effect.gen(function* () {
+          yield* Effect.gen(function* () {
+            const repo = yield* Repositories;
+            yield* repo.saveServer({ ...server(0), enabled: false, generation: 2 });
+          }).pipe(Effect.provide(repositories));
+          return { MovieCount: 2, SeriesCount: 3, EpisodeCount: 10, ItemCount: 20 };
+        }),
+      );
+      const result = await Effect.runPromise(
+        Effect.gen(function* () {
+          return yield* (yield* Federation).counts().pipe(Effect.result);
+        }).pipe(Effect.provide(layer)),
+      );
+      expect(result).toMatchObject({
+        _tag: "Failure",
+        failure: { _tag: "FederationUnavailable", sourceIds: ["server-0"] },
+      });
+    });
+
+    it.each([{ generation: 2 }, { verifiedCatalogId: "changed-catalog" }])(
+      "rejects a total when an enabled upstream changes during the request: %j",
+      async (changes) => {
+        const layer = await setup(1, () =>
+          Effect.gen(function* () {
+            yield* Effect.gen(function* () {
+              const repo = yield* Repositories;
+              yield* repo.saveServer({ ...server(0), ...changes });
+            }).pipe(Effect.provide(repositories));
+            return { MovieCount: 2, SeriesCount: 3, EpisodeCount: 10, ItemCount: 20 };
+          }),
+        );
+        const result = await Effect.runPromise(
+          Effect.gen(function* () {
+            return yield* (yield* Federation).counts().pipe(Effect.result);
+          }).pipe(Effect.provide(layer)),
+        );
+        expect(result).toMatchObject({
+          _tag: "Failure",
+          failure: { _tag: "FederationUnavailable", sourceIds: ["server-0"] },
+        });
+      },
+    );
+  });
 
   it("merges enabled libraries without duplicate items across page boundaries", async () => {
     const layer = await setup(3, (serverId) => {
@@ -721,6 +1283,58 @@ describe("Federation", () => {
     );
   });
 
+  it.each(["list", "search"] as const)(
+    "filters unsupported Rex types before upstream %s requests",
+    async (operation) => {
+      const requestedTypes: Array<string | null> = [];
+      const layer = await setup(1, (serverId, path) => {
+        const types = new URL(path, "https://local").searchParams.get("IncludeItemTypes");
+        requestedTypes.push(types);
+        if (types?.includes("Video")) return Effect.fail(new UpstreamTimeout({ serverId }));
+        return Effect.succeed({
+          Items: [item("movie-10", "A movie"), item("series-20", "B series", { Type: "Series" })],
+          TotalRecordCount: 2,
+        });
+      });
+      const page = await Effect.runPromise(
+        Effect.gen(function* () {
+          const federation = yield* Federation;
+          const input = typedQuery(["Series", "Movie", "Video", "MusicVideo"], {
+            virtualLibraryId: null,
+          });
+          return yield* operation === "list"
+            ? federation.list(input)
+            : federation.search({ ...input, searchTerm: "needle" });
+        }).pipe(Effect.provide(layer)),
+      );
+
+      expect(requestedTypes).toEqual(["Series,Movie"]);
+      expect(page.items.map(({ itemType }) => itemType)).toEqual(["Movie", "Series"]);
+      expect(page.incompleteSourceIds).toEqual([]);
+    },
+  );
+
+  it.each([{ itemTypes: ["Video"] }, { itemTypes: ["Video", "MusicVideo"] }])(
+    "returns an empty page for unsupported-only types $itemTypes",
+    async ({ itemTypes }) => {
+      const layer = await setup(1, () =>
+        Effect.die("unsupported-only types must not query upstream"),
+      );
+      const page = await Effect.runPromise(
+        Effect.gen(function* () {
+          return yield* (yield* Federation).list(typedQuery(itemTypes));
+        }).pipe(Effect.provide(layer)),
+      );
+
+      expect(page).toEqual({
+        items: [],
+        totalRecordCount: 0,
+        exhausted: true,
+        incompleteSourceIds: [],
+      });
+    },
+  );
+
   it("keeps single item types distinct in durable query identity", async () => {
     const layer = await setup(1, () =>
       Effect.succeed({
@@ -895,6 +1509,133 @@ describe("Federation", () => {
       Name: "Movie",
       Overview: "Rich overview",
     });
+  });
+
+  it("exposes explicitly requested list media sources without skipping detail discovery", async () => {
+    let discoveryCalls = 0;
+    const layer = await setup(1, (_serverId, path) => {
+      if (path.includes("AnyProviderIdEquals=")) discoveryCalls++;
+      return Effect.succeed({
+        Items: [item("movie-10", "Movie", { MediaSources: [{ Id: "source-a", Name: "A" }] })],
+        TotalRecordCount: 1,
+      });
+    });
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const federation = yield* Federation;
+        const page = yield* federation.list(query({ fields: ["MediaSources"] }));
+        expect(page.items[0]?.mediaVersions.map(({ label }) => label)).toEqual(["[Server 0] A"]);
+        const replay = yield* federation.list(query({ fields: ["MediaSources"] }));
+        expect(replay.items[0]?.mediaVersions).toHaveLength(1);
+        yield* federation.detail(page.items[0]!.id);
+        expect(discoveryCalls).toBe(1);
+      }).pipe(Effect.provide(layer)),
+    );
+  });
+
+  it("uses reported totals for indexed pagination without scanning the whole catalog", async () => {
+    let calls = 0;
+    const rows = Array.from({ length: 125 }, (_, index) => item(`movie-${index + 1}`));
+    const layer = await setup(1, (_serverId, path) => {
+      calls++;
+      const parameters = new URL(path, "https://local").searchParams;
+      const start = Number(parameters.get("StartIndex"));
+      const limit = Number(parameters.get("Limit"));
+      return Effect.succeed({
+        Items: rows.slice(start, start + limit),
+        TotalRecordCount: rows.length,
+      });
+    });
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const federation = yield* Federation;
+        const input = query({ limit: 50, indexedPagination: true });
+        const first = yield* federation.list(input);
+        expect(first.items).toHaveLength(50);
+        expect(first.totalRecordCount).toBe(125);
+        expect(first.exhausted).toBe(false);
+        expect(calls).toBe(1);
+        const firstCalls = calls;
+        const second = yield* federation.list({ ...input, startIndex: 50 });
+        expect(second.items).toHaveLength(50);
+        expect(second.totalRecordCount).toBe(125);
+        expect(calls).toBe(firstCalls);
+        const last = yield* federation.list({ ...input, startIndex: 100 });
+        expect(last.items).toHaveLength(25);
+        expect(last.totalRecordCount).toBe(125);
+        expect(last.exhausted).toBe(true);
+      }).pipe(Effect.provide(layer)),
+    );
+  });
+
+  it("reserves a whole indexed page when the upstream omits its total", async () => {
+    const layer = await setup(1, () =>
+      Effect.succeed({
+        Items: Array.from({ length: 100 }, (_, index) => item(`movie-${index + 1}`)),
+      }),
+    );
+    const page = await Effect.runPromise(
+      Effect.gen(function* () {
+        return yield* (yield* Federation).list(query({ limit: 50, indexedPagination: true }));
+      }).pipe(Effect.provide(layer)),
+    );
+    expect(page.items).toHaveLength(50);
+    expect(page.totalRecordCount).toBe(100);
+  });
+
+  it("reserves indexed slots when only some sources report totals", async () => {
+    const layer = await setup(2, (serverId) =>
+      Effect.succeed(
+        serverId === "server-0"
+          ? { Items: [item("movie-700")], TotalRecordCount: 1 }
+          : { Items: Array.from({ length: 100 }, (_, index) => item(`movie-${index + 1}`)) },
+      ),
+    );
+    const page = await Effect.runPromise(
+      Effect.gen(function* () {
+        return yield* (yield* Federation).list(query({ limit: 50, indexedPagination: true }));
+      }).pipe(Effect.provide(layer)),
+    );
+    expect(page.items).toHaveLength(50);
+    expect(page.totalRecordCount).toBe(100);
+  });
+
+  it("keeps list resource snapshots on omission and withdraws them on an explicit empty array", async () => {
+    let response = item("movie-10", "Movie", { MediaSources: [{ Id: "source-a", Name: "A" }] });
+    const layer = await setup(1, () => Effect.succeed({ Items: [response], TotalRecordCount: 1 }));
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const federation = yield* Federation;
+        expect(
+          (yield* federation.list(query({ fields: ["MediaSources"] }))).items[0]?.mediaVersions,
+        ).toHaveLength(1);
+        response = item("movie-10");
+        expect(
+          (yield* federation.list(query({ deviceId: "omitted", fields: ["MediaSources"] })))
+            .items[0]?.mediaVersions,
+        ).toHaveLength(1);
+        response = item("movie-10", "Movie", { MediaSources: [] });
+        expect(
+          (yield* federation.list(query({ deviceId: "empty", fields: ["MediaSources"] }))).items[0]
+            ?.mediaVersions,
+        ).toEqual([]);
+      }).pipe(Effect.provide(layer)),
+    );
+  });
+
+  it("does not promote unsolicited list media sources into usable resource snapshots", async () => {
+    const layer = await setup(1, () =>
+      Effect.succeed({
+        Items: [item("movie-10", "Movie", { MediaSources: [{ Id: "source-a", Name: "A" }] })],
+        TotalRecordCount: 1,
+      }),
+    );
+    const page = await Effect.runPromise(
+      Effect.gen(function* () {
+        return yield* (yield* Federation).list(query({ fields: ["Overview"] }));
+      }).pipe(Effect.provide(layer)),
+    );
+    expect(page.items[0]?.mediaVersions).toEqual([]);
   });
 
   it("updates fields present in a fresh primary projection without erasing omitted fields", async () => {
@@ -1462,6 +2203,35 @@ describe("Federation", () => {
     );
 
     expect(peak).toBeLessThanOrEqual(MAX_FANOUT_CONCURRENCY);
+  });
+
+  it("loads known movie resources when exact discovery times out without a usable detail cache", async () => {
+    let directCalls = 0;
+    const layer = await setup(1, (serverId, path, _replayPath, clientUserAgent) => {
+      if (path.includes("AnyProviderIdEquals=")) {
+        return Effect.fail(new UpstreamTimeout({ serverId }));
+      }
+      if (path.includes("/Users/user-0/Items/movie-10")) {
+        directCalls++;
+        expect(clientUserAgent).toBe("Rex-Standard/0.5.0");
+        return Effect.succeed(
+          item("movie-10", "Movie", {
+            MediaSources: [{ Id: "source-a", Name: "A" }],
+          }),
+        );
+      }
+      return Effect.succeed({ Items: [item("movie-10")], TotalRecordCount: 1 });
+    });
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const federation = yield* Federation;
+        const page = yield* federation.list(query());
+        const detailed = yield* federation.detail(page.items[0]!.id, "Rex-Standard/0.5.0");
+        expect(detailed?.mediaVersions.map(({ label }) => label)).toEqual(["[Server 0] A"]);
+        expect(detailed?.incompleteSourceIds).toEqual(["server-0"]);
+      }).pipe(Effect.provide(layer)),
+    );
+    expect(directCalls).toBe(1);
   });
 
   it("exact-enriches a mapped item that has no current media versions and caches the positive result", async () => {

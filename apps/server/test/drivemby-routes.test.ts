@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { makeEmbyHandler, type EmbyServices } from "../src/api/emby.js";
 import { ApplicationServices, routeApplication } from "../src/api/application.js";
 import { InvalidCredentials } from "../src/core/errors.js";
-import type { CanonicalItemView } from "../src/core/federation.js";
+import { FederationUnavailable, type CanonicalItemView } from "../src/core/federation.js";
 import { makeMemoryDrivembyCompat } from "../src/core/drivemby-compat.js";
 
 const principal = {
@@ -78,6 +78,7 @@ const services = (overrides: Partial<EmbyServices> = {}): EmbyServices => ({
       }),
   },
   federation: {
+    counts: () => Effect.succeed({ MovieCount: 0, SeriesCount: 0, EpisodeCount: 0, ItemCount: 0 }),
     list: () => Effect.succeed(emptyPage),
     search: () => Effect.succeed(emptyPage),
     studios: () => Effect.succeed(emptyPage),
@@ -137,6 +138,218 @@ const send = (app: ReturnType<typeof makeEmbyHandler>, request: Request) =>
   Effect.runPromise(app(request));
 
 describe("Drivemby compatible routes", () => {
+  it.each([
+    ["/emby/Users/owner/Items", "Movie", 1, 2802],
+    ["/Users/owner/Items", "Series", 1, 4385],
+    ["/Items", "Movie", 0, 2802],
+    ["/emby/Items", "Series", 0, 4385],
+    ["/Items", "Episode", 0, 147618],
+    ["/Items", "Movie,Series,Movie", 0, 7187],
+  ])(
+    "returns whole-server totals for a client count probe at %s (%s, limit %s)",
+    async (path, type, limit, total) => {
+      const base = services();
+      const calls: Array<string> = [];
+      const app = makeEmbyHandler({
+        ...base,
+        federation: {
+          ...base.federation,
+          counts: (agent) => {
+            calls.push(`counts:${agent}`);
+            return Effect.succeed({ MovieCount: 2802, SeriesCount: 4385, EpisodeCount: 147618 });
+          },
+          list: () => {
+            calls.push("list");
+            return Effect.succeed({
+              ...emptyPage,
+              items: [media("movie-1")],
+              totalRecordCount: 2,
+              exhausted: false,
+            });
+          },
+        },
+      });
+      const response = await send(
+        app,
+        get(
+          `${path}?Recursive=true&IncludeItemTypes=${type}&Limit=${limit}&EnableTotalRecordCount=true&Fields=ProviderIds&SortBy=SortName&EnableImages=false`,
+          { ...auth, "user-agent": "SenPlayer/6.2.2" },
+        ),
+      );
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.TotalRecordCount).toBe(total);
+      expect(body.StartIndex).toBe(0);
+      expect(body.Items).toHaveLength(limit);
+      expect(calls.filter((call) => call.startsWith("counts:"))).toEqual([
+        "counts:SenPlayer/6.2.2",
+      ]);
+      expect(calls.includes("list")).toBe(limit === 1);
+    },
+  );
+
+  it.each([
+    "ParentId=library-1",
+    "Filters=IsFavorite",
+    "SearchTerm=movie",
+    "Studios=studio",
+    "IsWatchlisted=true",
+    "IsWatchlisted=false",
+    "StartIndex=1",
+    "Limit=30",
+    "Recursive=false",
+    "EnableTotalRecordCount=false",
+    "IncludeItemTypes=Season",
+    "IncludeItemTypes=Movie,Video",
+    "ExcludeItemIds=movie-1",
+  ])("keeps scoped or filtered query totals when %s", async (restriction) => {
+    const base = services();
+    let countCalls = 0;
+    const page = { ...emptyPage, totalRecordCount: 2 };
+    const app = makeEmbyHandler({
+      ...base,
+      federation: {
+        ...base.federation,
+        counts: () => {
+          countCalls++;
+          return Effect.succeed({ MovieCount: 2802, SeriesCount: 4385, EpisodeCount: 147618 });
+        },
+        list: () => Effect.succeed(page),
+        search: () => Effect.succeed(page),
+      },
+    });
+    const parameters = new URLSearchParams({
+      Recursive: "true",
+      IncludeItemTypes: "Movie",
+      Limit: "1",
+    });
+    for (const [key, value] of new URLSearchParams(restriction)) parameters.set(key, value);
+    const response = await send(app, get(`/Users/owner/Items?${parameters}`));
+    expect(response.status).toBe(200);
+    expect((await response.json()).TotalRecordCount).toBe(2);
+    expect(countCalls).toBe(0);
+  });
+
+  it.each(["UserId", "userId"])(
+    "accepts the %s count-probe identity and rejects other users",
+    async (key) => {
+      const base = services();
+      let countCalls = 0;
+      const app = makeEmbyHandler({
+        ...base,
+        federation: {
+          ...base.federation,
+          counts: () => {
+            countCalls++;
+            return Effect.succeed({ MovieCount: 2802, SeriesCount: 4385, EpisodeCount: 147618 });
+          },
+        },
+      });
+      const path = `/Items?Recursive=true&IncludeItemTypes=Movie&Limit=0&${key}=`;
+      const valid = await send(app, get(`${path}owner`));
+      expect(valid.status).toBe(200);
+      expect((await valid.json()).TotalRecordCount).toBe(2802);
+      expect((await send(app, get(`${path}other-user`))).status).toBe(403);
+      expect((await send(app, new Request(`https://local.example${path}owner`))).status).toBe(401);
+      expect(countCalls).toBe(1);
+    },
+  );
+
+  it("fails a client count probe instead of exposing a pagination estimate when counts are unavailable", async () => {
+    const base = services();
+    const app = makeEmbyHandler({
+      ...base,
+      federation: {
+        ...base.federation,
+        counts: () => Effect.fail(new FederationUnavailable({ sourceIds: ["server-1"] })),
+      },
+    });
+    const response = await send(
+      app,
+      get("/Users/owner/Items?Recursive=true&IncludeItemTypes=Movie&Limit=1"),
+    );
+    expect(response.status).toBe(503);
+  });
+
+  it("advertises the project icon in user profiles and serves it as the primary avatar", async () => {
+    const app = makeEmbyHandler(services());
+    const profile = await send(app, get("/emby/Users/owner"));
+    const user = (await profile.json()) as {
+      PrimaryImageTag?: string;
+      PrimaryImageAspectRatio?: number;
+    };
+    expect(user.PrimaryImageTag).toEqual(expect.any(String));
+    expect(user.PrimaryImageTag).toBe("ohmyemby-logo-png-v1");
+    expect(user.PrimaryImageAspectRatio).toBe(1);
+    const avatar = await send(
+      app,
+      get(`/emby/Users/owner/Images/Primary?tag=${user.PrimaryImageTag}`),
+    );
+    expect(avatar.status).toBe(200);
+    expect(avatar.headers.get("content-type")).toBe("image/png");
+    const bytes = new Uint8Array(await avatar.arrayBuffer());
+    expect(Array.from(bytes.slice(0, 8))).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
+    const dimensions = new DataView(bytes.buffer);
+    expect(dimensions.getUint32(16)).toBe(512);
+    expect(dimensions.getUint32(20)).toBe(512);
+    expect(bytes).toEqual(
+      new Uint8Array(
+        await Bun.file(new URL("../../../assets/brand/logo.png", import.meta.url)).arrayBuffer(),
+      ),
+    );
+  });
+
+  it.each(["/Items/Counts", "/emby/Items/Counts?UserId=owner"])(
+    "returns whole-server counts from federation instead of the local cache at %s",
+    async (path) => {
+      const agents: Array<string | undefined> = [];
+      const base = services();
+      const app = makeEmbyHandler({
+        ...base,
+        federation: {
+          ...base.federation,
+          counts: (clientUserAgent) => {
+            agents.push(clientUserAgent);
+            return Effect.succeed({
+              MovieCount: 2802,
+              SeriesCount: 4385,
+              EpisodeCount: 147618,
+              ItemCount: 161033,
+            });
+          },
+        },
+      });
+      const response = await send(app, get(path, { ...auth, "user-agent": "Rex-Standard/0.5.0" }));
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual({
+        MovieCount: 2802,
+        SeriesCount: 4385,
+        EpisodeCount: 147618,
+        ItemCount: 161033,
+      });
+      expect(agents).toEqual(["Rex-Standard/0.5.0"]);
+      expect((await send(app, new Request(`https://local.example${path}`))).status).toBe(401);
+      expect((await send(app, get("/Items/Counts?UserId=other-user"))).status).toBe(403);
+      expect(agents).toHaveLength(1);
+    },
+  );
+
+  it("returns unavailable instead of a misleading zero count when federation fails", async () => {
+    const base = services();
+    const app = makeEmbyHandler({
+      ...base,
+      federation: {
+        ...base.federation,
+        counts: () => Effect.fail(new FederationUnavailable({ sourceIds: ["server-1"] })),
+      },
+    });
+    const response = await send(app, get("/Items/Counts"));
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toEqual({
+      error: { code: "Unavailable", message: "Service unavailable" },
+    });
+  });
+
   it("serves public users and item counts without the shadowing routes", async () => {
     const app = makeEmbyHandler(services());
     const pub = await send(app, new Request("https://local.example/Users/Public"));
@@ -217,7 +430,7 @@ describe("Drivemby compatible routes", () => {
     });
 
     const avatar = await send(app, get("/Users/owner/Images/Primary"));
-    expect(avatar.headers.get("content-type")).toBe("image/svg+xml");
+    expect(avatar.headers.get("content-type")).toBe("image/png");
     expect((await avatar.arrayBuffer()).byteLength).toBeGreaterThan(0);
     const head = await send(
       app,
@@ -227,7 +440,8 @@ describe("Drivemby compatible routes", () => {
       }),
     );
     expect(head.status).toBe(200);
-    expect(head.headers.get("content-type")).toBe("image/svg+xml");
+    expect(head.headers.get("content-type")).toBe("image/png");
+    expect(head.headers.get("content-length")).toBe(avatar.headers.get("content-length"));
     expect((await head.arrayBuffer()).byteLength).toBe(0);
     expect((await send(app, get("/Users/owner/Images/Backdrop"))).status).toBe(404);
     expect((await send(app, get("/Users/other/Images/Primary"))).status).toBe(403);

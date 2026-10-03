@@ -1,5 +1,6 @@
 export { DashboardApi } from "./dashboard.js";
 export { PublicError } from "./errors.js";
+export { TMDB_LANGUAGE_CODES } from "./metadata-languages.js";
 export {
   BootstrapView,
   ConnectionTestView,

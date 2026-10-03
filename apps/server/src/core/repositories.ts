@@ -1,9 +1,10 @@
-import type { OutboxFailureView, SystemStatusView } from "@oh-my-emby/contracts"
-import { Context, type Effect } from "effect"
+import type { CollectionRepositories } from "./collection-model.js";
+import type { OutboxFailureView, SystemStatusView } from "@oh-my-emby/contracts";
+import { Context, type Effect } from "effect";
 
-import type { DrivembyCompat } from "./drivemby-compat.js"
-import type { AuthError, ClaimError, IdentityFailure, RepositoryError } from "./errors.js"
-import type { PreparedIdentityCandidate } from "./identity.js"
+import type { DrivembyCompat } from "./drivemby-compat.js";
+import type { AuthError, ClaimError, IdentityFailure, RepositoryError } from "./errors.js";
+import type { PreparedIdentityCandidate } from "./identity.js";
 import type {
   CanonicalItem,
   ClaimRequest,
@@ -44,107 +45,113 @@ import type {
   UpstreamServer,
   UserRecord,
   UserStateRecord,
-  VirtualLibrary
-} from "./model.js"
+  VirtualLibrary,
+} from "./model.js";
 
 export interface MetadataProjection {
-  readonly sourceItemId: string
-  readonly projectionKey: string
-  readonly payload: JsonValue
-  readonly freshUntilMs: number
-  readonly staleUntilMs: number
-  readonly updatedAtMs: number
+  readonly sourceItemId: string;
+  readonly projectionKey: string;
+  readonly payload: JsonValue;
+  readonly freshUntilMs: number;
+  readonly staleUntilMs: number;
+  readonly updatedAtMs: number;
 }
 
 export interface DetailProjectionSuppression {
-  readonly canonicalId: string
-  readonly serverId: string
-  readonly serverGeneration: number
-  readonly sourceLibraryId: string
-  readonly observedAtMs: number
+  readonly canonicalId: string;
+  readonly serverId: string;
+  readonly serverGeneration: number;
+  readonly sourceLibraryId: string;
+  readonly observedAtMs: number;
 }
 
 export interface CatalogItemRecord {
-  readonly canonical: CanonicalItem
-  readonly claims: ReadonlyArray<IdentityClaim>
-  readonly sourceItems: ReadonlyArray<SourceItemRecord>
-  readonly mediaVersions: ReadonlyArray<SourceMediaVersion>
-  readonly userState: UserStateRecord | null
+  readonly canonical: CanonicalItem;
+  readonly claims: ReadonlyArray<IdentityClaim>;
+  readonly sourceItems: ReadonlyArray<SourceItemRecord>;
+  readonly mediaVersions: ReadonlyArray<SourceMediaVersion>;
+  readonly userState: UserStateRecord | null;
 }
 
 export interface StateMembershipLookup {
-  readonly virtualLibraryId: string
-  readonly favorite?: boolean
-  readonly resume?: boolean
-  readonly played?: boolean
-  readonly limit: number
+  readonly includeWithoutState?: boolean;
+  readonly virtualLibraryId: string;
+  readonly favorite?: boolean;
+  readonly resume?: boolean;
+  readonly played?: boolean;
+  readonly limit: number;
 }
 
-export interface RepositoriesService {
-  readonly claimUser: (input: ClaimUserInput) => Effect.Effect<UserRecord, ClaimError>
-  readonly getUser: () => Effect.Effect<UserRecord | null, RepositoryError>
-  readonly getUserByName: (username: string) => Effect.Effect<UserRecord | null, RepositoryError>
-  readonly issueDashboardSession: (input: SessionIssue) => Effect.Effect<SessionRecord, AuthError>
-  readonly issueEmbyToken: (input: TokenIssue) => Effect.Effect<TokenRecord, AuthError>
+export interface RepositoriesService extends CollectionRepositories {
+  readonly claimUser: (input: ClaimUserInput) => Effect.Effect<UserRecord, ClaimError>;
+  readonly getUser: () => Effect.Effect<UserRecord | null, RepositoryError>;
+  readonly getUserByName: (username: string) => Effect.Effect<UserRecord | null, RepositoryError>;
+  readonly issueDashboardSession: (input: SessionIssue) => Effect.Effect<SessionRecord, AuthError>;
+  readonly issueEmbyToken: (input: TokenIssue) => Effect.Effect<TokenRecord, AuthError>;
   readonly lookupDashboardSession: (
-    input: DashboardSessionLookup
-  ) => Effect.Effect<DashboardSessionRecord | null, RepositoryError>
+    input: DashboardSessionLookup,
+  ) => Effect.Effect<DashboardSessionRecord | null, RepositoryError>;
   readonly lookupEmbyToken: (
-    input: TokenLookup
-  ) => Effect.Effect<AuthenticatedTokenRecord | null, RepositoryError>
+    input: TokenLookup,
+  ) => Effect.Effect<AuthenticatedTokenRecord | null, RepositoryError>;
   readonly deleteDashboardSession: (
     id: string,
-    authGeneration: number
-  ) => Effect.Effect<void, RepositoryError>
-  readonly consumeAuthAttempt: (input: AuthAttempt) => Effect.Effect<boolean, RepositoryError>
-  readonly clearAuthAttempts: (scopeKey: string) => Effect.Effect<void, RepositoryError>
-  readonly revokeAuthentication: (input: PasswordReplacement) => Effect.Effect<void, AuthError>
-  readonly listServers: () => Effect.Effect<ReadonlyArray<UpstreamServer>, RepositoryError>
-  readonly getServer: (id: string) => Effect.Effect<UpstreamServer | null, RepositoryError>
+    authGeneration: number,
+  ) => Effect.Effect<void, RepositoryError>;
+  readonly consumeAuthAttempt: (input: AuthAttempt) => Effect.Effect<boolean, RepositoryError>;
+  readonly clearAuthAttempts: (scopeKey: string) => Effect.Effect<void, RepositoryError>;
+  readonly revokeAuthentication: (input: PasswordReplacement) => Effect.Effect<void, AuthError>;
+  readonly listServers: () => Effect.Effect<ReadonlyArray<UpstreamServer>, RepositoryError>;
+  readonly getServer: (id: string) => Effect.Effect<UpstreamServer | null, RepositoryError>;
   readonly createServer: (
     input: SaveServerCommand,
-    limit: number
-  ) => Effect.Effect<UpstreamServer | null, RepositoryError>
-  readonly saveServer: (input: SaveServerCommand) => Effect.Effect<UpstreamServer, RepositoryError>
+    limit: number,
+  ) => Effect.Effect<UpstreamServer | null, RepositoryError>;
+  readonly saveServer: (input: SaveServerCommand) => Effect.Effect<UpstreamServer, RepositoryError>;
   readonly saveServerConfiguration: (
     input: SaveServerCommand,
-    expectedGeneration: number
-  ) => Effect.Effect<UpstreamServer | null, RepositoryError>
+    expectedGeneration: number,
+  ) => Effect.Effect<UpstreamServer | null, RepositoryError>;
   readonly saveServerResult: (
-    input: SaveServerResultCommand
-  ) => Effect.Effect<UpstreamServer | null, RepositoryError>
-  readonly deleteServer: (id: string) => Effect.Effect<void, RepositoryError>
+    input: SaveServerResultCommand,
+  ) => Effect.Effect<UpstreamServer | null, RepositoryError>;
+  readonly deleteServer: (id: string) => Effect.Effect<void, RepositoryError>;
   readonly readMetadataSettings: () => Effect.Effect<
     readonly [MetadataProviderSetting, MetadataProviderSetting],
     RepositoryError
-  >
+  >;
   readonly writeMetadataSettings: (
-    settings: readonly [MetadataProviderSetting, MetadataProviderSetting]
-  ) => Effect.Effect<readonly [MetadataProviderSetting, MetadataProviderSetting], RepositoryError>
+    settings: readonly [MetadataProviderSetting, MetadataProviderSetting],
+  ) => Effect.Effect<readonly [MetadataProviderSetting, MetadataProviderSetting], RepositoryError>;
   readonly updateMetadataProviderStatus: (input: {
-    readonly providerId: MetadataProviderSetting["id"]
-    readonly expectedUpdatedAtMs: number
-    readonly status: Extract<MetadataProviderSetting["status"], "ready" | "degraded">
-  }) => Effect.Effect<boolean, RepositoryError>
+    readonly providerId: MetadataProviderSetting["id"];
+    readonly expectedUpdatedAtMs: number;
+    readonly status: Extract<MetadataProviderSetting["status"], "ready" | "degraded">;
+  }) => Effect.Effect<boolean, RepositoryError>;
   readonly readExternalMetadata: (
     providerId: ExternalMetadataCacheEntry["providerId"],
     identityNamespace: string,
-    identityValue: string
-  ) => Effect.Effect<ExternalMetadataCacheEntry | null, RepositoryError>
+    identityValue: string,
+  ) => Effect.Effect<ExternalMetadataCacheEntry | null, RepositoryError>;
   readonly writeExternalMetadata: (
-    entry: ExternalMetadataCacheEntry
-  ) => Effect.Effect<void, RepositoryError>
-  readonly listVirtualLibraries: () => Effect.Effect<ReadonlyArray<VirtualLibrary>, RepositoryError>
+    entry: ExternalMetadataCacheEntry,
+  ) => Effect.Effect<void, RepositoryError>;
+  readonly listVirtualLibraries: () => Effect.Effect<
+    ReadonlyArray<VirtualLibrary>,
+    RepositoryError
+  >;
   readonly saveVirtualLibrary: (
     input: SaveVirtualLibraryCommand,
-    serverFences: ReadonlyArray<ServerEligibilityFence>
-  ) => Effect.Effect<VirtualLibrary | null, RepositoryError>
-  readonly deleteVirtualLibrary: (id: string) => Effect.Effect<void, RepositoryError>
+    serverFences: ReadonlyArray<ServerEligibilityFence>,
+  ) => Effect.Effect<VirtualLibrary | null, RepositoryError>;
+  readonly deleteVirtualLibrary: (id: string) => Effect.Effect<void, RepositoryError>;
   readonly isSourceEligible: (
     serverId: string,
-    sourceLibraryId: string
-  ) => Effect.Effect<boolean, RepositoryError>
-  readonly resolveEligibleSources: (libraryId: string) => Effect.Effect<ReadonlyArray<EligibleSource>, RepositoryError>
+    sourceLibraryId: string,
+  ) => Effect.Effect<boolean, RepositoryError>;
+  readonly resolveEligibleSources: (
+    libraryId: string,
+  ) => Effect.Effect<ReadonlyArray<EligibleSource>, RepositoryError>;
   /**
    * One identity transaction must lock/read every cluster matched by the candidate's typed claims,
    * validate complete-cluster compatibility, persist claims and the source mapping, and recheck the
@@ -153,59 +160,86 @@ export interface RepositoriesService {
    * canonical reference, and preserves the highest user-state revision. Ambiguous or late-conflicting
    * input is quarantined without splitting an issued canonical or moving its existing state.
    */
-  readonly resolveIdentity: (candidate: PreparedIdentityCandidate) => Effect.Effect<IdentityResolution, IdentityFailure>
+  readonly resolveIdentity: (
+    candidate: PreparedIdentityCandidate,
+  ) => Effect.Effect<IdentityResolution, IdentityFailure>;
   /** Resolves an active canonical ID or any permanent retired alias to its active canonical ID. */
-  readonly lookupCanonicalId: (id: string) => Effect.Effect<string | null, RepositoryError>
-  readonly persistIdentityResult: (result: IdentityResolution) => Effect.Effect<CanonicalItem, IdentityFailure>
-  readonly readQueryGeneration: (key: string) => Effect.Effect<QueryGeneration | null, RepositoryError>
+  /** Map a related upstream item only within the same source scope and generation. */
+  readonly lookupSourceCanonicalId: (
+    source: Pick<SourceItemRecord, "serverId" | "serverGeneration" | "sourceLibraryId">,
+    upstreamItemId: string,
+    itemType: "Series" | "Season",
+  ) => Effect.Effect<string | null, RepositoryError>;
+  readonly lookupCanonicalId: (id: string) => Effect.Effect<string | null, RepositoryError>;
+  readonly persistIdentityResult: (
+    result: IdentityResolution,
+  ) => Effect.Effect<CanonicalItem, IdentityFailure>;
+  readonly readQueryGeneration: (
+    key: string,
+  ) => Effect.Effect<QueryGeneration | null, RepositoryError>;
   readonly readQueryGenerationItems: (
-    generationId: string
-  ) => Effect.Effect<ReadonlyArray<QueryGenerationItem>, RepositoryError>
+    generationId: string,
+  ) => Effect.Effect<ReadonlyArray<QueryGenerationItem>, RepositoryError>;
   /** Atomically publishes one bounded item chunk and its matching state when the generation CAS wins. */
-  readonly appendQueryGenerationItems: (input: QueryGenerationAppend) => Effect.Effect<boolean, RepositoryError>
+  readonly appendQueryGenerationItems: (
+    input: QueryGenerationAppend,
+  ) => Effect.Effect<boolean, RepositoryError>;
   readonly readMetadataProjection: (
     sourceItemId: string,
-    projectionKey: string
-  ) => Effect.Effect<MetadataProjection | null, RepositoryError>
+    projectionKey: string,
+  ) => Effect.Effect<MetadataProjection | null, RepositoryError>;
   readonly writeMetadataProjection: (
-    input: MetadataProjection
-  ) => Effect.Effect<void, RepositoryError>
+    input: MetadataProjection,
+  ) => Effect.Effect<void, RepositoryError>;
   readonly suppressDetailProjections: (
-    input: DetailProjectionSuppression
-  ) => Effect.Effect<void, RepositoryError>
+    input: DetailProjectionSuppression,
+  ) => Effect.Effect<void, RepositoryError>;
   readonly mergeCanonicalMetadata: (
     canonicalId: string,
     sourceItemId: string,
     metadata: JsonValue,
-    updatedAtMs: number
-  ) => Effect.Effect<void, RepositoryError>
+    updatedAtMs: number,
+  ) => Effect.Effect<void, RepositoryError>;
   readonly readCatalogItems: (
     canonicalIds: ReadonlyArray<string>,
-    usableAtMs?: number
-  ) => Effect.Effect<ReadonlyArray<CatalogItemRecord>, RepositoryError>
+    usableAtMs?: number,
+  ) => Effect.Effect<ReadonlyArray<CatalogItemRecord>, RepositoryError>;
   readonly resolveEligibleSourcesForCanonical: (
-    canonicalId: string
-  ) => Effect.Effect<ReadonlyArray<EligibleSource>, RepositoryError>
+    canonicalId: string,
+  ) => Effect.Effect<ReadonlyArray<EligibleSource>, RepositoryError>;
   readonly listStateMemberCanonicalIds: (
-    input: StateMembershipLookup
-  ) => Effect.Effect<ReadonlyArray<string>, RepositoryError>
+    input: StateMembershipLookup,
+  ) => Effect.Effect<ReadonlyArray<string>, RepositoryError>;
   /** Called by the local-state service after a relevant state write commits. */
-  readonly invalidateStateDependentQueryGenerations: () => Effect.Effect<void, RepositoryError>
-  readonly writeUserStateAndTargets: (input: StateWrite) => Effect.Effect<UserStateRecord, RepositoryError>
+  readonly invalidateStateDependentQueryGenerations: () => Effect.Effect<void, RepositoryError>;
+  readonly writeUserStateAndTargets: (
+    input: StateWrite,
+  ) => Effect.Effect<UserStateRecord, RepositoryError>;
   readonly recordPlaybackEventAndTargets: (
-    input: PlaybackEvent
-  ) => Effect.Effect<UserStateRecord | null, RepositoryError>
-  readonly claimOutboxTargets: (input: ClaimRequest) => Effect.Effect<ReadonlyArray<OutboxClaim>, RepositoryError>
-  readonly markOutboxDispatched: (input: OutboxDispatch) => Effect.Effect<boolean, RepositoryError>
-  readonly acknowledgeOutboxTarget: (input: OutboxAcknowledgement) => Effect.Effect<boolean, RepositoryError>
-  readonly markOutboxUncertain: (input: OutboxUncertainty) => Effect.Effect<void, RepositoryError>
-  readonly recordOutboxFailure: (input: OutboxFailureUpdate) => Effect.Effect<boolean, RepositoryError>
-  readonly runMaintenanceBatch: (nowMs: number) => Effect.Effect<MaintenanceResult, RepositoryError>
-  readonly readSystemStatus: () => Effect.Effect<SystemStatusView, RepositoryError>
-  readonly listOutboxFailures: () => Effect.Effect<ReadonlyArray<OutboxFailureView>, RepositoryError>
-  readonly drivemby: DrivembyCompat
+    input: PlaybackEvent,
+  ) => Effect.Effect<UserStateRecord | null, RepositoryError>;
+  readonly claimOutboxTargets: (
+    input: ClaimRequest,
+  ) => Effect.Effect<ReadonlyArray<OutboxClaim>, RepositoryError>;
+  readonly markOutboxDispatched: (input: OutboxDispatch) => Effect.Effect<boolean, RepositoryError>;
+  readonly acknowledgeOutboxTarget: (
+    input: OutboxAcknowledgement,
+  ) => Effect.Effect<boolean, RepositoryError>;
+  readonly markOutboxUncertain: (input: OutboxUncertainty) => Effect.Effect<void, RepositoryError>;
+  readonly recordOutboxFailure: (
+    input: OutboxFailureUpdate,
+  ) => Effect.Effect<boolean, RepositoryError>;
+  readonly runMaintenanceBatch: (
+    nowMs: number,
+  ) => Effect.Effect<MaintenanceResult, RepositoryError>;
+  readonly readSystemStatus: () => Effect.Effect<SystemStatusView, RepositoryError>;
+  readonly listOutboxFailures: () => Effect.Effect<
+    ReadonlyArray<OutboxFailureView>,
+    RepositoryError
+  >;
+  readonly drivemby: DrivembyCompat;
 }
 
 export class Repositories extends Context.Service<Repositories, RepositoriesService>()(
-  "oh-my-emby/Repositories"
+  "oh-my-emby/Repositories",
 ) {}

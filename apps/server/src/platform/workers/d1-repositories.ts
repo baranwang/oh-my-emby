@@ -1,3 +1,4 @@
+import { makeCollectionRepositories } from "../../core/collection-repositories.js";
 import * as D1Client from "@effect/sql-d1/D1Client";
 import {
   ServerView as ServerViewSchema,
@@ -558,6 +559,12 @@ const makeRepositories = Effect.gen(function* () {
   if (pragma[0]?.foreign_keys !== 1) {
     return yield* Effect.die("SQLite foreign key enforcement is unavailable");
   }
+  const collections = makeCollectionRepositories({
+    unsafe: <A extends object>(statement: string, params?: ReadonlyArray<unknown>) =>
+      sql.unsafe<A>(statement, params as never) as Effect.Effect<ReadonlyArray<A>, unknown>,
+    batch: (commands) =>
+      sql.batch(commands.map((command) => sql.unsafe(command.statement, command.params as never))),
+  });
   const drivemby = yield* makeSqlDrivembyCompat({
     unsafe: <A extends object>(statement: string, params?: ReadonlyArray<unknown>) =>
       (params === undefined
@@ -1227,6 +1234,9 @@ const makeRepositories = Effect.gen(function* () {
     readonly enabled: unknown;
     readonly provider_order: unknown;
     readonly language: string | null;
+    readonly logo_language: MetadataProviderSetting["logoLanguage"] | null;
+    readonly poster_language: MetadataProviderSetting["posterLanguage"] | null;
+    readonly system_language: MetadataProviderSetting["systemLanguage"] | null;
     readonly credential: string | null;
     readonly status: unknown;
     readonly updated_at_ms: unknown;
@@ -1237,6 +1247,9 @@ const makeRepositories = Effect.gen(function* () {
     enabled: boolean(row.enabled, "enabled"),
     order: integer(row.provider_order, "provider_order"),
     language: row.language,
+    ...(row.logo_language == null ? {} : { logoLanguage: row.logo_language }),
+    ...(row.poster_language == null ? {} : { posterLanguage: row.poster_language }),
+    ...(row.system_language == null ? {} : { systemLanguage: row.system_language }),
     credential: row.credential,
     status: metadataProviderStatus(row.status),
     updatedAtMs: integer(row.updated_at_ms, "updated_at_ms"),
@@ -1254,7 +1267,7 @@ const makeRepositories = Effect.gen(function* () {
           ('trakt', 0, 1, NULL, NULL, 'unconfigured', 0)
       `);
         const rows = yield* sql.unsafe<MetadataProviderRow>(
-          "SELECT * FROM metadata_provider_settings ORDER BY provider_order",
+          "SELECT m.*, a.logo_language, a.poster_language, a.system_language FROM metadata_provider_settings m LEFT JOIN metadata_artwork_settings a ON a.provider_id = m.provider_id ORDER BY m.provider_order",
         );
         return yield* decode("readMetadataSettings", () => {
           if (rows.length !== 2)
@@ -1273,7 +1286,7 @@ const makeRepositories = Effect.gen(function* () {
       Effect.gen(function* () {
         yield* sql.batch([
           sql.unsafe("DELETE FROM metadata_provider_settings"),
-          ...settings.map((setting) =>
+          ...settings.flatMap((setting) => [
             sql.unsafe(
               `
           INSERT INTO metadata_provider_settings (
@@ -1290,7 +1303,22 @@ const makeRepositories = Effect.gen(function* () {
                 setting.updatedAtMs,
               ],
             ),
-          ),
+            ...(setting.logoLanguage === undefined &&
+            setting.posterLanguage === undefined &&
+            setting.systemLanguage === undefined
+              ? []
+              : [
+                  sql.unsafe(
+                    "INSERT INTO metadata_artwork_settings (provider_id, logo_language, poster_language, system_language) VALUES (?, ?, ?, ?)",
+                    [
+                      setting.id,
+                      setting.logoLanguage ?? "original",
+                      setting.posterLanguage ?? "original",
+                      setting.systemLanguage ?? "en-US",
+                    ],
+                  ),
+                ]),
+          ]),
         ]);
         return settings;
       }),
@@ -3089,6 +3117,34 @@ const makeRepositories = Effect.gen(function* () {
     return attempt(8);
   };
 
+  const lookupSourceCanonicalId: RepositoriesService["lookupSourceCanonicalId"] = (
+    source,
+    upstreamItemId,
+    itemType,
+  ) =>
+    database(
+      "lookupSourceCanonicalId",
+      Effect.gen(function* () {
+        const rows = yield* sql.unsafe<{ canonical_id: string }>(
+          `
+        SELECT canonical_id FROM source_items
+        WHERE server_id = ? AND server_generation = ? AND source_library_id = ?
+          AND upstream_item_id = ? AND item_type = ? AND quarantine_reason IS NULL
+          AND canonical_id IS NOT NULL
+        LIMIT 1
+      `,
+          [
+            source.serverId,
+            source.serverGeneration,
+            source.sourceLibraryId,
+            upstreamItemId,
+            itemType,
+          ],
+        );
+        return rows[0]?.canonical_id ?? null;
+      }),
+    );
+
   const readCatalogItems: RepositoriesService["readCatalogItems"] = (canonicalIds, usableAtMs) => {
     const ids = [...new Set(canonicalIds)].slice(0, DB_BATCH_SIZE);
     if (ids.length === 0) return Effect.succeed([]);
@@ -3238,6 +3294,10 @@ const makeRepositories = Effect.gen(function* () {
         )
       WHERE item.canonical_id = ?
         AND library.enabled = 1 AND origin.enabled = 1 AND target.enabled = 1
+        AND (
+          (item.item_type = 'Movie' AND library.media_type = 'movies') OR
+          (item.item_type IN ('Series', 'Season', 'Episode') AND library.media_type = 'series')
+        )
         AND server.enabled = 1 AND server.deleted_at_ms IS NULL
         AND server.health = 'healthy'
         AND (server.verified_catalog_id IS NOT NULL OR server.verified_base_url IS NOT NULL)
@@ -3274,9 +3334,9 @@ const makeRepositories = Effect.gen(function* () {
       "listStateMemberCanonicalIds",
       sql.unsafe<{ readonly canonical_id: string }>(
         `
-      SELECT DISTINCT state.canonical_id
-      FROM user_state state
-      JOIN source_items item ON item.canonical_id = state.canonical_id
+      SELECT DISTINCT item.canonical_id
+      FROM source_items item
+      ${input.includeWithoutState ? "LEFT JOIN" : "JOIN"} user_state state ON item.canonical_id = state.canonical_id
       JOIN library_sources binding
         ON binding.server_id = item.server_id
         AND binding.source_library_id = item.source_library_id
@@ -3285,7 +3345,7 @@ const makeRepositories = Effect.gen(function* () {
       WHERE ${predicates.join(" AND ")}
         AND binding.enabled = 1 AND library.enabled = 1
         AND server.enabled = 1 AND server.deleted_at_ms IS NULL
-      ORDER BY state.canonical_id
+      ORDER BY item.canonical_id
       LIMIT ?
     `,
         parameters,
@@ -4188,6 +4248,7 @@ const makeRepositories = Effect.gen(function* () {
     );
 
   return Repositories.of({
+    ...collections,
     claimUser,
     getUser,
     getUserByName,
@@ -4218,6 +4279,7 @@ const makeRepositories = Effect.gen(function* () {
     resolveEligibleSources,
     resolveIdentity: resolveIdentityD1,
     lookupCanonicalId,
+    lookupSourceCanonicalId,
     persistIdentityResult,
     readQueryGeneration,
     readQueryGenerationItems,

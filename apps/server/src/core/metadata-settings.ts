@@ -38,11 +38,17 @@ const toProviderView = ({
   language,
   credential,
   status,
+  logoLanguage,
+  posterLanguage,
+  systemLanguage,
 }: MetadataProviderSetting) => ({
   id,
   enabled,
   order,
   language,
+  ...(logoLanguage === undefined ? {} : { logoLanguage }),
+  ...(posterLanguage === undefined ? {} : { posterLanguage }),
+  ...(systemLanguage === undefined ? {} : { systemLanguage }),
   hasCredential: credential !== null,
   status,
 });
@@ -91,6 +97,16 @@ export const makeMetadataSettingsLayer: Layer.Layer<MetadataSettings, never, Rep
               status = previous.status === "degraded" ? "degraded" : "ready";
             }
             return {
+              ...previous,
+              ...(provider.logoLanguage === undefined
+                ? {}
+                : { logoLanguage: provider.logoLanguage }),
+              ...(provider.posterLanguage === undefined
+                ? {}
+                : { posterLanguage: provider.posterLanguage }),
+              ...(provider.systemLanguage === undefined
+                ? {}
+                : { systemLanguage: provider.systemLanguage }),
               id: provider.id,
               enabled: provider.enabled,
               order: provider.order,

@@ -1,3 +1,4 @@
+import { makeCollectionsLayer } from "../src/core/collections.js";
 import { Database } from "bun:sqlite";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -29,6 +30,13 @@ interface BudgetEvidence {
 const migration = [
   await Bun.file(new URL("../migrations/0001_initial.sql", import.meta.url)).text(),
   await Bun.file(new URL("../migrations/0002_dashboard_alignment.sql", import.meta.url)).text(),
+  await Bun.file(
+    new URL("../migrations/0005_metadata_artwork_languages.sql", import.meta.url),
+  ).text(),
+  await Bun.file(new URL("../migrations/0006_movie_collections.sql", import.meta.url)).text(),
+  await Bun.file(
+    new URL("../migrations/0007_collection_query_snapshots.sql", import.meta.url),
+  ).text(),
 ].join("\n");
 
 const server = (index: number): UpstreamServer => ({
@@ -228,7 +236,11 @@ const runBudgetScenario = async (): Promise<BudgetEvidence> => {
       upstream,
       metadataProviders,
     );
-    const federation = makeFederationLayer().pipe(Layer.provide(dependencies));
+    const federation = makeFederationLayer().pipe(
+      Layer.provide(
+        Layer.merge(dependencies, makeCollectionsLayer().pipe(Layer.provide(dependencies))),
+      ),
+    );
     const { page, detailed } = await Effect.runPromise(
       Effect.gen(function* () {
         const service = yield* Federation;
