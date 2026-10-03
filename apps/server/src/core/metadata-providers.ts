@@ -1,4 +1,5 @@
-import { Context, Effect, Layer, Result, Schema } from "effect";
+import type { TmdbCollectionPayload } from "./collection-model.js";
+import { Context, Effect, Layer, Result, Schema, Semaphore } from "effect";
 
 import { ClientLanguage } from "./client-language.js";
 import { METADATA_FRESH_MS, METADATA_STALE_MS } from "./limits.js";
@@ -14,6 +15,8 @@ type ProviderId = MetadataProviderSetting["id"];
 type FailureReason = "credential" | "rate-limit" | "timeout" | "unavailable" | "invalid-response";
 
 export interface ExternalMetadataPayload {
+  readonly TmdbMovieId?: string;
+  readonly TmdbCollectionId?: string | null;
   readonly Name?: string;
   readonly Overview?: string;
   readonly ExternalImages?: {
@@ -40,6 +43,9 @@ export class MetadataProviderFailure extends Schema.TaggedError<MetadataProvider
 ) {}
 
 export interface MetadataProvidersApi {
+  readonly readTmdbCollection: (
+    id: string,
+  ) => Effect.Effect<TmdbCollectionPayload | null, import("./errors.js").RepositoryError>;
   readonly refresh: (
     record: CatalogItemRecord,
   ) => Effect.Effect<CatalogItemRecord, import("./errors.js").RepositoryError>;
@@ -142,6 +148,39 @@ const payload = (
       }),
 });
 
+const collectionFields = (
+  value: unknown,
+): Pick<ExternalMetadataPayload, "TmdbMovieId" | "TmdbCollectionId"> => {
+  if (!object(value)) return {};
+  return {
+    ...(typeof value.id === "number" && Number.isSafeInteger(value.id) && value.id > 0
+      ? { TmdbMovieId: String(value.id) }
+      : {}),
+    ...(value.belongs_to_collection === null
+      ? { TmdbCollectionId: null }
+      : object(value.belongs_to_collection) &&
+          typeof value.belongs_to_collection.id === "number" &&
+          Number.isSafeInteger(value.belongs_to_collection.id) &&
+          value.belongs_to_collection.id > 0
+        ? { TmdbCollectionId: String(value.belongs_to_collection.id) }
+        : {}),
+  };
+};
+const cachedCollectionFields = (
+  value: unknown,
+): Pick<ExternalMetadataPayload, "TmdbMovieId" | "TmdbCollectionId"> => {
+  if (!object(value)) return {};
+  return {
+    ...(typeof value.TmdbMovieId === "string" && /^[1-9]\d*$/.test(value.TmdbMovieId)
+      ? { TmdbMovieId: value.TmdbMovieId }
+      : {}),
+    ...(value.TmdbCollectionId === null
+      ? { TmdbCollectionId: null }
+      : typeof value.TmdbCollectionId === "string" && /^[1-9]\d*$/.test(value.TmdbCollectionId)
+        ? { TmdbCollectionId: value.TmdbCollectionId }
+        : {}),
+  };
+};
 const tmdbPayload = (value: unknown, itemType: string): ExternalMetadataPayload | null => {
   if (!object(value)) throw new TypeError("invalid TMDB response");
   const results = itemType === "Movie" ? value.movie_results : value.tv_results;
@@ -198,7 +237,10 @@ const cachedPayload = (
     logo === undefined || providerId !== "tmdb"
       ? undefined
       : allowedImage(providerId, logo, "w500");
-  return payload(text(value.Name), text(value.Overview), acceptedPrimary, backdrops, acceptedLogo);
+  return {
+    ...payload(text(value.Name), text(value.Overview), acceptedPrimary, backdrops, acceptedLogo),
+    ...cachedCollectionFields(value),
+  };
 };
 
 const mergePayloads = (
@@ -210,21 +252,26 @@ const mergePayloads = (
       if (value !== undefined && (!Array.isArray(value) || value.length > 0)) return value;
     }
   };
-  return payload(
-    first(({ Name }) => Name),
-    first(({ Overview }) => Overview),
-    first(({ ExternalImages }) => ExternalImages?.Primary),
-    first(({ ExternalImages }) => ExternalImages?.Backdrop) ?? [],
-    first(({ ExternalImages }) => ExternalImages?.Logo),
-    payloads.reduce<number | undefined>(
-      (revision, entry) =>
-        entry.ExternalArtworkRevision === undefined
-          ? revision
-          : Math.max(revision ?? 0, entry.ExternalArtworkRevision),
-      undefined,
+  return {
+    ...payload(
+      first(({ Name }) => Name),
+      first(({ Overview }) => Overview),
+      first(({ ExternalImages }) => ExternalImages?.Primary),
+      first(({ ExternalImages }) => ExternalImages?.Backdrop) ?? [],
+      first(({ ExternalImages }) => ExternalImages?.Logo),
+      payloads.reduce<number | undefined>(
+        (revision, entry) =>
+          entry.ExternalArtworkRevision === undefined
+            ? revision
+            : Math.max(revision ?? 0, entry.ExternalArtworkRevision),
+        undefined,
+      ),
+      first(({ ExternalArtworkLanguage }) => ExternalArtworkLanguage),
     ),
-    first(({ ExternalArtworkLanguage }) => ExternalArtworkLanguage),
-  );
+    ...payloads
+      .map(cachedCollectionFields)
+      .reduce((result, fields) => ({ ...fields, ...result }), {}),
+  };
 };
 
 const readBoundedJson = async (
@@ -352,7 +399,7 @@ export const makeMetadataProvidersLayer = (
               }),
             );
             if (!result.found) return null;
-            const base = yield* Effect.try({
+            let base = yield* Effect.try({
               try: () => {
                 if (direct && (!object(result.value) || result.value.id !== Number(key.value))) {
                   throw new TypeError("mismatched TMDB detail identity");
@@ -366,16 +413,43 @@ export const makeMetadataProvidersLayer = (
               },
               catch: () => providerFailure(setting.id, "invalid-response"),
             });
-            if (
-              base === null ||
-              (setting.logoLanguage === undefined && setting.posterLanguage === undefined)
-            )
-              return base;
+            if (base === null) return null;
             let item = result.value;
             if (!direct && object(result.value)) {
               const results = result.value[itemType === "Movie" ? "movie_results" : "tv_results"];
               item = Array.isArray(results) ? results[0] : null;
             }
+            if (
+              itemType === "Movie" &&
+              !direct &&
+              object(item) &&
+              typeof item.id === "number" &&
+              Number.isSafeInteger(item.id) &&
+              item.id > 0
+            ) {
+              const movieUrl = new URL(`https://api.themoviedb.org/3/movie/${item.id}`);
+              movieUrl.searchParams.set("language", metadataLanguage);
+              const details = yield* requestJson(
+                setting,
+                new Request(movieUrl, {
+                  headers: {
+                    authorization: `Bearer ${setting.credential}`,
+                    accept: "application/json",
+                  },
+                }),
+              ).pipe(Effect.result);
+              if (
+                Result.isSuccess(details) &&
+                details.success.found &&
+                object(details.success.value) &&
+                details.success.value.id === item.id
+              ) {
+                item = details.success.value;
+              }
+            }
+            if (itemType === "Movie") base = { ...base, ...collectionFields(item) };
+            if (setting.logoLanguage === undefined && setting.posterLanguage === undefined)
+              return base;
             if (
               !object(item) ||
               typeof item.id !== "number" ||
@@ -439,13 +513,16 @@ export const makeMetadataProvidersLayer = (
               selectArtworkPath(images.value.logos, logoLanguage, originalLanguage),
               "w500",
             );
-            return payload(
-              base.Name,
-              base.Overview,
-              poster,
-              base.ExternalImages?.Backdrop ?? [],
-              logo,
-            );
+            return {
+              ...payload(
+                base.Name,
+                base.Overview,
+                poster,
+                base.ExternalImages?.Backdrop ?? [],
+                logo,
+              ),
+              ...cachedCollectionFields(base),
+            };
           }
           const kind = itemType === "Movie" ? "movies" : "shows";
           const url = new URL(`https://api.trakt.tv/${kind}/${encodeURIComponent(key.value)}`);
@@ -586,6 +663,33 @@ export const makeMetadataProvidersLayer = (
           };
         });
 
+      const associate = (
+        record: CatalogItemRecord,
+        value: ExternalMetadataPayload,
+        observedAtMs: number,
+      ) =>
+        Effect.gen(function* () {
+          if (
+            record.canonical.itemType !== "Movie" ||
+            value.TmdbCollectionId === undefined ||
+            record.sourceItems.length === 0
+          )
+            return;
+          if (value.TmdbCollectionId !== null)
+            yield* repositories.upsertCollection({
+              tmdbCollectionId: value.TmdbCollectionId,
+              metadata: {},
+              observedAtMs,
+            });
+          for (const source of record.sourceItems)
+            yield* repositories.replaceTmdbCollectionMembership({
+              sourceItemId: source.id,
+              tmdbCollectionId: value.TmdbCollectionId,
+              expectedGeneration: source.serverGeneration,
+              observedAtMs,
+            });
+        });
+
       const refresh: MetadataProvidersApi["refresh"] = (record) =>
         Effect.gen(function* () {
           const values: Array<ExternalMetadataPayload> = [];
@@ -599,10 +703,14 @@ export const makeMetadataProvidersLayer = (
               values.push({ ExternalArtworkRevision: setting.updatedAtMs });
             if (setting.id === "tmdb" && !setting.language?.trim())
               values.push({ ExternalArtworkLanguage: yield* ClientLanguage });
-            const fresh = yield* readCached(setting, key, true);
+            let fresh = yield* readCached(setting, key, true);
+            if(setting.id === "tmdb" && record.canonical.itemType === "Movie" && record.sourceItems.length>0 && fresh?.found && object(fresh.payload) && fresh.payload.TmdbCollectionId===undefined) fresh=null;
             if (fresh !== null) {
               const normalized = fresh.found ? cachedPayload(setting.id, fresh.payload) : null;
-              if (normalized !== null) values.push(normalized);
+              if (normalized !== null) {
+                values.push(normalized);
+                if (setting.id === "tmdb") yield* associate(record, normalized, fresh.fetchedAtMs);
+              }
               continue;
             }
             const stale = yield* readCached(setting, key, false);
@@ -617,7 +725,10 @@ export const makeMetadataProvidersLayer = (
             }
             yield* writeCache(setting, key, attempted.success);
             yield* updateStatus(setting, "ready");
-            if (attempted.success !== null) values.push(attempted.success);
+            if (attempted.success !== null) {
+              values.push(attempted.success);
+              if (setting.id === "tmdb") yield* associate(record, attempted.success, now());
+            }
           }
           const external = mergePayloads(values);
           return {
@@ -665,6 +776,97 @@ export const makeMetadataProvidersLayer = (
           return accepted === undefined ? null : new URL(accepted);
         });
 
-      return MetadataProviders.of({ refresh, overlayCached, resolveCachedImage });
+      const collectionLocks = new Map<string, ReturnType<typeof Semaphore.makeUnsafe>>();
+      const readTmdbCollection: MetadataProvidersApi["readTmdbCollection"] = (id) =>
+        Effect.gen(function* () {
+          if (!/^[1-9]\d*$/.test(id)) return null;
+          const setting = (yield* configured()).find((setting) => setting.id === "tmdb");
+          if (!setting) return null;
+          const key = { namespace: "tmdb:collection", value: id };
+          const language = setting.language?.trim() || (yield* ClientLanguage);
+          const lockKey = `${id}:${language}:${setting.updatedAtMs}`;
+          const lock = collectionLocks.get(lockKey) ?? Semaphore.makeUnsafe(1);
+          collectionLocks.set(lockKey, lock);
+          return yield* lock.withPermit(
+            Effect.gen(function* () {
+              const fresh = yield* readCached(setting, key, true);
+              if (fresh)
+                return fresh.found ? (fresh.payload as unknown as TmdbCollectionPayload) : null;
+              const stale = yield* readCached(setting, key, false);
+              const url = new URL(`https://api.themoviedb.org/3/collection/${id}`);
+              url.searchParams.set("language", language);
+              const result = yield* requestJson(
+                setting,
+                new Request(url, {
+                  headers: {
+                    authorization: `Bearer ${setting.credential}`,
+                    accept: "application/json",
+                  },
+                }),
+              ).pipe(Effect.result);
+              if (Result.isFailure(result)) {
+                yield* updateStatus(setting, "degraded");
+                return stale?.found ? (stale.payload as unknown as TmdbCollectionPayload) : null;
+              }
+              let value: TmdbCollectionPayload | null = null;
+              if (result.success.found) {
+                const raw = result.success.value;
+                if (
+                  !object(raw) ||
+                  raw.id !== Number(id) ||
+                  typeof raw.name !== "string" ||
+                  !Array.isArray(raw.parts)
+                )
+                  return stale?.found ? (stale.payload as unknown as TmdbCollectionPayload) : null;
+                value = {
+                  id,
+                  Name: raw.name,
+                  ...payload(
+                    undefined,
+                    text(raw.overview),
+                    tmdbImage(raw.poster_path, "w780"),
+                    [tmdbImage(raw.backdrop_path, "w1280")].filter(
+                      (p): p is string => p !== undefined,
+                    ),
+                  ),
+                  movieIds: [
+                    ...new Set(
+                      raw.parts.flatMap((part) =>
+                        object(part) &&
+                        typeof part.id === "number" &&
+                        Number.isSafeInteger(part.id) &&
+                        part.id > 0
+                          ? [String(part.id)]
+                          : [],
+                      ),
+                    ),
+                  ],
+                  ExternalArtworkRevision: setting.updatedAtMs,
+                  ExternalArtworkLanguage: language,
+                };
+              }
+              const fetchedAtMs = now();
+              yield* repositories.writeExternalMetadata({
+                providerId: "tmdb",
+                identityNamespace: key.namespace,
+                identityValue: yield* cacheIdentity(setting, id),
+                payload: value as unknown as JsonValue,
+                found: value !== null,
+                fetchedAtMs,
+                freshUntilMs: fetchedAtMs + METADATA_FRESH_MS,
+                staleUntilMs:
+                  fetchedAtMs + (value === null ? METADATA_FRESH_MS : METADATA_STALE_MS),
+              });
+              return value;
+            }),
+          );
+        });
+
+      return MetadataProviders.of({
+        refresh,
+        overlayCached,
+        resolveCachedImage,
+        readTmdbCollection,
+      });
     }),
   );

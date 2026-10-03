@@ -136,6 +136,67 @@ const fixture = (options: {
 };
 
 describe("MetadataProviders", () => {
+  it("reads movie details after IMDb find and retains the collection association", async () => {
+    const paths: string[] = [];
+    const configured = settings();
+    configured[1] = { ...configured[1], enabled: false };
+    const test = fixture({
+      providerSettings: configured,
+      fetch: async (request) => {
+        const url = new URL((request as Request).url);
+        paths.push(url.pathname);
+        if (url.pathname.includes("/find/"))
+          return Response.json({ movie_results: [{ id: 10, title: "Film" }], tv_results: [] });
+        return Response.json({
+          id: 10,
+          title: "Film",
+          belongs_to_collection: { id: 20, name: "Set" },
+        });
+      },
+    });
+    const result = await test.run(
+      Effect.gen(function* () {
+        return yield* (yield* MetadataProviders).refresh(imdbRecord());
+      }),
+    );
+    expect(result.canonical.displayMetadata).toMatchObject({
+      TmdbMovieId: "10",
+      TmdbCollectionId: "20",
+    });
+    expect(paths).toEqual(["/3/find/tt1104001", "/3/movie/10"]);
+  });
+
+  it("caches localized TMDB collection parts without duplicates or invalid IDs", async () => {
+    const configured = settings();
+    configured[0] = { ...configured[0], language: null };
+    configured[1] = { ...configured[1], enabled: false };
+    let requests = 0;
+    const test = fixture({
+      providerSettings: configured,
+      fetch: async (request) => {
+        requests++;
+        const language = new URL((request as Request).url).searchParams.get("language");
+        return Response.json({
+          id: 20,
+          name: language === "en-US" ? "Set" : "合集",
+          poster_path: "/set.jpg",
+          parts: [{ id: 10 }, { id: 11 }, { id: 10 }, { id: 0 }, { id: "bad" }],
+        });
+      },
+    });
+    const read = (language: string) =>
+      test.run(
+        Effect.gen(function* () {
+          return yield* (yield* MetadataProviders).readTmdbCollection("20");
+        }).pipe(Effect.provideService(ClientLanguage, language)),
+      );
+    const [english, chinese] = await Promise.all([read("en-US"), read("zh-CN")]);
+    expect(english).toMatchObject({ id: "20", Name: "Set", movieIds: ["10", "11"] });
+    expect(chinese).toMatchObject({ id: "20", Name: "合集", movieIds: ["10", "11"] });
+    expect(await read("en-US")).toEqual(english);
+    expect(requests).toBe(2);
+  });
+
   it("isolates client-language metadata and artwork caches across concurrent requests", async () => {
     const configured = settings();
     configured[0] = {

@@ -120,14 +120,14 @@ export const makeCollectionRepositories = (sql: CollectionSql): CollectionReposi
           old.tmdb_collection_id !== input.tmdbCollectionId;
         const id = conflict
           ? old!.collection_id
-          : (input.tmdbCollectionId
+          : input.tmdbCollectionId
             ? tmdbId(input.tmdbCollectionId)
-            : (old?.collection_id ?? sourceCollectionId(source!)));
+            : (old?.collection_id ?? sourceCollectionId(source!));
         const guard = source ? fence : "1=1",
           gp = source ? fenceParams(source) : [];
         const commands: Command[] = [
           {
-            statement: `INSERT INTO movie_collections(id,tmdb_collection_id,metadata_json,created_at_ms,updated_at_ms) SELECT ?,?,?,?,? WHERE ${guard} ON CONFLICT(id) DO UPDATE SET metadata_json=excluded.metadata_json,updated_at_ms=excluded.updated_at_ms WHERE movie_collections.updated_at_ms<=excluded.updated_at_ms`,
+            statement: `INSERT INTO movie_collections(id,tmdb_collection_id,metadata_json,created_at_ms,updated_at_ms) SELECT ?,?,?,?,? WHERE ${guard} ON CONFLICT(id) DO UPDATE SET metadata_json=CASE WHEN excluded.metadata_json='{}' THEN movie_collections.metadata_json ELSE excluded.metadata_json END,updated_at_ms=excluded.updated_at_ms WHERE movie_collections.updated_at_ms<=excluded.updated_at_ms`,
             params: [
               id,
               conflict ? old!.tmdb_collection_id : input.tmdbCollectionId,
