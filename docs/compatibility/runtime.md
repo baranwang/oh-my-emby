@@ -34,7 +34,7 @@ See [collections compatibility evidence](collections.md) for TMDB/upstream BoxSe
 
 ## Library covers (2026-10-03)
 
-- Real in-app Chromium browser, standalone Bun test instance on localhost:3002: Dashboard login → libraries automatic generation → nine registered-source PNG posters → Satori SVG → Canvas system-font JPEG → authenticated upload → SQLite → visible list/detail cover. Manual regeneration also verified. Fixture posters use gradients rather than copyrighted artwork.
+- Real in-app Chromium browser, standalone Bun test instance on localhost:3002: Dashboard login → libraries automatic generation → nine registered-source PNG posters → Satori SVG → Canvas system-font JPEG → authenticated upload → SQLite → visible list/detail cover. Manual regeneration also verified. Persisted JPEG was 84,249 bytes; authenticated Emby HTTP returned the identical SHA-256 revision before and after a Bun process restart and removal of the disposable resource cache. Fixture posters use gradients rather than copyrighted artwork.
 - Chinese titles and a long Chinese/emoji title rendered in the real browser; image output visually checked for rotation, clipping and text boundaries.
 - Authenticated Emby HTTP protocol tests cover Views/details/VirtualFolders tags, Primary index 0, GET/HEAD/304, old-tag revalidation, missing/disabled libraries and ordinary movie routing. Real Emby clients remain **UNTESTED**.
 - Local workerd/D1 tests and smoke validate local runtime compatibility. Remote deployed Workers remain **UNEXECUTED**. Rendering modules and Yoga are Dashboard static assets, not Worker executable dependencies.

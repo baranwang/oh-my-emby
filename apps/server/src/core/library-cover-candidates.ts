@@ -1,5 +1,5 @@
 import { Effect, Result, Schema } from "effect";
-import type { RepositoriesService } from "./repositories.js";
+import type { CatalogItemRecord, RepositoriesService } from "./repositories.js";
 import type { UpstreamClientService } from "./upstream-client.js";
 import type { IdentityApi } from "./identity.js";
 import type { VirtualLibrary, EligibleSource } from "./model.js";
@@ -33,7 +33,10 @@ export const makeLibraryCoverCandidateSelector =
         });
       };
       const ids = yield* repo.listLibraryCoverCandidateIds(library.id, 200);
-      const records = yield* repo.readCatalogItems(ids, Date.now());
+      // The D1 catalog query reserves two parameters for freshness timestamps.
+      const records: CatalogItemRecord[] = [];
+      for (let offset = 0; offset < ids.length; offset += 98)
+        records.push(...(yield* repo.readCatalogItems(ids.slice(offset, offset + 98), Date.now())));
       for (const r of [...records].sort((a, b) => a.canonical.id.localeCompare(b.canonical.id))) {
         if (r.canonical.itemType !== expected) continue;
         for (const item of r.sourceItems) {

@@ -1,5 +1,11 @@
 import type { LibraryCoverPreparation } from "@oh-my-emby/contracts";
 import { loadCoverImage } from "./render.js";
+export class CoverSessionExpired extends Error {
+  constructor() {
+    super("Session expired");
+    this.name = "CoverSessionExpired";
+  }
+}
 export function imageDimensions(b: Uint8Array): { width: number; height: number } {
   const view = new DataView(b.buffer, b.byteOffset, b.byteLength);
   let width = 0,
@@ -78,6 +84,7 @@ const preprocess = async (url: string, signal?: AbortSignal) => {
     ...(signal ? { signal } : {}),
     redirect: "error",
   });
+  if (response.status === 401) throw new CoverSessionExpired();
   if (!response.ok) throw new Error("Poster unavailable");
   const blob = await response.blob();
   if (blob.size > 20 * 1024 * 1024) throw new Error("Poster too large");
@@ -116,6 +123,8 @@ export async function prepareLibraryCoverAssets(
     const batch = preparation.candidates.slice(index, index + Math.min(2, 9 - results.length));
     index += batch.length;
     const done = await Promise.allSettled(batch.map((c) => preprocess(c.url, signal)));
+    for (const d of done)
+      if (d.status === "rejected" && d.reason instanceof CoverSessionExpired) throw d.reason;
     for (const d of done) if (d.status === "fulfilled") results.push(d.value);
   }
   signal?.throwIfAborted();

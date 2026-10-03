@@ -131,4 +131,41 @@ describe("library covers", () => {
       requests.every((p) => new URL(p, "https://local").searchParams.get("Limit") === "20"),
     ).toBe(true);
   });
+  it("reads all 200 cached candidates in D1-safe chunks without dropping late posters", async () => {
+    const s = setup();
+    s.repo.listLibraryCoverCandidateIds = () =>
+      Effect.succeed(Array.from({ length: 200 }, (_, i) => `movie-${i}`));
+    const sizes: number[] = [];
+    s.repo.readCatalogItems = (ids: string[]) => {
+      sizes.push(ids.length);
+      if (ids.length > 98)
+        return Effect.fail(new Error("D1 100 parameter limit with two timestamp binds"));
+      return Effect.succeed(
+        ids
+          .filter((id) => Number(id.slice(6)) >= 191)
+          .map((id) => ({ ...record, canonical: { ...canonical, id } })),
+      );
+    };
+    expect(
+      await Effect.runPromise(
+        makeLibraryCoverCandidateSelector(s.repo, s.upstream, s.identity)(library),
+      ),
+    ).toHaveLength(9);
+    expect(sizes).toEqual([98, 98, 4]);
+  });
+
+  it("invalidates manifests after source generation or library configuration changes", async () => {
+    const s = setup(),
+      api = makeLibraryCoverService(s.repo, s.upstream, s.identity, () => 1000);
+    const p = await Effect.runPromise(api.prepare("lib"));
+    s.repo.resolveEligibleSources = () => Effect.succeed([{ ...source, serverGeneration: 2 }]);
+    await expect(
+      Effect.runPromise(api.asset({ libraryId: "lib", token: p.token, index: 0 })),
+    ).rejects.toThrow();
+    s.repo.resolveEligibleSources = () => Effect.succeed([source]);
+    s.repo.listVirtualLibraries = () => Effect.succeed([{ ...library, name: "Renamed" }]);
+    await expect(
+      Effect.runPromise(api.asset({ libraryId: "lib", token: p.token, index: 0 })),
+    ).rejects.toThrow();
+  });
 });

@@ -19,11 +19,12 @@ export async function generateLibraryCover(
     queryClient,
   );
   signal?.throwIfAborted();
-  const [{ prepareLibraryCoverAssets }, { renderLibraryCover }] = await Promise.all([
-    import("../covers/assets"),
-    import("../covers/render"),
-  ]);
-  const assets = await prepareLibraryCoverAssets(preparation, signal);
+  const [{ prepareLibraryCoverAssets, CoverSessionExpired }, { renderLibraryCover }] =
+    await Promise.all([import("../covers/assets"), import("../covers/render")]);
+  const assets = await prepareLibraryCoverAssets(preparation, signal).catch(async (error) => {
+    if (error instanceof CoverSessionExpired) await handleUnauthorized(queryClient);
+    throw error;
+  });
   onPhase?.("rendering");
   const image = await renderLibraryCover(
     { ...assets, title: preparation.title, subtitle: preparation.subtitle },

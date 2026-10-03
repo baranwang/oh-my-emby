@@ -1361,3 +1361,86 @@ libraryCoverRepositoryContract(
     );
   },
 );
+
+it("persists cover BLOB through the production Effect D1 adapter", async () => {
+  await run("DELETE FROM virtual_libraries WHERE id='adapter-cover'");
+  await run("INSERT INTO virtual_libraries VALUES ('adapter-cover','Movies','movies',1,1000,1000)");
+  const program = Effect.gen(function* () {
+    const repo = yield* Repositories;
+    const configDigest = JSON.stringify({
+      name: "Movies",
+      mediaType: "movies",
+      enabled: true,
+      sources: [],
+    });
+    yield* repo.saveLibraryCoverManifest({
+      token: "adapter-token",
+      libraryId: "adapter-cover",
+      configDigest,
+      serverFences: [],
+      candidates: [],
+      expectedRevision: null,
+      expiresAtMs: Date.now() + 600000,
+    });
+    const cover = {
+      libraryId: "adapter-cover",
+      body: new Uint8Array([0, 128, 255, 42]),
+      revision: "adapter-revision",
+      templateVersion: "v1",
+      configDigest,
+      width: 1920 as const,
+      height: 1080 as const,
+      updatedAtMs: 1000,
+    };
+    expect(
+      yield* repo.commitLibraryCover({ token: "adapter-token", cover, nowMs: Date.now() }),
+    ).toBe(true);
+    expect((yield* repo.getLibraryCover("adapter-cover"))?.body).toEqual(cover.body);
+  });
+  await Effect.runPromise(program.pipe(Effect.provide(makeD1RepositoriesLayer(env.DB))));
+});
+
+it("prepares a 200-item cache and reads 201 library summaries through production D1", async () => {
+  const harness = await makeHarness();
+  await harness.seedCanonicalWithEligibleSources({
+    ...canonicalFixture,
+    displayMetadata: { Name: "Movie", ImageTags: { Primary: "poster" } },
+  });
+  const commands: D1PreparedStatement[] = [];
+  for (let i = 0; i < 200; i++) {
+    const id = `boundary-${String(i).padStart(3, "0")}`;
+    commands.push(
+      env.DB.prepare("INSERT INTO canonical_items VALUES (?,'Movie','exact',?,1000,1000)").bind(
+        id,
+        JSON.stringify({ Name: id, ...(i >= 191 ? { ImageTags: { Primary: "poster" } } : {}) }),
+      ),
+    );
+    commands.push(
+      env.DB.prepare(
+        "INSERT INTO source_items VALUES (?,'server-1','catalog:server-1',1,'movies',?,'Movie',?,NULL,1000,1000)",
+      ).bind(id, id, id),
+    );
+  }
+  await env.DB.batch(commands);
+  const { makeLibraryCoverCandidateSelector } =
+    await import("../src/core/library-cover-candidates.js");
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const repo = yield* Repositories;
+      expect(
+        yield* repo.listLibraryCoverSummaries(
+          Array.from({ length: 201 }, (_, i) => `no-cover-${i}`),
+        ),
+      ).toEqual([]);
+      const library = (yield* repo.listVirtualLibraries()).find((l) => l.id === "library-1")!;
+      const posters = yield* makeLibraryCoverCandidateSelector(
+        repo,
+        { request: () => Effect.die("cache must suffice") } as any,
+        {} as any,
+      )(library);
+      expect(posters).toHaveLength(9);
+      expect(posters.every((p) => p.canonicalId.startsWith("boundary-"))).toBe(true);
+    }).pipe(Effect.provide(harness.layer)),
+  );
+  await harness.dispose();
+});

@@ -63,16 +63,20 @@ export function makeLibraryCoverRepositories(sql: CollectionSql): LibraryCoverRe
         ),
       ),
     listLibraryCoverSummaries: (ids) =>
-      ids.length === 0
-        ? Effect.succeed([])
-        : db(
-            sql
-              .unsafe<Row>(
-                `SELECT library_id,revision,template_version,config_digest,width,height,updated_at_ms FROM library_covers WHERE library_id IN (${ids.map(() => "?").join(",")})`,
-                ids,
-              )
-              .pipe(Effect.map((rows) => rows.map(view))),
-          ),
+      db(
+        Effect.gen(function* () {
+          const summaries: LibraryCoverStoredSummary[] = [];
+          for (let offset = 0; offset < ids.length; offset += 100) {
+            const batch = ids.slice(offset, offset + 100);
+            const rows = yield* sql.unsafe<Row>(
+              `SELECT library_id,revision,template_version,config_digest,width,height,updated_at_ms FROM library_covers WHERE library_id IN (${batch.map(() => "?").join(",")})`,
+              batch,
+            );
+            summaries.push(...rows.map(view));
+          }
+          return summaries;
+        }),
+      ),
     saveLibraryCoverManifest: (m) =>
       db(
         sql

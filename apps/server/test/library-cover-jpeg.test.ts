@@ -50,4 +50,16 @@ describe("cover JPEG validation", () => {
   ])("rejects oversized, wrong-sized or truncated JPEG", (b) =>
     expect(() => validateLibraryCoverJpeg(b)).toThrow(),
   );
+  it("rejects structurally invalid SOF component counts and empty SOS headers", () => {
+    const malformed = Uint8Array.from([
+      255, 216, 255, 192, 0, 11, 8, 4, 56, 7, 128, 255, 1, 17, 0, 255, 218, 0, 2, 255, 217,
+    ]);
+    expect(() => validateLibraryCoverJpeg(malformed)).toThrow();
+    const sof = jpeg();
+    sof[11] = 255;
+    expect(() => validateLibraryCoverJpeg(sof)).toThrow();
+    const sos = jpeg();
+    sos[24] = 2;
+    expect(() => validateLibraryCoverJpeg(sos)).toThrow();
+  });
 });

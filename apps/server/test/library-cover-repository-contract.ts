@@ -94,5 +94,61 @@ export function libraryCoverRepositoryContract(
         await Effect.runPromise(repo.commitLibraryCover({ token: "expire", cover, nowMs: 10 })),
       ).toBe(false);
     });
+
+    it("rejects obsolete configuration and cascades deletion of covers and manifests", async () => {
+      await seed();
+      const repo = makeLibraryCoverRepositories(sql);
+      const configDigest = JSON.stringify({
+        name: "Movies",
+        mediaType: "movies",
+        enabled: true,
+        sources: [],
+      });
+      const m = {
+        token: "config-token",
+        libraryId: "cover-library",
+        configDigest,
+        serverFences: [],
+        candidates: [],
+        expectedRevision: null,
+        expiresAtMs: Date.now() + 600000,
+      };
+      const cover = {
+        libraryId: m.libraryId,
+        body: new Uint8Array([1]),
+        revision: "r",
+        templateVersion: "v1",
+        configDigest,
+        width: 1920 as const,
+        height: 1080 as const,
+        updatedAtMs: 1000,
+      };
+      await Effect.runPromise(repo.saveLibraryCoverManifest(m));
+      await Effect.runPromise(
+        sql.unsafe("UPDATE virtual_libraries SET name='Renamed' WHERE id=?", [m.libraryId]),
+      );
+      expect(
+        await Effect.runPromise(
+          repo.commitLibraryCover({ token: m.token, cover, nowMs: Date.now() }),
+        ),
+      ).toBe(false);
+      expect(await Effect.runPromise(repo.getLibraryCover(m.libraryId))).toBeNull();
+      await Effect.runPromise(
+        sql.unsafe("UPDATE virtual_libraries SET name='Movies' WHERE id=?", [m.libraryId]),
+      );
+      expect(
+        await Effect.runPromise(
+          repo.commitLibraryCover({ token: m.token, cover, nowMs: Date.now() }),
+        ),
+      ).toBe(true);
+      await Effect.runPromise(
+        repo.saveLibraryCoverManifest({ ...m, token: "delete-token", expectedRevision: "r" }),
+      );
+      await Effect.runPromise(
+        sql.unsafe("DELETE FROM virtual_libraries WHERE id=?", [m.libraryId]),
+      );
+      expect(await Effect.runPromise(repo.getLibraryCover(m.libraryId))).toBeNull();
+      expect(await Effect.runPromise(repo.getLibraryCoverManifest("delete-token"))).toBeNull();
+    });
   });
 }
