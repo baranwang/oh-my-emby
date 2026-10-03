@@ -322,6 +322,83 @@ describe("LibraryService", () => {
     ).rejects.toMatchObject({ _tag: "LibraryValidationFailed" });
   });
 
+  it("preserves a disabled server's existing bindings while adding a healthy source", async () => {
+    const { repositories, service } = await setup([server("server-1"), server("server-2")]);
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const libraries = yield* LibraryService;
+        const library = yield* libraries.create({
+          name: "Movies",
+          mediaType: "movies",
+          enabled: true,
+          sources: [
+            { serverId: "server-1" as any, sourceLibraryId: "movies" as any, enabled: true },
+          ],
+        });
+        yield* Effect.gen(function* () {
+          const repo = yield* Repositories;
+          yield* repo.saveServer(
+            server("server-1", { enabled: false, health: "unknown", generation: 2 }),
+          );
+        }).pipe(Effect.provide(repositories));
+        const renamed = yield* libraries.update(library.id, {
+          name: "Renamed",
+          mediaType: "movies",
+          enabled: true,
+          sources: [
+            { serverId: "server-1" as any, sourceLibraryId: "movies" as any, enabled: true },
+          ],
+        });
+        expect(renamed.name).toBe("Renamed");
+        const updated = yield* libraries.update(library.id, {
+          name: "Movies",
+          mediaType: "movies",
+          enabled: true,
+          sources: [
+            { serverId: "server-1" as any, sourceLibraryId: "movies" as any, enabled: true },
+            { serverId: "server-2" as any, sourceLibraryId: "movies" as any, enabled: true },
+          ],
+        });
+        expect(updated.sources).toEqual([
+          {
+            serverId: "server-1",
+            sourceLibraryId: "movies",
+            sourceLibraryName: "Movies",
+            enabled: true,
+          },
+          {
+            serverId: "server-2",
+            sourceLibraryId: "movies",
+            sourceLibraryName: "Movies",
+            enabled: true,
+          },
+        ]);
+        const eligible = yield* Effect.gen(function* () {
+          return yield* (yield* Repositories).resolveEligibleSources(library.id);
+        }).pipe(Effect.provide(repositories));
+        expect(eligible.map((source) => source.serverId)).toEqual(["server-2"]);
+        yield* libraries
+          .update(library.id, {
+            name: "Movies",
+            mediaType: "movies",
+            enabled: true,
+            sources: [
+              { serverId: "server-1" as any, sourceLibraryId: "unknown" as any, enabled: true },
+              { serverId: "server-2" as any, sourceLibraryId: "movies" as any, enabled: true },
+            ],
+          })
+          .pipe(
+            Effect.flip,
+            Effect.tap((error) =>
+              Effect.sync(() => {
+                expect(error).toMatchObject({ _tag: "LibraryValidationFailed" });
+              }),
+            ),
+          );
+      }).pipe(Effect.provide(service)),
+    );
+  });
+
   it("rejects a library save when a server changes during discovery", async () => {
     const { service } = await setup([server("server-1")], (serverId) =>
       Effect.sync(() => {

@@ -116,6 +116,7 @@ export const makeLibraryServiceLayer: Layer.Layer<
 
     const validateSources = (
       input: VirtualLibraryInput,
+      current?: VirtualLibrary,
     ): Effect.Effect<
       {
         readonly sources: ReadonlyArray<LibrarySource>;
@@ -143,6 +144,29 @@ export const makeLibraryServiceLayer: Layer.Layer<
         const serverFences: Array<ServerEligibilityFence> = [];
         for (const serverId of serverIds) {
           const server = servers.find((item) => item.id === serverId);
+          if (server !== undefined && !server.enabled && current?.mediaType === input.mediaType) {
+            for (const binding of input.sources.filter((source) => source.serverId === serverId)) {
+              const previous = current.sources.find(
+                (source) =>
+                  source.serverId === serverId &&
+                  source.sourceLibraryId === binding.sourceLibraryId,
+              );
+              if (previous === undefined || (binding.enabled && !previous.enabled))
+                return yield* Effect.fail(new LibraryValidationFailed({ field: "sources" }));
+              discovered.set(`${serverId}\0${binding.sourceLibraryId}\0${input.mediaType}`, {
+                id: previous.sourceLibraryId,
+                serverId: previous.serverId,
+                name: previous.sourceLibraryName,
+                mediaType: previous.mediaType,
+              });
+            }
+            serverFences.push({
+              serverId: server.id,
+              generation: server.generation,
+              preserveDisabled: true,
+            });
+            continue;
+          }
           if (
             server === undefined ||
             !server.enabled ||
@@ -175,9 +199,14 @@ export const makeLibraryServiceLayer: Layer.Layer<
         return { sources, serverFences };
       });
 
-    const save = (id: VirtualLibraryView["id"], createdAtMs: number, input: VirtualLibraryInput) =>
+    const save = (
+      id: VirtualLibraryView["id"],
+      createdAtMs: number,
+      input: VirtualLibraryInput,
+      current?: VirtualLibrary,
+    ) =>
       Effect.gen(function* () {
-        const validated = yield* validateSources(input);
+        const validated = yield* validateSources(input, current);
         const saved = yield* repositories.saveVirtualLibrary(
           {
             id,
@@ -203,7 +232,7 @@ export const makeLibraryServiceLayer: Layer.Layer<
     const update: LibraryServiceApi["update"] = (libraryId, input) =>
       Effect.gen(function* () {
         const current = yield* getRecord(libraryId);
-        return yield* save(current.id, current.createdAtMs, input);
+        return yield* save(current.id, current.createdAtMs, input, current);
       });
 
     const remove: LibraryServiceApi["delete"] = (libraryId) =>

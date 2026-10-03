@@ -778,6 +778,66 @@ describe("D1 parity regressions", () => {
     }
   });
 
+  it("preserves disabled library bindings with generation checks and excludes them from aggregation", async () => {
+    const harness = await makeHarness();
+    try {
+      await useRepositories(harness, (repositories) =>
+        Effect.gen(function* () {
+          const upstream = {
+            ...server("disabled-library-server"),
+            enabled: false,
+            health: "unknown" as const,
+          };
+          yield* repositories.saveServer(upstream);
+          const library = {
+            id: "disabled-library",
+            name: "Movies",
+            mediaType: "movies" as const,
+            enabled: true,
+            createdAtMs: 1_000,
+            updatedAtMs: 1_000,
+            sources: [
+              {
+                serverId: upstream.id,
+                sourceLibraryId: "movies",
+                sourceLibraryName: "Movies",
+                mediaType: "movies" as const,
+                sourceOrder: 0,
+                enabled: true,
+              },
+            ],
+          };
+          expect(
+            yield* repositories.saveVirtualLibrary(library, [
+              {
+                serverId: upstream.id,
+                generation: 1,
+                preserveDisabled: true,
+              },
+            ]),
+          ).not.toBeNull();
+          expect(yield* repositories.resolveEligibleSources(library.id)).toEqual([]);
+          yield* repositories.saveServer({ ...upstream, generation: 2 });
+          expect(
+            yield* repositories.saveVirtualLibrary(
+              { ...library, name: "Stale", updatedAtMs: 2_000 },
+              [
+                {
+                  serverId: upstream.id,
+                  generation: 1,
+                  preserveDisabled: true,
+                },
+              ],
+            ),
+          ).toBeNull();
+          expect((yield* repositories.listVirtualLibraries())[0]?.name).toBe("Movies");
+        }),
+      );
+    } finally {
+      await harness.dispose();
+    }
+  });
+
   it("rolls back a virtual-library replacement when a source insert fails", async () => {
     const harness = await makeHarness();
     await useRepositories(harness, (repositories) =>

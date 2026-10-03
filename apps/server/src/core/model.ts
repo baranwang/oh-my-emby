@@ -125,6 +125,7 @@ export type SaveServerCommand = UpstreamServer;
 export interface ServerEligibilityFence {
   readonly serverId: UpstreamServer["id"];
   readonly generation: number;
+  readonly preserveDisabled?: boolean;
 }
 
 export interface SaveServerResultCommand {

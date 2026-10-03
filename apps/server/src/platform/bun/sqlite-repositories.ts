@@ -1477,11 +1477,15 @@ const makeRepositories = Effect.gen(function* () {
         Effect.gen(function* () {
           const eligibility = serverFences
             .map(
-              () => `EXISTS(
+              (fence) => `EXISTS(
         SELECT 1 FROM upstream_servers us
-        WHERE us.id = ? AND us.generation = ? AND us.enabled = 1
-          AND us.deleted_at_ms IS NULL AND us.health = 'healthy'
-          AND us.verified_base_url IS NOT NULL
+        WHERE us.id = ? AND us.generation = ?
+          AND us.deleted_at_ms IS NULL
+          AND ${
+            fence.preserveDisabled === true
+              ? "us.enabled = 0"
+              : "us.enabled = 1 AND us.health = 'healthy' AND us.verified_base_url IS NOT NULL"
+          }
       )`,
             )
             .join(" AND ");
