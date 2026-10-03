@@ -40,7 +40,7 @@ const record = (r: Row): CollectionRecord => ({
   createdAtMs: r.created_at_ms,
   updatedAtMs: r.updated_at_ms,
 });
-const eligible = `si.item_type='Movie' AND si.quarantine_reason IS NULL AND si.canonical_id IS NOT NULL
+const eligible = `(?=1 OR cm.evidence_type='boxset') AND si.item_type='Movie' AND si.quarantine_reason IS NULL AND si.canonical_id IS NOT NULL
  AND us.enabled=1 AND us.deleted_at_ms IS NULL AND us.health='healthy'
  AND si.server_generation=us.generation AND si.catalog_namespace=us.catalog_namespace
  AND cm.server_generation=si.server_generation
@@ -48,7 +48,11 @@ const eligible = `si.item_type='Movie' AND si.quarantine_reason IS NULL AND si.c
  WHERE ls.server_id=si.server_id AND ls.source_library_id=si.source_library_id AND ls.enabled=1 AND vl.enabled=1 AND vl.media_type='movies' AND (? IS NULL OR vl.id=?))
  AND (cm.evidence_type='tmdb' OR EXISTS(SELECT 1 FROM collection_sources cs
  WHERE cs.id=cm.collection_source_id AND cs.server_id=us.id AND cs.server_generation=us.generation AND cs.catalog_namespace=us.catalog_namespace))`;
-const scopeParams = (scope: CollectionScope) => [scope.virtualLibraryId, scope.virtualLibraryId];
+const scopeParams = (scope: CollectionScope) => [
+  scope.includeTmdb === false ? 0 : 1,
+  scope.virtualLibraryId,
+  scope.virtualLibraryId,
+];
 const revision: Command = {
   statement: "UPDATE collection_revision SET revision=revision+1 WHERE singleton=1",
   params: [],
@@ -302,7 +306,7 @@ export const makeCollectionRepositories = (sql: CollectionSql): CollectionReposi
           metadata_json: string;
         }>(
           `SELECT cs.* FROM collection_sources cs JOIN upstream_servers us ON us.id=cs.server_id WHERE cs.collection_id=? AND ${fence.replaceAll("id=?", "id=cs.server_id").replace("catalog_namespace=?", "catalog_namespace=cs.catalog_namespace").replace("generation=?", "generation=cs.server_generation")} AND EXISTS(SELECT 1 FROM library_sources ls JOIN virtual_libraries vl ON vl.id=ls.virtual_library_id WHERE ls.server_id=cs.server_id AND ls.enabled=1 AND vl.enabled=1 AND vl.media_type='movies' AND (? IS NULL OR vl.id=?)) ORDER BY cs.id`,
-          [active, ...scopeParams(scope)],
+          [active, scope.virtualLibraryId, scope.virtualLibraryId],
         );
         return rows.map((r) => ({
           serverId: r.server_id,

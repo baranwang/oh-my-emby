@@ -330,6 +330,12 @@ export const repositoryContract = (makeHarness: () => Promise<RepositoryHarness>
             yield* repo.readCollectionMovies(collection.id, { virtualLibraryId: null }),
           ).toHaveLength(1);
           expect(
+            yield* repo.readCollectionMovies(collection.id, {
+              virtualLibraryId: null,
+              includeTmdb: false,
+            }),
+          ).toEqual([]);
+          expect(
             yield* repo.replaceTmdbCollectionMembership({
               sourceItemId: movie.id,
               tmdbCollectionId: null,

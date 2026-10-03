@@ -20,6 +20,7 @@ import {
   METADATA_FRESH_MS,
   METADATA_STALE_MS,
   UPSTREAM_DETAIL_DEADLINE_MS,
+  UPSTREAM_LIST_DEADLINE_MS,
 } from "./limits.js";
 import { MetadataProviders } from "./metadata-providers.js";
 import type { EligibleSource, JsonValue } from "./model.js";
@@ -92,6 +93,8 @@ export const makeCollectionsLayer = (): Layer.Layer<
         Effect.map(repo.readMetadataSettings(), (settings) =>
           settings.some((s) => s.id === "tmdb" && s.enabled && s.credential !== null),
         );
+      const evidenceScope = (scope: CollectionScope) =>
+        Effect.map(tmdbEnabled(), (includeTmdb) => ({ ...scope, includeTmdb }));
       const requestItems = (
         source: EligibleSource,
         params: Record<string, string>,
@@ -157,7 +160,7 @@ export const makeCollectionsLayer = (): Layer.Layer<
       ): Effect.Effect<CollectionView | null, RepositoryError> =>
         Effect.gen(function* () {
           if (!(yield* allowedRecord(record, scope))) return null;
-          const movies = yield* repo.readCollectionMovies(record.id, scope);
+          const movies = yield* repo.readCollectionMovies(record.id, yield* evidenceScope(scope));
           if (!movies.length) return null;
           const rawSources = yield* repo.readCollectionSources(record.id, scope);
           const external =
@@ -178,12 +181,209 @@ export const makeCollectionsLayer = (): Layer.Layer<
         });
       const detail: CollectionsApi["detail"] = (id, scope) =>
         Effect.gen(function* () {
-          const record = yield* repo.readCollection(id, scope);
+          const record = yield* repo.readCollection(id, yield* evidenceScope(scope));
           return record ? yield* view(record, scope) : null;
+        });
+      const scanCache = new Map<string, number>();
+      const refreshBoxSet = (
+        record: CollectionRecord,
+        source: CollectionSource,
+        eligible: ReadonlyArray<EligibleSource>,
+        incomplete: Set<string>,
+        clientUserAgent?: string,
+      ) =>
+        Effect.gen(function* () {
+          const scopes = eligible.filter(
+            (s) => s.serverId === source.serverId && s.serverGeneration === source.serverGeneration,
+          );
+          if (!scopes.length) return;
+          const movies = [];
+          let start = 0,
+            complete = false;
+          const observedAtMs = Date.now();
+          while (start < MAX_MATERIALIZED_ITEMS) {
+            const response = yield* requestItems(
+              scopes[0]!,
+              {
+                ParentId: source.upstreamBoxSetId,
+                IncludeItemTypes: "Movie",
+                Recursive: "true",
+                Fields: "ProviderIds,MediaSources,ParentId",
+                StartIndex: String(start),
+                Limit: String(MAX_PAGE_SIZE),
+              },
+              clientUserAgent,
+            ).pipe(Effect.result);
+            if (Result.isFailure(response)) {
+              incomplete.add(source.serverId);
+              break;
+            }
+            for (const raw of response.success.items) {
+              if (raw.Type !== "Movie") continue;
+              for (const scope of scopes) {
+                const proof = yield* requestItems(
+                  scope,
+                  {
+                    ParentId: scope.sourceLibraryId,
+                    Ids: String(raw.Id),
+                    IncludeItemTypes: "Movie",
+                    Recursive: "true",
+                    Fields: "ProviderIds,MediaSources,ParentId",
+                    StartIndex: "0",
+                    Limit: "1",
+                  },
+                  clientUserAgent,
+                ).pipe(Effect.result);
+                if (Result.isFailure(proof)) {
+                  incomplete.add(source.serverId);
+                  continue;
+                }
+                const matched = proof.success.items.find(
+                  (item) => item.Id === raw.Id && item.Type === "Movie",
+                );
+                if (matched) movies.push(yield* ingest(scope, { ...raw, ...matched }));
+              }
+            }
+            start += response.success.items.length;
+            if (start >= response.success.total) {
+              complete = true;
+              break;
+            }
+            if (response.success.items.length === 0) {
+              incomplete.add(source.serverId);
+              break;
+            }
+          }
+          if (!complete) incomplete.add(source.serverId);
+          yield* repo.writeCollectionSnapshot({
+            collectionId: record.id,
+            source,
+            members: movies,
+            complete: complete && !incomplete.has(source.serverId),
+            observedAtMs,
+          });
+        });
+      const discover = (scope: CollectionScope, clientUserAgent?: string) =>
+        Effect.gen(function* () {
+          const eligible = yield* sources(scope),
+            incomplete = new Set<string>();
+          const cacheKey = JSON.stringify([
+            scope,
+            eligible.map((s) => [s.serverId, s.serverGeneration, s.sourceLibraryId]),
+          ]);
+          if ((scanCache.get(cacheKey) ?? 0) > Date.now()) return [] as string[];
+          const servers = [...new Map(eligible.map((s) => [s.serverId, s])).values()];
+          const scan = Effect.gen(function* () {
+            let scanned = 0;
+            for (const representative of servers) {
+              const roots: Array<string | undefined> = [undefined];
+              for (const root of roots) {
+                let start = 0;
+                while (scanned < MAX_MATERIALIZED_ITEMS) {
+                  const response = yield* requestItems(
+                    representative,
+                    {
+                      ...(root === undefined ? {} : { ParentId: root }),
+                      IncludeItemTypes: "BoxSet",
+                      Recursive: "true",
+                      Fields: "ProviderIds,Overview,ImageTags",
+                      StartIndex: String(start),
+                      Limit: String(MAX_PAGE_SIZE),
+                    },
+                    clientUserAgent,
+                  ).pipe(Effect.result);
+                  if (Result.isFailure(response)) {
+                    if (root === undefined && start === 0) {
+                      const server = yield* repo.getServer(representative.serverId);
+                      const makePath = (id: string) => `/Users/${encodeURIComponent(id)}/Views`;
+                      const views = yield* upstream
+                        .request(
+                          {
+                            serverId: representative.serverId,
+                            generation: representative.serverGeneration,
+                            path: makePath(server?.upstreamUserId ?? ""),
+                            replayPath: makePath,
+                            method: "GET",
+                            replaySafe: true,
+                            ...(clientUserAgent ? { clientUserAgent } : {}),
+                          },
+                          Schema.Unknown,
+                        )
+                        .pipe(Effect.result);
+                      if (
+                        Result.isSuccess(views) &&
+                        isCatalogObject(views.success) &&
+                        Array.isArray(views.success.Items)
+                      ) {
+                        const found = views.success.Items.filter(
+                          (v) =>
+                            isCatalogObject(v) &&
+                            v.CollectionType === "boxsets" &&
+                            typeof v.Id === "string",
+                        );
+                        roots.push(...found.map((v) => String(object(v).Id)));
+                        if (found.length) break;
+                      }
+                    }
+                    incomplete.add(representative.serverId);
+                    break;
+                  }
+                  for (const raw of response.success.items) {
+                    if (raw.Type !== "BoxSet") continue;
+                    const provider = object(raw.ProviderIds).Tmdb;
+                    const collectionSource: CollectionSource = {
+                      serverId: representative.serverId,
+                      catalogNamespace: representative.catalogNamespace,
+                      serverGeneration: representative.serverGeneration,
+                      upstreamBoxSetId: String(raw.Id),
+                      metadata: raw,
+                    };
+                    const record = yield* repo.upsertCollection({
+                      tmdbCollectionId:
+                        typeof provider === "string" && /^[1-9]\d*$/.test(provider)
+                          ? provider
+                          : null,
+                      source: collectionSource,
+                      metadata: raw,
+                      observedAtMs: Date.now(),
+                    });
+                    if (record)
+                      yield* refreshBoxSet(
+                        record,
+                        collectionSource,
+                        eligible,
+                        incomplete,
+                        clientUserAgent,
+                      );
+                  }
+                  start += response.success.items.length;
+                  scanned += response.success.items.length;
+                  if (start >= response.success.total) break;
+                  if (response.success.items.length === 0) {
+                    incomplete.add(representative.serverId);
+                    break;
+                  }
+                }
+              }
+              if (scanned >= MAX_MATERIALIZED_ITEMS) incomplete.add(representative.serverId);
+            }
+          }).pipe(
+            Effect.timeout(UPSTREAM_LIST_DEADLINE_MS),
+            Effect.catchTag("TimeoutError", () =>
+              Effect.sync(() => {
+                servers.forEach((s) => incomplete.add(s.serverId));
+              }),
+            ),
+          );
+          yield* scan;
+          if (incomplete.size === 0) scanCache.set(cacheKey, Date.now() + METADATA_FRESH_MS);
+          return [...incomplete];
         });
       const list: CollectionsApi["list"] = (query) =>
         Effect.gen(function* () {
-          const records = yield* repo.listVisibleCollections(query.scope);
+          const incomplete =
+            query.limit > 0 ? yield* discover(query.scope, query.clientUserAgent) : [];
+          const records = yield* repo.listVisibleCollections(yield* evidenceScope(query.scope));
           const views = (yield* Effect.forEach(records, (record) =>
             view(record, query.scope),
           )).filter((v): v is CollectionView => v !== null);
@@ -208,13 +408,29 @@ export const makeCollectionsLayer = (): Layer.Layer<
               query.startIndex + Math.min(MAX_PAGE_SIZE, Math.max(0, query.limit)),
             ),
             totalRecordCount: filtered.length,
+            exhausted: incomplete.length === 0,
+            incompleteSourceIds: incomplete,
           };
         });
       const members: CollectionsApi["members"] = (id, query) =>
         Effect.gen(function* () {
-          const record = yield* repo.readCollection(id, query.scope);
+          const record = yield* repo.readCollection(id, yield* evidenceScope(query.scope));
           if (!record || !(yield* allowedRecord(record, query.scope))) return null;
           const incomplete = new Set<string>();
+          if (query.limit > 0) {
+            const eligible = yield* sources(query.scope),
+              rawSources = yield* repo.readCollectionSources(record.id, query.scope);
+            yield* Effect.forEach(rawSources, (source) =>
+              refreshBoxSet(record, source, eligible, incomplete, query.clientUserAgent),
+            ).pipe(
+              Effect.timeout(UPSTREAM_DETAIL_DEADLINE_MS),
+              Effect.catchTag("TimeoutError", () =>
+                Effect.sync(() => {
+                  rawSources.forEach((s) => incomplete.add(s.serverId));
+                }),
+              ),
+            );
+          }
           if (query.limit > 0 && record.tmdbCollectionId && (yield* tmdbEnabled())) {
             const collection = yield* metadata.readTmdbCollection(record.tmdbCollectionId);
             if (collection) {
@@ -270,7 +486,10 @@ export const makeCollectionsLayer = (): Layer.Layer<
               yield* discovery;
             }
           }
-          const movies = yield* repo.readCollectionMovies(record.id, query.scope);
+          const movies = yield* repo.readCollectionMovies(
+            record.id,
+            yield* evidenceScope(query.scope),
+          );
           return {
             items: movies
               .slice(

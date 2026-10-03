@@ -6,6 +6,7 @@ import type { ExternalMetadataPayload } from "./metadata-providers.js";
 
 export interface CollectionScope {
   readonly virtualLibraryId: string | null;
+  readonly includeTmdb?: boolean;
 }
 export interface CollectionSource {
   readonly serverId: string;

@@ -1,3 +1,4 @@
+import { UpstreamNotFound, UpstreamTimeout } from "../src/core/errors.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -193,10 +194,152 @@ describe("Collections", () => {
     expect(parents).not.toContain("shows-0");
     expect(parents).not.toContain("shows-1");
   });
+  it("discovers upstream BoxSets and excludes movies outside enabled movie libraries", async () => {
+    const test = await setup((_serverId, path) => {
+      const url = new URL(path, "https://test");
+      if (url.searchParams.get("IncludeItemTypes") === "BoxSet")
+        return Effect.succeed({
+          Items: [
+            {
+              Id: "box",
+              Type: "BoxSet",
+              Name: "Custom",
+              ProviderIds: {},
+              ImageTags: { Primary: "tag" },
+            },
+          ],
+          TotalRecordCount: 1,
+        });
+      if (url.searchParams.get("ParentId") === "box")
+        return Effect.succeed({
+          Items: [
+            { Id: "allowed", Type: "Movie", Name: "Film", ProviderIds: { Tmdb: "10" } },
+            { Id: "hidden", Type: "Movie", Name: "Hidden", ProviderIds: { Tmdb: "12" } },
+          ],
+          TotalRecordCount: 2,
+        });
+      const id = url.searchParams.get("Ids");
+      return Effect.succeed({
+        Items:
+          id === "allowed"
+            ? [
+                {
+                  Id: "allowed",
+                  Type: "Movie",
+                  Name: "Film",
+                  ProviderIds: { Tmdb: "10" },
+                  MediaSources: [{ Id: "media", Container: "mkv" }],
+                },
+              ]
+            : [],
+        TotalRecordCount: id === "allowed" ? 1 : 0,
+      });
+    });
+    const output = await test.run(
+      Effect.gen(function* () {
+        const collections = yield* Collections;
+        const page = yield* collections.list({
+          scope: { virtualLibraryId: null },
+          startIndex: 0,
+          limit: 30,
+          sort: [],
+        });
+        const refs = yield* (yield* Repositories).readCollectionMovies(page.items[0]!.id, {
+          virtualLibraryId: null,
+        });
+        const movies = yield* (yield* Repositories).readCatalogItems(
+          refs.map((r) => r.canonicalId),
+        );
+        return { page, movies };
+      }),
+    );
+    expect(output.page.items).toHaveLength(2); // Same name, no proven collection identity: one per server.
+    expect(output.page.items[0]?.childCount).toBe(1);
+    expect(output.movies[0]?.canonical.displayMetadata).toMatchObject({ Name: "Film" });
+  });
+
+  it("merges proven upstream collection IDs and preserves confirmed members after a partial refresh", async () => {
+    let partial = false;
+    const test = await setup((_serverId, path) => {
+      const url = new URL(path, "https://test");
+      if (url.searchParams.get("IncludeItemTypes") === "BoxSet")
+        return Effect.succeed({
+          Items: [{ Id: "box", Type: "BoxSet", Name: "Set", ProviderIds: { Tmdb: "20" } }],
+          TotalRecordCount: 1,
+        });
+      if (url.searchParams.get("ParentId") === "box") {
+        if (partial && Number(url.searchParams.get("StartIndex")) > 0)
+          return Effect.fail(new UpstreamTimeout({ serverId: _serverId }));
+        return Effect.succeed({
+          Items: [{ Id: "allowed", Type: "Movie", Name: "Film", ProviderIds: { Tmdb: "10" } }],
+          TotalRecordCount: partial ? 2 : 1,
+        });
+      }
+      if (url.searchParams.get("Ids") === "allowed")
+        return Effect.succeed({
+          Items: [{ Id: "allowed", Type: "Movie", Name: "Film", ProviderIds: { Tmdb: "10" } }],
+          TotalRecordCount: 1,
+        });
+      return Effect.succeed({ Items: [], TotalRecordCount: 0 });
+    });
+    const query = {
+      scope: { virtualLibraryId: null },
+      startIndex: 0,
+      limit: 30,
+      sort: [],
+    } as const;
+    const result = await test.run(
+      Effect.gen(function* () {
+        const collections = yield* Collections;
+        const first = yield* collections.list(query);
+        partial = true;
+        const members = yield* collections.members(first.items[0]!.id, query);
+        return { first, members };
+      }),
+    );
+    expect(result.first.items).toHaveLength(1);
+    expect(result.members?.items).toHaveLength(1);
+    expect(result.members?.exhausted).toBe(false);
+    expect(result.members?.incompleteSourceIds).toContain("server-0");
+  });
+
+  it("discovers BoxSets through user Views when server-wide item listing is unavailable", async () => {
+    const test = await setup((serverId, path) => {
+      const url = new URL(path, "https://test");
+      if (url.pathname.endsWith("/Views"))
+        return Effect.succeed({
+          Items: [{ Id: "sets-root", Type: "CollectionFolder", CollectionType: "boxsets" }],
+          TotalRecordCount: 1,
+        });
+      if (url.searchParams.get("IncludeItemTypes") === "BoxSet")
+        return url.searchParams.get("ParentId") === "sets-root"
+          ? Effect.succeed({
+              Items: [{ Id: "box", Type: "BoxSet", Name: "Set", ProviderIds: {} }],
+              TotalRecordCount: 1,
+            })
+          : Effect.fail(new UpstreamNotFound({ serverId }));
+      return Effect.succeed({
+        Items: [{ Id: "allowed", Type: "Movie", Name: "Film", ProviderIds: { Tmdb: "10" } }],
+        TotalRecordCount: 1,
+      });
+    });
+    const page = await test.run(
+      Effect.gen(function* () {
+        return yield* (yield* Collections).list({
+          scope: { virtualLibraryId: null },
+          startIndex: 0,
+          limit: 30,
+          sort: [],
+        });
+      }),
+    );
+    expect(page.items).toHaveLength(2);
+  });
+
   it("does not scan an empty movie catalog to invent TMDB collections", async () => {
-    let requests = 0;
-    const test = await setup(() => {
-      requests++;
+    const requestTypes: string[] = [];
+    const test = await setup((_id, path) => {
+      requestTypes.push(new URL(path, "https://test").searchParams.get("IncludeItemTypes") ?? "");
       return Effect.succeed({ Items: [], TotalRecordCount: 0 });
     });
     const page = await test.run(
@@ -210,6 +353,6 @@ describe("Collections", () => {
       }),
     );
     expect(page.items).toEqual([]);
-    expect(requests).toBe(0);
+    expect(requestTypes).not.toContain("Movie");
   });
 });
