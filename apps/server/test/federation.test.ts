@@ -969,6 +969,185 @@ describe("Federation", () => {
     }
   });
 
+  it.each(
+    [
+      ["detail", true],
+      ["Season", true],
+      ["Episode", true],
+      ["CachedSeasonEpisodes", true],
+      ["Episode", false],
+    ].flatMap(([request, matches]) =>
+      ["replacement", "remaining-library", "regenerated"].map(
+        (mode) => [request, matches, mode] as const,
+      ),
+    ),
+  )(
+    "recovers a cached series on its first %s request after its source library is replaced (matching identity: %s, mode: %s)",
+    async (firstRequest, matchingIdentity, mode) => {
+      let switched = false;
+      const targetServer = mode === "regenerated" ? "server-0" : "server-1";
+      const targetGeneration = mode === "regenerated" ? 2 : 1;
+      const targetLibrary = mode === "regenerated" ? "movies-0" : "series-new";
+      const requests: Array<{ serverId: string; path: string }> = [];
+      const layer = await setup(
+        1,
+        (serverId, path) => {
+          requests.push({ serverId, path });
+          if (serverId === "server-2") return Effect.succeed({ Items: [], TotalRecordCount: 0 });
+          const id = !switched ? "old-series" : "new-series";
+          const seasonId = !switched ? "old-season" : "new-season";
+          const items = path.includes("/Seasons")
+            ? [
+                item(seasonId, "Season 1", {
+                  Type: "Season",
+                  ProviderIds: {},
+                  IndexNumber: 1,
+                  SeriesId: id,
+                  ParentId: id,
+                }),
+              ]
+            : path.includes("/Episodes")
+              ? [
+                  item("new-episode", "Episode 1", {
+                    Type: "Episode",
+                    ProviderIds: {},
+                    IndexNumber: 1,
+                    ParentIndexNumber: 1,
+                    SeriesId: id,
+                    SeasonId: "new-season",
+                    ParentId: "new-season",
+                    MediaSources: [{ Id: "new-media", Container: "mkv" }],
+                  }),
+                ]
+              : [
+                  item(id, "Series", {
+                    Type: "Series",
+                    ProviderIds: {
+                      Tmdb: !switched || matchingIdentity ? "1399" : "1400",
+                    },
+                  }),
+                ];
+          return Effect.succeed({ Items: items, TotalRecordCount: items.length });
+        },
+        { mediaType: "series" },
+      );
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const federation = yield* Federation;
+          const repo = yield* Repositories;
+          const old = (yield* federation.list(typedQuery(["Series"]))).items[0]!;
+          const oldSeason =
+            firstRequest === "CachedSeasonEpisodes"
+              ? (yield* federation.showChildren({
+                  seriesId: old.id,
+                  kind: "Season",
+                  startIndex: 0,
+                  limit: 20,
+                }))!.items[0]!.id
+              : undefined;
+          switched = true;
+          yield* repo.saveServer({ ...server(0), enabled: mode === "regenerated", generation: 2 });
+          yield* repo.saveServer(server(1));
+          if (mode === "remaining-library") {
+            yield* repo.saveServer(server(2));
+            yield* repo.saveVirtualLibrary(
+              {
+                id: "library-1",
+                name: "Old series",
+                mediaType: "series",
+                enabled: true,
+                createdAtMs: 1_000,
+                updatedAtMs: 2_000,
+                sources: [0, 2].map((index) => ({
+                  serverId: `server-${index}`,
+                  sourceLibraryId: `movies-${index}`,
+                  sourceLibraryName: "Series",
+                  mediaType: "series",
+                  sourceOrder: index,
+                  enabled: true,
+                })),
+              },
+              [
+                { serverId: "server-0", generation: 2, preserveDisabled: true },
+                { serverId: "server-2", generation: 1 },
+              ],
+            );
+          }
+          yield* repo.saveVirtualLibrary(
+            {
+              id: mode === "remaining-library" ? "library-2" : "library-1",
+              name: "Series",
+              mediaType: "series",
+              enabled: true,
+              createdAtMs: 1_000,
+              updatedAtMs: 2_000,
+              sources: [
+                {
+                  serverId: targetServer,
+                  sourceLibraryId: targetLibrary,
+                  sourceLibraryName: "Series",
+                  mediaType: "series",
+                  sourceOrder: 0,
+                  enabled: true,
+                },
+              ],
+            },
+            [{ serverId: targetServer, generation: targetGeneration }],
+          );
+          requests.length = 0;
+          if (firstRequest === "detail") {
+            expect((yield* federation.detail(old.id))?.id).toBe(old.id);
+            const recovered = (yield* repo.readCatalogItems([old.id]))[0]!;
+            expect(
+              recovered.sourceItems.some(
+                (source) =>
+                  source.serverId === targetServer && source.serverGeneration === targetGeneration,
+              ),
+            ).toBe(true);
+          } else {
+            const children = yield* federation.showChildren({
+              seriesId: old.id,
+              kind: firstRequest === "CachedSeasonEpisodes" ? "Episode" : firstRequest,
+              seasonId: oldSeason,
+              startIndex: 0,
+              limit: 20,
+            });
+            expect(children?.items).toHaveLength(matchingIdentity ? 1 : 0);
+            if (matchingIdentity) {
+              expect(children?.items[0]?.itemType).toBe(
+                firstRequest === "CachedSeasonEpisodes" ? "Episode" : firstRequest,
+              );
+              expect(children?.items[0]?.hierarchy?.seriesId).toBe(old.id);
+              if (firstRequest !== "Season")
+                expect(children?.items[0]?.mediaVersions).toHaveLength(1);
+            }
+          }
+          if (firstRequest === "CachedSeasonEpisodes" && matchingIdentity) {
+            const episodes = requests.find((request) => request.path.includes("/Episodes"));
+            expect(new URL(episodes!.path, "https://local").searchParams.get("SeasonId")).toBe(
+              "new-season",
+            );
+          }
+          expect(
+            requests.every(
+              (request) =>
+                request.serverId === targetServer ||
+                (mode === "remaining-library" && request.serverId === "server-2"),
+            ),
+          ).toBe(true);
+          const discovery = requests.find(
+            (request) =>
+              request.serverId === targetServer && request.path.includes("AnyProviderIdEquals"),
+          );
+          expect(discovery).toBeDefined();
+          const url = new URL(discovery!.path, "https://local");
+          expect(url.searchParams.get("ParentId")).toBe(targetLibrary);
+          expect(url.searchParams.get("AnyProviderIdEquals")).toBe("tmdb.1399");
+        }).pipe(Effect.provide(Layer.merge(layer, repositories))),
+      );
+    },
+  );
+
   it("invalidates offline local membership when a server is disabled and enabled", async () => {
     const layer = await setup(1, () =>
       Effect.succeed({ Items: [item("10")], TotalRecordCount: 1 }),

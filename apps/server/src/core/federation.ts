@@ -1322,7 +1322,31 @@ export const makeFederationLayer = (
           }
 
           const currentRecord = record;
-          const sources = yield* repositories.resolveEligibleSourcesForCanonical(activeId);
+          let sources = yield* repositories.resolveEligibleSourcesForCanonical(activeId);
+          // A client can retain a canonical ID after its original library bindings
+          // are replaced. Recover by exact identity within current enabled libraries.
+          if (
+            !record.sourceItems.some((item) =>
+              sources.some(
+                (source) =>
+                  source.serverId === item.serverId &&
+                  source.serverGeneration === item.serverGeneration &&
+                  source.sourceLibraryId === item.sourceLibraryId,
+              ),
+            ) &&
+            (record.canonical.itemType === "Movie" || record.canonical.itemType === "Series")
+          ) {
+            const mediaType = record.canonical.itemType === "Movie" ? "movies" : "series";
+            const libraries = (yield* repositories.listVirtualLibraries()).filter(
+              (library) => library.enabled && library.mediaType === mediaType,
+            );
+            const candidates = (yield* Effect.forEach(libraries, (library) =>
+              repositories.resolveEligibleSources(library.id),
+            )).flat();
+            sources = [
+              ...new Map(candidates.map((source) => [sourceKey(source), source])).values(),
+            ];
+          }
           const anchor = currentRecord.sourceItems[0]!;
           const incomplete = new Set<string>();
           yield* Effect.forEach(
@@ -1580,27 +1604,80 @@ export const makeFederationLayer = (
         Effect.gen(function* () {
           const activeId = yield* identity.lookupCanonicalId(query.seriesId);
           if (activeId === null) return null;
-          const series = (yield* repositories.readCatalogItems([activeId], now()))[0];
+          let series = (yield* repositories.readCatalogItems([activeId], now()))[0];
           if (!series || series.canonical.itemType !== "Series") return null;
+          let sources = yield* repositories.resolveEligibleSourcesForCanonical(activeId);
+          const hasCurrentSource = series.sourceItems.some((item) =>
+            sources.some(
+              (source) =>
+                source.serverId === item.serverId &&
+                source.serverGeneration === item.serverGeneration &&
+                source.sourceLibraryId === item.sourceLibraryId,
+            ),
+          );
+          // Seasons/episodes may arrive before (or concurrently with) detail.
+          if (!hasCurrentSource) {
+            yield* enrichVersions(activeId, query.clientUserAgent);
+            series = (yield* repositories.readCatalogItems([activeId], now()))[0];
+            if (!series || series.canonical.itemType !== "Series") return null;
+            sources = yield* repositories.resolveEligibleSourcesForCanonical(activeId);
+          }
           let seasonUpstreamIds: ReadonlySet<string> | null = null;
           let seasonSources: ReadonlyArray<{
             readonly serverId: string;
             readonly sourceLibraryId: string;
+            readonly serverGeneration: number;
             readonly upstreamItemId: string;
           }> = [];
           if (query.seasonId !== undefined) {
-            const seasonActive = yield* identity.lookupCanonicalId(query.seasonId);
-            const season =
+            let seasonActive = yield* identity.lookupCanonicalId(query.seasonId);
+            let season =
               seasonActive === null
                 ? undefined
                 : (yield* repositories.readCatalogItems([seasonActive], now()))[0];
             if (!season || season.canonical.itemType !== "Season") {
               return { items: [], totalRecordCount: 0, exhausted: true, incompleteSourceIds: [] };
             }
-            seasonSources = season.sourceItems;
-            seasonUpstreamIds = new Set(season.sourceItems.map((item) => item.upstreamItemId));
+            if (
+              sources.length > 0 &&
+              !season.sourceItems.some((item) =>
+                sources.some(
+                  (source) =>
+                    source.serverId === item.serverId &&
+                    source.serverGeneration === item.serverGeneration &&
+                    source.sourceLibraryId === item.sourceLibraryId,
+                ),
+              )
+            ) {
+              // The client may also retain a season ID from the old source. Discover
+              // current seasons before translating it to a source-specific SeasonId.
+              yield* showChildren({
+                seriesId: activeId,
+                kind: "Season",
+                startIndex: 0,
+                limit: 200,
+                ...(query.clientUserAgent === undefined
+                  ? {}
+                  : { clientUserAgent: query.clientUserAgent }),
+              });
+              seasonActive = yield* identity.lookupCanonicalId(query.seasonId);
+              season =
+                seasonActive === null
+                  ? undefined
+                  : (yield* repositories.readCatalogItems([seasonActive], now()))[0];
+              if (!season || season.canonical.itemType !== "Season")
+                return { items: [], totalRecordCount: 0, exhausted: true, incompleteSourceIds: [] };
+            }
+            seasonSources = season.sourceItems.filter((item) =>
+              sources.some(
+                (source) =>
+                  source.serverId === item.serverId &&
+                  source.serverGeneration === item.serverGeneration &&
+                  source.sourceLibraryId === item.sourceLibraryId,
+              ),
+            );
+            seasonUpstreamIds = new Set(seasonSources.map((item) => item.upstreamItemId));
           }
-          const sources = yield* repositories.resolveEligibleSourcesForCanonical(activeId);
           const collected = new Map<string, CanonicalItemView>();
           for (const sourceItem of series.sourceItems) {
             const source = sources.find(
@@ -1621,7 +1698,11 @@ export const makeFederationLayer = (
                       item.serverId === source.serverId &&
                       item.sourceLibraryId === source.sourceLibraryId,
                   )?.upstreamItemId ??
-                  seasonSources.find((item) => item.serverId === source.serverId)?.upstreamItemId)
+                  seasonSources.find(
+                    (item) =>
+                      item.serverId === source.serverId &&
+                      item.serverGeneration === source.serverGeneration,
+                  )?.upstreamItemId)
                 : undefined;
             if (query.seasonId !== undefined && upstreamSeasonId === undefined) continue;
             if (upstreamSeasonId !== undefined) parameters.set("SeasonId", upstreamSeasonId);
