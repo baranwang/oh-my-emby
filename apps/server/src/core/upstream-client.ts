@@ -20,7 +20,6 @@ import {
 import {
   MAX_CONNECTION_DIAGNOSTIC_BYTES,
   MAX_CONTROL_RESPONSE_BYTES,
-  MAX_FANOUT_CONCURRENCY,
   UPSTREAM_DETAIL_DEADLINE_MS,
   UPSTREAM_LIST_DEADLINE_MS,
 } from "./limits.js";
@@ -1120,7 +1119,9 @@ export const makeUpstreamClientLayer = (
                   }
                   return inferred;
                 }),
-              { concurrency: MAX_FANOUT_CONCURRENCY },
+              // Untyped categories need two probes each; concurrent discovery can
+              // exceed upstream rate limits even when each response is fast.
+              { concurrency: 1 },
             );
             return libraries.flat();
           }),

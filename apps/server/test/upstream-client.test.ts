@@ -1734,6 +1734,35 @@ describe("UpstreamClient", () => {
     expect(paths).toEqual(["/Library/VirtualFolders", "/Users/upstream-user-id/Views"]);
   });
 
+  it("discovers many untyped categories without concurrent content probes", async () => {
+    let active = 0;
+    const libraries = await run(
+      async (input, init) => {
+        const url = new URL(new Request(input, init).url);
+        if (url.pathname === "/Library/VirtualFolders") return new Response(null, { status: 404 });
+        if (url.pathname.endsWith("/Views"))
+          return Response.json({
+            Items: Array.from({ length: 13 }, (_, index) => ({
+              Id: `category-${index}`,
+              Name: `Category ${index}`,
+            })),
+          });
+        if (active > 0) return new Response(null, { status: 429 });
+        active++;
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        active--;
+        return Response.json({
+          Items: url.searchParams.get("IncludeItemTypes") === "Movie" ? [{ Type: "Movie" }] : [],
+        });
+      },
+      Effect.gen(function* () {
+        return yield* (yield* UpstreamClient).listSourceLibraries("server-1");
+      }),
+    );
+    expect(libraries).toHaveLength(13);
+    expect(libraries.every((library) => library.mediaType === "movies")).toBe(true);
+  });
+
   it("infers missing and mixed view types from bounded content probes", async () => {
     const probes: Array<URL> = [];
     const libraries = await run(
