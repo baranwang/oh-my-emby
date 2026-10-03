@@ -20,6 +20,10 @@ const artworkMigration = await Bun.file(
   new URL("../migrations/0005_metadata_artwork_languages.sql", import.meta.url),
 ).text();
 
+const collectionMigration = await Bun.file(
+  new URL("../migrations/0006_movie_collections.sql", import.meta.url),
+).text();
+
 const withDatabase = <A>(filename: string, use: (database: Database) => A): A => {
   const database = new Database(filename);
   try {
@@ -37,6 +41,7 @@ const makeHarness = async (): Promise<RepositoryHarness> => {
     database.exec(migration);
     database.exec(alignmentMigration);
     database.exec(artworkMigration);
+    database.exec(collectionMigration);
   });
 
   return {

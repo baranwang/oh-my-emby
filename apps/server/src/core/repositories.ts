@@ -1,3 +1,4 @@
+import type { CollectionRepositories } from "./collection-model.js";
 import type { OutboxFailureView, SystemStatusView } from "@oh-my-emby/contracts";
 import { Context, type Effect } from "effect";
 
@@ -80,7 +81,7 @@ export interface StateMembershipLookup {
   readonly limit: number;
 }
 
-export interface RepositoriesService {
+export interface RepositoriesService extends CollectionRepositories {
   readonly claimUser: (input: ClaimUserInput) => Effect.Effect<UserRecord, ClaimError>;
   readonly getUser: () => Effect.Effect<UserRecord | null, RepositoryError>;
   readonly getUserByName: (username: string) => Effect.Effect<UserRecord | null, RepositoryError>;

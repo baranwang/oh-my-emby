@@ -720,6 +720,7 @@ export const crossPlatformAcceptance = (name: "workers" | "docker", harness: Acc
           "dashboard_alignment",
           "drivemby_compat",
           "metadata_artwork_languages",
+          "movie_collections",
         ],
         enabledEncoding: 1,
       });

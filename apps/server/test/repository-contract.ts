@@ -218,6 +218,155 @@ export const repositoryContract = (makeHarness: () => Promise<RepositoryHarness>
       );
     });
 
+    it("merges collection identities without merging unproven custom sets and preserves aliases", async () => {
+      await harness.seedCanonicalWithEligibleSources(canonicalFixture);
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const repo = yield* Repositories;
+          const source = {
+            serverId: "server-1",
+            catalogNamespace: "catalog:server-1",
+            serverGeneration: 1,
+            upstreamBoxSetId: "set-a",
+          };
+          const custom = (yield* repo.upsertCollection({
+            tmdbCollectionId: null,
+            source,
+            metadata: { Name: "Set" },
+            observedAtMs: 1000,
+          }))!;
+          const other = (yield* repo.upsertCollection({
+            tmdbCollectionId: null,
+            source: { ...source, upstreamBoxSetId: "set-b" },
+            metadata: { Name: "Set" },
+            observedAtMs: 1000,
+          }))!;
+          expect(custom.id).not.toBe(other.id);
+          const linked = (yield* repo.upsertCollection({
+            tmdbCollectionId: "20",
+            source,
+            metadata: { Name: "Set" },
+            observedAtMs: 2000,
+          }))!;
+          const linkedOther = (yield* repo.upsertCollection({
+            tmdbCollectionId: "20",
+            source: { ...source, upstreamBoxSetId: "set-b" },
+            metadata: { Name: "Set" },
+            observedAtMs: 2000,
+          }))!;
+          expect(linked.id).toBe(linkedOther.id);
+          const movie = (yield* repo.readCatalogItems([canonicalFixture.id]))[0]!.sourceItems[0]!;
+          yield* repo.writeCollectionSnapshot({
+            collectionId: linked.id,
+            source,
+            members: [{ canonicalId: canonicalFixture.id, sourceItemId: movie.id }],
+            complete: true,
+            observedAtMs: 2000,
+          });
+          expect((yield* repo.readCollection(custom.id, { virtualLibraryId: null }))?.id).toBe(
+            linked.id,
+          );
+          expect(yield* repo.readCollectionMovies(linked.id, { virtualLibraryId: null })).toEqual([
+            { canonicalId: canonicalFixture.id, sourceItemId: movie.id },
+          ]);
+          expect(
+            yield* repo.upsertCollection({
+              tmdbCollectionId: "30",
+              source: { ...source, serverGeneration: 2 },
+              metadata: {},
+              observedAtMs: 3000,
+            }),
+          ).toBeNull();
+        }).pipe(Effect.provide(harness.layer)),
+      );
+    });
+
+    it("keeps partial collection snapshots and separate TMDB evidence but hides disabled members", async () => {
+      await harness.seedCanonicalWithEligibleSources(canonicalFixture);
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const repo = yield* Repositories;
+          yield* repo.saveServer(server("server-1"));
+          const source = {
+            serverId: "server-1",
+            catalogNamespace: "catalog:server-1",
+            serverGeneration: 1,
+            upstreamBoxSetId: "set-a",
+          };
+          const collection = (yield* repo.upsertCollection({
+            tmdbCollectionId: "20",
+            source,
+            metadata: { Name: "Set" },
+            observedAtMs: 1000,
+          }))!;
+          const movie = (yield* repo.readCatalogItems([canonicalFixture.id]))[0]!.sourceItems[0]!;
+          const snapshot = {
+            collectionId: collection.id,
+            source,
+            members: [{ canonicalId: canonicalFixture.id, sourceItemId: movie.id }],
+            complete: true,
+            observedAtMs: 2000,
+          };
+          expect(yield* repo.writeCollectionSnapshot(snapshot)).toBe(true);
+          yield* repo.writeCollectionSnapshot({
+            ...snapshot,
+            members: [],
+            complete: false,
+            observedAtMs: 3000,
+          });
+          expect(
+            yield* repo.readCollectionMovies(collection.id, { virtualLibraryId: null }),
+          ).toHaveLength(1);
+          expect(
+            yield* repo.replaceTmdbCollectionMembership({
+              sourceItemId: movie.id,
+              tmdbCollectionId: "20",
+              expectedGeneration: 1,
+              observedAtMs: 3000,
+            }),
+          ).toBe(true);
+          yield* repo.writeCollectionSnapshot({ ...snapshot, members: [], observedAtMs: 4000 });
+          expect(
+            yield* repo.readCollectionMovies(collection.id, { virtualLibraryId: null }),
+          ).toHaveLength(1);
+          expect(
+            yield* repo.replaceTmdbCollectionMembership({
+              sourceItemId: movie.id,
+              tmdbCollectionId: null,
+              expectedGeneration: 2,
+              observedAtMs: 5000,
+            }),
+          ).toBe(false);
+          expect(
+            yield* repo.replaceTmdbCollectionMembership({
+              sourceItemId: movie.id,
+              tmdbCollectionId: null,
+              expectedGeneration: 1,
+              observedAtMs: 5000,
+            }),
+          ).toBe(true);
+          expect(
+            yield* repo.replaceTmdbCollectionMembership({
+              sourceItemId: movie.id,
+              tmdbCollectionId: "20",
+              expectedGeneration: 1,
+              observedAtMs: 4000,
+            }),
+          ).toBe(false);
+          yield* repo.writeCollectionSnapshot({ ...snapshot, observedAtMs: 6000 });
+          const library = (yield* repo.listVirtualLibraries())[0]!;
+          yield* repo.saveVirtualLibrary({ ...library, enabled: false }, [
+            { serverId: "server-1", generation: 1 },
+          ]);
+          expect(
+            yield* repo.readCollectionMovies(collection.id, { virtualLibraryId: null }),
+          ).toEqual([]);
+          expect(yield* repo.readCollection(collection.id, { virtualLibraryId: null })).toBeNull();
+          expect(yield* repo.listVisibleCollections({ virtualLibraryId: null })).toEqual([]);
+        }).pipe(Effect.provide(harness.layer)),
+      );
+    });
+
     it.each(["Movie", "Series", "Season", "Episode"])(
       "isolates %s source discovery when a mixed library is bound to both media types",
       async (itemType) => {

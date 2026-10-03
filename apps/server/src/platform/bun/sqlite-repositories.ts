@@ -1,3 +1,4 @@
+import { makeCollectionRepositories } from "../../core/collection-repositories.js";
 import * as SqliteClient from "@effect/sql-sqlite-bun/SqliteClient";
 import { Database } from "bun:sqlite";
 import { readdir } from "node:fs/promises";
@@ -551,6 +552,18 @@ const makeRepositories = Effect.gen(function* () {
   if (pragma[0]?.foreign_keys !== 1) {
     return yield* Effect.die("SQLite foreign key enforcement is unavailable");
   }
+  const collections = makeCollectionRepositories({
+    unsafe: <A extends object>(statement: string, params?: ReadonlyArray<unknown>) =>
+      sql.unsafe<A>(statement, params as never) as Effect.Effect<ReadonlyArray<A>, unknown>,
+    batch: (commands) =>
+      sql.withTransaction(
+        Effect.forEach(
+          commands,
+          (command) => sql.unsafe(command.statement, command.params as never),
+          { discard: true },
+        ),
+      ),
+  });
   const drivemby = yield* makeSqlDrivembyCompat({
     unsafe: <A extends object>(statement: string, params?: ReadonlyArray<unknown>) =>
       (params === undefined
@@ -3844,6 +3857,7 @@ const makeRepositories = Effect.gen(function* () {
     );
 
   return Repositories.of({
+    ...collections,
     claimUser,
     getUser,
     getUserByName,
