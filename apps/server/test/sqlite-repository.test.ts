@@ -108,9 +108,9 @@ const makeHarness = async (): Promise<RepositoryHarness> => {
             upstream_item_id, item_type, canonical_id, quarantine_reason,
             created_at_ms, updated_at_ms
           ) VALUES ('source-item-1', 'server-1', 'catalog:server-1', 1, 'movies-1',
-            'upstream-item-1', 'Movie', ?, NULL, 1000, 1000)
+            'upstream-item-1', ?, ?, NULL, 1000, 1000)
         `,
-            [fixture.id],
+            [fixture.itemType, fixture.id],
           );
         })(),
       );

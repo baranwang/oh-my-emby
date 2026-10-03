@@ -129,6 +129,44 @@ export const repositoryContract = (makeHarness: () => Promise<RepositoryHarness>
       );
     });
 
+    it("maps related items only within the source scope, generation and type", async () => {
+      await harness.seedCanonicalWithEligibleSources({ ...canonicalFixture, itemType: "Series" });
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const repo = yield* Repositories;
+          const record = (yield* repo.readCatalogItems([canonicalFixture.id]))[0]!;
+          const scope = record.sourceItems[0]!;
+          expect(yield* repo.lookupSourceCanonicalId(scope, scope.upstreamItemId, "Series")).toBe(
+            canonicalFixture.id,
+          );
+          expect(
+            yield* repo.lookupSourceCanonicalId(
+              { ...scope, serverId: "another-server" },
+              scope.upstreamItemId,
+              "Series",
+            ),
+          ).toBeNull();
+          expect(
+            yield* repo.lookupSourceCanonicalId(
+              { ...scope, serverGeneration: 2 },
+              scope.upstreamItemId,
+              "Series",
+            ),
+          ).toBeNull();
+          expect(
+            yield* repo.lookupSourceCanonicalId(
+              { ...scope, sourceLibraryId: "another-library" },
+              scope.upstreamItemId,
+              "Series",
+            ),
+          ).toBeNull();
+          expect(
+            yield* repo.lookupSourceCanonicalId(scope, scope.upstreamItemId, "Season"),
+          ).toBeNull();
+        }).pipe(Effect.provide(harness.layer)),
+      );
+    });
+
     it("issues Emby tokens with last-used time and the current auth generation", async () => {
       await Effect.runPromise(
         Effect.gen(function* () {

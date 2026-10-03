@@ -188,6 +188,105 @@ describe("Federation", () => {
     return makeFederationLayer(options).pipe(Layer.provide(dependencies));
   };
 
+  it.each([{}, { Imdb: "tt1234567" }])(
+    "projects canonical series and season relationships in lists and details with %j",
+    async (providerIds) => {
+      const layer = await setup(1, (_server, path) => {
+        let items;
+        if (path.includes("/Seasons")) {
+          items = [
+            item("season-1", "Season one", {
+              Type: "Season",
+              IndexNumber: 1,
+              SeriesId: "series-10",
+              ParentId: "series-10",
+              ProviderIds: {},
+            }),
+          ];
+        } else if (path.includes("/Episodes") || path.includes("AnyProviderIdEquals=imdb.")) {
+          items = [
+            item("episode-1", "Episode one", {
+              Type: "Episode",
+              IndexNumber: 1,
+              ParentIndexNumber: 1,
+              SeriesId: "series-10",
+              SeasonId: "season-1",
+              ParentId: "season-1",
+              ProviderIds: providerIds,
+            }),
+          ];
+        } else {
+          items = [
+            item("series-10", "Series", { Type: "Series" }),
+            item("unrelated-series", "Unrelated", { Type: "Series", ProviderIds: { Tmdb: "20" } }),
+          ];
+        }
+        return Effect.succeed({ Items: items, TotalRecordCount: 1 });
+      });
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const federation = yield* Federation;
+          const series = (yield* federation.list(typedQuery(["Series"]))).items.find(
+            (entry) => (entry.displayMetadata as any).Name === "Series",
+          )!;
+          const base = { seriesId: series.id, startIndex: 0, limit: 30 };
+          const season = (yield* federation.showChildren({ ...base, kind: "Season" }))!.items[0]!;
+          const episode = (yield* federation.showChildren({ ...base, kind: "Episode" }))!.items[0]!;
+          expect((season as any).hierarchy).toMatchObject({
+            seriesId: series.id,
+            parentId: series.id,
+            seriesName: "Series",
+          });
+          expect((episode as any).hierarchy).toMatchObject({
+            seriesId: series.id,
+            seasonId: season.id,
+            parentId: season.id,
+          });
+          const repo = yield* Repositories;
+          const record = (yield* repo.readCatalogItems([episode.id]))[0]!;
+          const source = record.sourceItems[0]!;
+          expect(yield* repo.lookupSourceCanonicalId(source, "season-1", "Season")).toBe(season.id);
+          expect(
+            yield* repo.lookupSourceCanonicalId(
+              { ...source, serverGeneration: source.serverGeneration + 1 },
+              "season-1",
+              "Season",
+            ),
+          ).toBeNull();
+          expect(
+            yield* repo.lookupSourceCanonicalId(
+              { ...source, sourceLibraryId: "unrelated-library" },
+              "season-1",
+              "Season",
+            ),
+          ).toBeNull();
+          expect(yield* repo.lookupSourceCanonicalId(source, "season-1", "Series")).toBeNull();
+          expect((yield* federation.detail(episode.id) as any)?.hierarchy).toMatchObject({
+            seriesId: series.id,
+            seasonId: season.id,
+          });
+          // Merged metadata must never supply IDs to a different source scope.
+          yield* repo.mergeCanonicalMetadata(
+            episode.id,
+            source.id,
+            {
+              ...(episode.displayMetadata as object),
+              SeriesId: "unrelated-series",
+              SeasonId: "wrong-season",
+              ParentId: "wrong-season",
+            },
+            Date.now(),
+          );
+          expect((yield* federation.lookupMembership(episode.id))?.item.hierarchy).toMatchObject({
+            seriesId: series.id,
+            seasonId: season.id,
+            parentId: season.id,
+          });
+        }).pipe(Effect.provide(Layer.merge(layer, repositories))),
+      );
+    },
+  );
+
   it("keeps episode resources available in season listings and details, and drops withdrawn versions", async () => {
     let media = [
       { Id: "episode-media", Container: "mkv", Protocol: "Http", SupportsDirectPlay: true },

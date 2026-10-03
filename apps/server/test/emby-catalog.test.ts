@@ -135,6 +135,49 @@ const get = (path: string, token = "token") =>
   });
 
 describe("Emby catalog routes", () => {
+  it("returns local show relationships without exposing upstream IDs or ProviderIds", async () => {
+    const episode = item("episode-local", "Episode", {
+      hierarchy: {
+        seriesId: "series-local",
+        seasonId: "season-local",
+        parentId: "season-local",
+        seriesName: "Series",
+        seasonName: "Season one",
+      },
+    });
+    const app = makeEmbyHandler(
+      services({
+        federation: {
+          ...services().federation,
+          detail: () => Effect.succeed(episode),
+          showChildren: () =>
+            Effect.succeed({
+              items: [episode],
+              totalRecordCount: 1,
+              exhausted: true,
+              incompleteSourceIds: [],
+            }),
+        },
+      }),
+    );
+    for (const path of ["/Users/owner/Items/episode-local", "/Shows/series-local/Episodes"]) {
+      const response = await Effect.runPromise(app(get(path)));
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as any;
+      const value = body.Items?.[0] ?? body;
+      expect(value).toMatchObject({
+        SeriesId: "series-local",
+        SeasonId: "season-local",
+        ParentId: "season-local",
+        SeriesName: "Series",
+        SeasonName: "Season one",
+      });
+      expect(value).not.toHaveProperty("ProviderIds");
+      expect(JSON.stringify(value)).not.toContain("upstream-series-id");
+      expect(JSON.stringify(value)).not.toContain("upstream-season-id");
+    }
+  });
+
   it("keeps the filename separate from the stream URL in item and playback responses", async () => {
     const filename = "择天记 S01E01 1080p.mkv";
     const named = `/Videos/movie-1/files/version-movie-1/${filename}`;

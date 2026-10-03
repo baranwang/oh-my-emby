@@ -543,6 +543,19 @@ const itemDto = (item: CanonicalItemView, serverId: string): EmbyItemDtoValue =>
     Id: item.id,
     ServerId: serverId,
     Type: item.itemType,
+    ...(item.hierarchy === undefined
+      ? {}
+      : {
+          SeriesId: item.hierarchy.seriesId,
+          ParentId: item.hierarchy.parentId,
+          ...(item.hierarchy.seriesName === undefined
+            ? {}
+            : { SeriesName: item.hierarchy.seriesName }),
+          ...(item.hierarchy.seasonId === undefined ? {} : { SeasonId: item.hierarchy.seasonId }),
+          ...(item.hierarchy.seasonName === undefined
+            ? {}
+            : { SeasonName: item.hierarchy.seasonName }),
+        }),
     ...(Object.keys(imageTags).length > 0 ? { ImageTags: imageTags } : {}),
     ...(backdrops.length > 0 ? { BackdropImageTags: backdrops } : {}),
     ...(Array.isArray(metadata.Genres) &&

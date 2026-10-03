@@ -11,6 +11,7 @@ import {
 } from "./errors.js";
 import {
   Identity,
+  stableCanonicalId,
   type ProviderIds,
   type ProviderNamespace,
   type SourceItemCandidate,
@@ -74,6 +75,13 @@ export interface CanonicalItemView {
   readonly mediaVersions: ReadonlyArray<SourceMediaVersion>;
   readonly userState: UserStateRecord | null;
   readonly incompleteSourceIds: ReadonlyArray<string>;
+  readonly hierarchy?: {
+    readonly seriesId: string;
+    readonly seriesName?: string;
+    readonly seasonId?: string;
+    readonly seasonName?: string;
+    readonly parentId: string;
+  };
 }
 
 export interface ShowChildrenQuery {
@@ -543,6 +551,106 @@ export const makeFederationLayer = (
       const now = config.now ?? Date.now;
       const listDeadlineMs = config.listDeadlineMs ?? UPSTREAM_LIST_DEADLINE_MS;
       const detailDeadlineMs = config.detailDeadlineMs ?? UPSTREAM_DETAIL_DEADLINE_MS;
+
+      // Public relationships must reference local identities, never upstream IDs.
+      const hierarchyView = (
+        record: CatalogItemRecord,
+        incomplete: ReadonlyArray<string>,
+        knownSeriesId?: string,
+      ) =>
+        Effect.gen(function* () {
+          const result = view(record, incomplete);
+          if (record.canonical.itemType !== "Season" && record.canonical.itemType !== "Episode")
+            return result;
+          const metadata = jsonObject(record.canonical.displayMetadata)
+            ? record.canonical.displayMetadata
+            : {};
+          const relatedId = (type: "Series" | "Season") =>
+            Effect.gen(function* () {
+              for (const source of record.sourceItems) {
+                // IDs must come from this exact source's payload, not merged metadata.
+                const projection =
+                  (yield* repositories.readMetadataProjection(source.id, "show-hierarchy")) ??
+                  (yield* repositories.readMetadataProjection(source.id, "detail"));
+                if (!projection || !jsonObject(projection.payload)) continue;
+                const raw = projection.payload;
+                const upstreamId =
+                  type === "Series" ? raw.SeriesId : (raw.SeasonId ?? raw.ParentId);
+                if (typeof upstreamId !== "string") continue;
+                const mapped = yield* repositories.lookupSourceCanonicalId(
+                  source,
+                  upstreamId,
+                  type,
+                );
+                if (mapped !== null) return yield* identity.lookupCanonicalId(mapped);
+              }
+              return null;
+            });
+          let seriesId = knownSeriesId;
+          const claim = record.claims.find(
+            (claim) =>
+              claim.namespace === `fallback:${record.canonical.itemType.toLowerCase()}` &&
+              claim.state === "exact",
+          );
+          if (seriesId === undefined && claim) {
+            try {
+              const key: unknown = JSON.parse(claim.value);
+              if (Array.isArray(key) && typeof key[0] === "string") seriesId = key[0];
+            } catch {
+              /* An invalid identity claim cannot provide a public relationship. */
+            }
+          }
+          if (seriesId === undefined) seriesId = (yield* relatedId("Series")) ?? undefined;
+          if (seriesId === undefined) return result;
+          const activeSeries = yield* identity.lookupCanonicalId(seriesId);
+          if (activeSeries === null) return result;
+          const series = (yield* repositories.readCatalogItems([activeSeries]))[0];
+          if (series?.canonical.itemType !== "Series") return result;
+
+          const seriesMetadata = jsonObject(series.canonical.displayMetadata)
+            ? series.canonical.displayMetadata
+            : {};
+          let seasonId =
+            record.canonical.itemType === "Episode" ? yield* relatedId("Season") : null;
+          let seasonName: string | undefined;
+          if (
+            seasonId === null &&
+            record.canonical.itemType === "Episode" &&
+            typeof metadata.ParentIndexNumber === "number" &&
+            Number.isSafeInteger(metadata.ParentIndexNumber) &&
+            metadata.ParentIndexNumber >= 0
+          ) {
+            const proposed = yield* Effect.promise(() =>
+              stableCanonicalId([
+                "fallback:season",
+                JSON.stringify([seriesId, metadata.ParentIndexNumber]),
+              ]),
+            );
+            seasonId = yield* identity.lookupCanonicalId(proposed);
+          }
+          if (seasonId !== null) {
+            const season = (yield* repositories.readCatalogItems([seasonId]))[0];
+            if (season?.canonical.itemType !== "Season") seasonId = null;
+            else if (
+              jsonObject(season.canonical.displayMetadata) &&
+              typeof season.canonical.displayMetadata.Name === "string"
+            )
+              seasonName = season.canonical.displayMetadata.Name;
+          }
+
+          return {
+            ...result,
+            hierarchy: {
+              seriesId: activeSeries,
+              ...(typeof seriesMetadata.Name === "string"
+                ? { seriesName: seriesMetadata.Name }
+                : {}),
+              ...(seasonId === null ? {} : { seasonId }),
+              ...(seasonName === undefined ? {} : { seasonName }),
+              parentId: seasonId ?? activeSeries,
+            },
+          };
+        });
 
       const requestForUser = <A>(
         source: Pick<EligibleSource, "serverId" | "serverGeneration">,
@@ -1243,7 +1351,7 @@ export const makeFederationLayer = (
           if (!record) return null;
           const claim = exactClaim(record);
           if (claim === null || record.sourceItems.length === 0) {
-            return view(yield* metadataProviders.refresh(record), []);
+            return yield* hierarchyView(yield* metadataProviders.refresh(record), []);
           }
 
           const currentRecord = record;
@@ -1469,7 +1577,7 @@ export const makeFederationLayer = (
           );
           record = (yield* repositories.readCatalogItems([activeId], now()))[0];
           return record
-            ? view(yield* metadataProviders.refresh(record), [...incomplete].sort())
+            ? yield* hierarchyView(yield* metadataProviders.refresh(record), [...incomplete].sort())
             : null;
         });
 
@@ -1487,7 +1595,10 @@ export const makeFederationLayer = (
               ? null
               : (record.mediaVersions.find(({ id }) => id === versionId) ?? null);
           if (versionId !== undefined && version === null) return null;
-          return { item: view(yield* metadataProviders.overlayCached(record), []), version };
+          return {
+            item: yield* hierarchyView(yield* metadataProviders.overlayCached(record), []),
+            version,
+          };
         });
 
       const metadataNumber = (item: CanonicalItemView, key: string): number | null => {
@@ -1577,6 +1688,18 @@ export const makeFederationLayer = (
                 })
                 .pipe(Effect.result);
               if (Result.isFailure(resolved)) continue;
+              yield* repositories.writeMetadataProjection({
+                sourceItemId: resolved.success.sourceItem.id,
+                projectionKey: "show-hierarchy",
+                payload: {
+                  SeriesId: raw.SeriesId ?? null,
+                  SeasonId: raw.SeasonId ?? null,
+                  ParentId: raw.ParentId ?? null,
+                },
+                freshUntilMs: observedAtMs + METADATA_FRESH_MS,
+                staleUntilMs: observedAtMs + METADATA_STALE_MS,
+                updatedAtMs: observedAtMs,
+              });
               // This endpoint explicitly requests MediaSources. Keep the playable-version
               // projection alongside identity ingestion so catalog reads can use it.
               if (Array.isArray(raw.MediaSources)) {
@@ -1586,7 +1709,7 @@ export const makeFederationLayer = (
               if (childId === null) continue;
               const current = (yield* repositories.readCatalogItems([childId], now()))[0];
               if (!current) continue;
-              collected.set(childId, view(current, []));
+              collected.set(childId, yield* hierarchyView(current, [], activeId));
             }
           }
           let items = [...collected.values()];

@@ -3110,6 +3110,34 @@ const makeRepositories = Effect.gen(function* () {
     return attempt(8);
   };
 
+  const lookupSourceCanonicalId: RepositoriesService["lookupSourceCanonicalId"] = (
+    source,
+    upstreamItemId,
+    itemType,
+  ) =>
+    database(
+      "lookupSourceCanonicalId",
+      Effect.gen(function* () {
+        const rows = yield* sql.unsafe<{ canonical_id: string }>(
+          `
+        SELECT canonical_id FROM source_items
+        WHERE server_id = ? AND server_generation = ? AND source_library_id = ?
+          AND upstream_item_id = ? AND item_type = ? AND quarantine_reason IS NULL
+          AND canonical_id IS NOT NULL
+        LIMIT 1
+      `,
+          [
+            source.serverId,
+            source.serverGeneration,
+            source.sourceLibraryId,
+            upstreamItemId,
+            itemType,
+          ],
+        );
+        return rows[0]?.canonical_id ?? null;
+      }),
+    );
+
   const readCatalogItems: RepositoriesService["readCatalogItems"] = (canonicalIds, usableAtMs) => {
     const ids = [...new Set(canonicalIds)].slice(0, DB_BATCH_SIZE);
     if (ids.length === 0) return Effect.succeed([]);
@@ -4239,6 +4267,7 @@ const makeRepositories = Effect.gen(function* () {
     resolveEligibleSources,
     resolveIdentity: resolveIdentityD1,
     lookupCanonicalId,
+    lookupSourceCanonicalId,
     persistIdentityResult,
     readQueryGeneration,
     readQueryGenerationItems,
