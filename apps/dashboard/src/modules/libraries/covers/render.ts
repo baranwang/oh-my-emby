@@ -93,11 +93,8 @@ export async function renderLibraryCover(
     ctx.fillStyle = "#ffffff";
     ctx.textBaseline = "middle";
     ctx.textAlign = "center";
-    const title = fitCoverTitle(ctx, input.title, 1480);
-    ctx.shadowColor = "rgba(0,0,0,0.5)";
-    ctx.shadowBlur = 24;
-    ctx.shadowOffsetY = 6;
-    ctx.fillText(title.text, 960, 540);
+    const title = fitCoverTitle(ctx, input.title, 840);
+    ctx.fillText(title.text, 528, 540);
     return await encodeCoverJpeg(canvas, signal);
   } finally {
     loaded.release();
