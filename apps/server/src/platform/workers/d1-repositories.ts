@@ -1,3 +1,4 @@
+import { makeLibraryCoverRepositories } from "../../core/library-cover-repositories.js";
 import { makeCollectionRepositories } from "../../core/collection-repositories.js";
 import * as D1Client from "@effect/sql-d1/D1Client";
 import {
@@ -560,6 +561,12 @@ const makeRepositories = Effect.gen(function* () {
     return yield* Effect.die("SQLite foreign key enforcement is unavailable");
   }
   const collections = makeCollectionRepositories({
+    unsafe: <A extends object>(statement: string, params?: ReadonlyArray<unknown>) =>
+      sql.unsafe<A>(statement, params as never) as Effect.Effect<ReadonlyArray<A>, unknown>,
+    batch: (commands) =>
+      sql.batch(commands.map((command) => sql.unsafe(command.statement, command.params as never))),
+  });
+  const covers = makeLibraryCoverRepositories({
     unsafe: <A extends object>(statement: string, params?: ReadonlyArray<unknown>) =>
       sql.unsafe<A>(statement, params as never) as Effect.Effect<ReadonlyArray<A>, unknown>,
     batch: (commands) =>
@@ -4249,6 +4256,7 @@ const makeRepositories = Effect.gen(function* () {
 
   return Repositories.of({
     ...collections,
+    ...covers,
     claimUser,
     getUser,
     getUserByName,

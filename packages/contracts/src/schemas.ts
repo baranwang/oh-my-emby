@@ -1,3 +1,4 @@
+import { LibraryCoverSummary } from "./library-covers.js";
 import { Schema } from "effect";
 import { TMDB_LANGUAGE_CODES } from "./metadata-languages.js";
 
@@ -167,6 +168,7 @@ export const VirtualLibraryInput = Schema.Struct({
   enabled: Schema.Boolean,
 });
 export const VirtualLibraryView = Schema.Struct({
+  cover: Schema.optionalKey(LibraryCoverSummary),
   id: VirtualLibraryId,
   name: Schema.NonEmptyString,
   mediaType: Schema.Literals(["movies", "series"]),

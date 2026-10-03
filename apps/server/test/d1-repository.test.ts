@@ -1337,3 +1337,9 @@ it("keeps Wrangler and application migration bookkeeping separate", async () => 
     ],
   });
 });
+
+import { libraryCoverRepositoryContract } from './library-cover-repository-contract.js';
+libraryCoverRepositoryContract({
+ unsafe:<A extends object>(statement:string, params:ReadonlyArray<unknown>=[])=>Effect.tryPromise(async()=>{const result=await env.DB.prepare(statement).bind(...params).all();return result.results as A[];}),
+ batch:commands=>Effect.tryPromise(async()=>{await env.DB.batch(commands.map(c=>env.DB.prepare(c.statement).bind(...c.params)));})
+}, async()=>{await run("DELETE FROM virtual_libraries WHERE id='cover-library'");await run("INSERT INTO virtual_libraries (id,name,media_type,enabled,created_at_ms,updated_at_ms) VALUES ('cover-library','Movies','movies',1,1000,1000)");});

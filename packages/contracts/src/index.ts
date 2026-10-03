@@ -27,3 +27,5 @@ export {
   VirtualLibraryInput,
   VirtualLibraryView,
 } from "./schemas.js";
+
+export * from "./library-covers.js";
