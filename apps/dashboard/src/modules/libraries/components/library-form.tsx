@@ -135,7 +135,13 @@ export const LibraryForm = ({ library, groups, onSave, onCancel }: LibraryFormPr
       setFormError(null);
       try {
         const input = await Schema.decodeUnknownPromise(VirtualLibraryInputSchema)(value);
-        await onSave(input);
+        await onSave({
+          ...input,
+          sources: input.sources.filter((source) => {
+            const group = groups.find((item) => item.server.id === source.serverId);
+            return source.enabled || (group !== undefined && group.state !== "unavailable");
+          }),
+        });
       } catch (error) {
         if (
           typeof error === "object" &&
