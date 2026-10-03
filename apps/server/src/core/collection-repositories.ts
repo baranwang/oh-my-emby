@@ -126,8 +126,18 @@ export const makeCollectionRepositories = (sql: CollectionSql): CollectionReposi
           ? tmdbId(input.tmdbCollectionId)
           : (old?.collection_id ?? sourceCollectionId(source!));
         if (conflict) id = old!.collection_id;
-        const guard = source ? fence : "1=1",
-          gp = source ? fenceParams(source) : [];
+        const acceptedIdentity = conflict ? old!.tmdb_collection_id : input.tmdbCollectionId;
+        const identityFence = `NOT EXISTS(SELECT 1 FROM collection_sources cs JOIN movie_collections mc ON mc.id=cs.collection_id WHERE cs.id=? AND (cs.updated_at_ms>? OR (mc.tmdb_collection_id IS NOT NULL AND ? IS NOT NULL AND mc.tmdb_collection_id<>?)))`;
+        const guard = source ? `${fence} AND ${identityFence}` : "1=1",
+          gp = source
+            ? [
+                ...fenceParams(source),
+                sourceKey(source),
+                input.observedAtMs,
+                acceptedIdentity,
+                acceptedIdentity,
+              ]
+            : [];
         const commands: Command[] = [
           {
             statement: `INSERT INTO movie_collections(id,tmdb_collection_id,metadata_json,created_at_ms,updated_at_ms) SELECT ?,?,?,?,? WHERE ${guard} ON CONFLICT(id) DO UPDATE SET metadata_json=CASE WHEN excluded.metadata_json='{}' THEN movie_collections.metadata_json ELSE excluded.metadata_json END,updated_at_ms=excluded.updated_at_ms WHERE movie_collections.updated_at_ms<=excluded.updated_at_ms`,
@@ -177,7 +187,12 @@ export const makeCollectionRepositories = (sql: CollectionSql): CollectionReposi
         }
         commands.push(revision);
         yield* sql.batch(commands);
-        const rows = yield* sql.unsafe<Row>("SELECT * FROM movie_collections WHERE id=?", [id]);
+        const rows = source
+          ? yield* sql.unsafe<Row>(
+              "SELECT mc.* FROM movie_collections mc JOIN collection_sources cs ON cs.collection_id=mc.id WHERE cs.id=?",
+              [sourceKey(source)],
+            )
+          : yield* sql.unsafe<Row>("SELECT * FROM movie_collections WHERE id=?", [id]);
         return rows[0] ? record(rows[0]) : null;
       }),
     );
@@ -322,8 +337,8 @@ export const makeCollectionRepositories = (sql: CollectionSql): CollectionReposi
         "readCollectionQuery",
         Effect.map(
           sql.unsafe<{ payload_json: string }>(
-            "SELECT payload_json FROM collection_query_snapshots WHERE query_key=?",
-            [queryKey],
+            "SELECT payload_json FROM collection_query_snapshots WHERE query_key=? AND expires_at_ms>?",
+            [queryKey, Date.now()],
           ),
           (rows) => (rows[0] ? JSON.parse(rows[0].payload_json) : null),
         ),
@@ -331,12 +346,24 @@ export const makeCollectionRepositories = (sql: CollectionSql): CollectionReposi
     writeCollectionQuery: (snapshot) =>
       run(
         "writeCollectionQuery",
-        Effect.asVoid(
-          sql.unsafe(
-            "INSERT INTO collection_query_snapshots(query_key,payload_json,expires_at_ms) VALUES(?,?,?) ON CONFLICT(query_key) DO UPDATE SET payload_json=excluded.payload_json,expires_at_ms=excluded.expires_at_ms",
-            [snapshot.queryKey, JSON.stringify(snapshot), snapshot.expiresAtMs],
-          ),
-        ),
+        sql
+          .batch([
+            {
+              statement: "DELETE FROM collection_query_snapshots WHERE expires_at_ms<=?",
+              params: [Date.now()],
+            },
+            {
+              statement:
+                "INSERT INTO collection_query_snapshots(query_key,payload_json,expires_at_ms) VALUES(?,?,?) ON CONFLICT(query_key) DO UPDATE SET payload_json=excluded.payload_json,expires_at_ms=excluded.expires_at_ms WHERE json_extract(collection_query_snapshots.payload_json,'$.exhausted')=0 OR json_extract(excluded.payload_json,'$.exhausted')=1",
+              params: [snapshot.queryKey, JSON.stringify(snapshot), snapshot.expiresAtMs],
+            },
+            {
+              statement:
+                "DELETE FROM collection_query_snapshots WHERE query_key NOT IN (SELECT query_key FROM collection_query_snapshots ORDER BY expires_at_ms DESC,query_key DESC LIMIT 500)",
+              params: [],
+            },
+          ])
+          .pipe(Effect.asVoid),
       ),
     upsertCollection,
     replaceTmdbCollectionMembership,

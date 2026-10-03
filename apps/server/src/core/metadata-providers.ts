@@ -785,7 +785,10 @@ export const makeMetadataProvidersLayer = (
           return accepted === undefined ? null : new URL(accepted);
         });
 
-      const collectionLocks = new Map<string, ReturnType<typeof Semaphore.makeUnsafe>>();
+      const collectionLocks = new Map<
+        string,
+        { semaphore: ReturnType<typeof Semaphore.makeUnsafe>; users: number }
+      >();
       const readTmdbCollection: MetadataProvidersApi["readTmdbCollection"] = (
         id,
         cachedOnly = false,
@@ -797,83 +800,99 @@ export const makeMetadataProvidersLayer = (
           const key = { namespace: "tmdb:collection", value: id };
           const language = setting.language?.trim() || (yield* ClientLanguage);
           const lockKey = `${id}:${language}:${setting.updatedAtMs}`;
-          const lock = collectionLocks.get(lockKey) ?? Semaphore.makeUnsafe(1);
+          const lock = collectionLocks.get(lockKey) ?? {
+            semaphore: Semaphore.makeUnsafe(1),
+            users: 0,
+          };
+          lock.users++;
           collectionLocks.set(lockKey, lock);
-          return yield* lock.withPermit(
-            Effect.gen(function* () {
-              const fresh = yield* readCached(setting, key, true);
-              if (fresh)
-                return fresh.found ? (fresh.payload as unknown as TmdbCollectionPayload) : null;
-              const stale = yield* readCached(setting, key, false);
-              if (cachedOnly)
-                return stale?.found ? (stale.payload as unknown as TmdbCollectionPayload) : null;
-              const url = new URL(`https://api.themoviedb.org/3/collection/${id}`);
-              url.searchParams.set("language", language);
-              const result = yield* requestJson(
-                setting,
-                new Request(url, {
-                  headers: {
-                    authorization: `Bearer ${setting.credential}`,
-                    accept: "application/json",
-                  },
-                }),
-              ).pipe(Effect.result);
-              if (Result.isFailure(result)) {
-                yield* updateStatus(setting, "degraded");
-                return stale?.found ? (stale.payload as unknown as TmdbCollectionPayload) : null;
-              }
-              let value: TmdbCollectionPayload | null = null;
-              if (result.success.found) {
-                const raw = result.success.value;
-                if (
-                  !object(raw) ||
-                  raw.id !== Number(id) ||
-                  typeof raw.name !== "string" ||
-                  !Array.isArray(raw.parts)
-                )
+          return yield* lock.semaphore
+            .withPermit(
+              Effect.gen(function* () {
+                const fresh = yield* readCached(setting, key, true);
+                if (fresh)
+                  return fresh.found ? (fresh.payload as unknown as TmdbCollectionPayload) : null;
+                const stale = yield* readCached(setting, key, false);
+                if (cachedOnly)
                   return stale?.found ? (stale.payload as unknown as TmdbCollectionPayload) : null;
-                value = {
-                  id,
-                  Name: raw.name,
-                  ...payload(
-                    undefined,
-                    text(raw.overview),
-                    tmdbImage(raw.poster_path, "w780"),
-                    [tmdbImage(raw.backdrop_path, "w1280")].filter(
-                      (p): p is string => p !== undefined,
-                    ),
-                  ),
-                  movieIds: [
-                    ...new Set(
-                      raw.parts.flatMap((part) =>
-                        object(part) &&
-                        typeof part.id === "number" &&
-                        Number.isSafeInteger(part.id) &&
-                        part.id > 0
-                          ? [String(part.id)]
-                          : [],
+                const url = new URL(`https://api.themoviedb.org/3/collection/${id}`);
+                url.searchParams.set("language", language);
+                const result = yield* requestJson(
+                  setting,
+                  new Request(url, {
+                    headers: {
+                      authorization: `Bearer ${setting.credential}`,
+                      accept: "application/json",
+                    },
+                  }),
+                ).pipe(Effect.result);
+                if (Result.isFailure(result)) {
+                  yield* updateStatus(setting, "degraded");
+                  return stale?.found ? (stale.payload as unknown as TmdbCollectionPayload) : null;
+                }
+                let value: TmdbCollectionPayload | null = null;
+                if (result.success.found) {
+                  const raw = result.success.value;
+                  if (
+                    !object(raw) ||
+                    raw.id !== Number(id) ||
+                    typeof raw.name !== "string" ||
+                    !Array.isArray(raw.parts)
+                  )
+                    return stale?.found
+                      ? (stale.payload as unknown as TmdbCollectionPayload)
+                      : null;
+                  value = {
+                    id,
+                    Name: raw.name,
+                    ...payload(
+                      undefined,
+                      text(raw.overview),
+                      tmdbImage(raw.poster_path, "w780"),
+                      [tmdbImage(raw.backdrop_path, "w1280")].filter(
+                        (p): p is string => p !== undefined,
                       ),
                     ),
-                  ],
-                  ExternalArtworkRevision: setting.updatedAtMs,
-                  ExternalArtworkLanguage: language,
-                };
-              }
-              const fetchedAtMs = now();
-              yield* repositories.writeExternalMetadata({
-                providerId: "tmdb",
-                identityNamespace: key.namespace,
-                identityValue: yield* cacheIdentity(setting, id),
-                payload: value as unknown as JsonValue,
-                found: value !== null,
-                fetchedAtMs,
-                freshUntilMs: fetchedAtMs + METADATA_FRESH_MS,
-                staleUntilMs:
-                  fetchedAtMs + (value === null ? METADATA_FRESH_MS : METADATA_STALE_MS),
-              });
-              return value;
-            }),
-          );
+                    movieIds: [
+                      ...new Set(
+                        raw.parts.flatMap((part) =>
+                          object(part) &&
+                          typeof part.id === "number" &&
+                          Number.isSafeInteger(part.id) &&
+                          part.id > 0
+                            ? [String(part.id)]
+                            : [],
+                        ),
+                      ),
+                    ],
+                    ExternalArtworkRevision: setting.updatedAtMs,
+                    ExternalArtworkLanguage: language,
+                  };
+                }
+                const fetchedAtMs = now();
+                yield* repositories.writeExternalMetadata({
+                  providerId: "tmdb",
+                  identityNamespace: key.namespace,
+                  identityValue: yield* cacheIdentity(setting, id),
+                  payload: value as unknown as JsonValue,
+                  found: value !== null,
+                  fetchedAtMs,
+                  freshUntilMs: fetchedAtMs + METADATA_FRESH_MS,
+                  staleUntilMs:
+                    fetchedAtMs + (value === null ? METADATA_FRESH_MS : METADATA_STALE_MS),
+                });
+                return value;
+              }),
+            )
+            .pipe(
+              Effect.ensuring(
+                Effect.sync(() => {
+                  lock.users--;
+                  if (lock.users === 0 && collectionLocks.get(lockKey) === lock)
+                    collectionLocks.delete(lockKey);
+                }),
+              ),
+            );
         });
 
       return MetadataProviders.of({

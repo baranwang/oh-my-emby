@@ -3334,9 +3334,9 @@ const makeRepositories = Effect.gen(function* () {
       "listStateMemberCanonicalIds",
       sql.unsafe<{ readonly canonical_id: string }>(
         `
-      SELECT DISTINCT state.canonical_id
-      FROM user_state state
-      JOIN source_items item ON item.canonical_id = state.canonical_id
+      SELECT DISTINCT item.canonical_id
+      FROM source_items item
+      ${input.includeWithoutState ? "LEFT JOIN" : "JOIN"} user_state state ON item.canonical_id = state.canonical_id
       JOIN library_sources binding
         ON binding.server_id = item.server_id
         AND binding.source_library_id = item.source_library_id
@@ -3345,7 +3345,7 @@ const makeRepositories = Effect.gen(function* () {
       WHERE ${predicates.join(" AND ")}
         AND binding.enabled = 1 AND library.enabled = 1
         AND server.enabled = 1 AND server.deleted_at_ms IS NULL
-      ORDER BY state.canonical_id
+      ORDER BY item.canonical_id
       LIMIT ?
     `,
         parameters,

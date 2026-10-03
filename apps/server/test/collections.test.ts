@@ -1,3 +1,7 @@
+import { Database } from "bun:sqlite";
+import { makeCollectionRepositories } from "../src/core/collection-repositories.js";
+import { RepositoryError } from "../src/core/errors.js";
+import { ClientLanguage } from "../src/core/client-language.js";
 import { Playback, makePlaybackLayer, serveRegisteredResource } from "../src/core/playback.js";
 import { Federation, makeFederationLayer } from "../src/core/federation.js";
 import { UpstreamNotFound, UpstreamTimeout } from "../src/core/errors.js";
@@ -5,7 +9,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Effect, Layer } from "effect";
-import { afterEach, beforeEach, describe, it, expect } from "vitest";
+import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import { Collections, makeCollectionsLayer } from "../src/core/collections.js";
 import { Identity, makeIdentityLayer } from "../src/core/identity.js";
 import { Repositories } from "../src/core/repositories.js";
@@ -65,9 +69,14 @@ describe("Collections", () => {
     repositories = makeSqliteRepositoriesLayer({ filename });
   });
   afterEach(async () => {
+    vi.restoreAllMocks();
     await rm(directory, { recursive: true, force: true });
   });
-  const setup = async (handle: (serverId: string, path: string) => Effect.Effect<unknown, any>) => {
+  const setup = async (
+    handle: (serverId: string, path: string) => Effect.Effect<unknown, any>,
+    collectionReader?: (id: string) => Effect.Effect<any, any>,
+    failServerLookup = false,
+  ) => {
     await Effect.runPromise(
       Effect.gen(function* () {
         const repo = yield* Repositories;
@@ -113,20 +122,34 @@ describe("Collections", () => {
     const metadata = Layer.succeed(
       MetadataProviders,
       MetadataProviders.of({
-        readTmdbCollection: () =>
-          Effect.succeed({
-            id: "20",
-            Name: "A Set",
-            ExternalImages: { Primary: "https://image.tmdb.org/t/p/w780/set.jpg" },
-            movieIds: ["10", "11", "12"],
-          }),
+        readTmdbCollection:
+          collectionReader ??
+          (() =>
+            Effect.succeed({
+              id: "20",
+              Name: "A Set",
+              ExternalImages: { Primary: "https://image.tmdb.org/t/p/w780/set.jpg" },
+              movieIds: ["10", "11", "12"],
+            })),
         refresh: (r: any) => Effect.succeed(r),
         overlayCached: (r: any) => Effect.succeed(r),
       } as any),
     );
+    const activeRepositories = failServerLookup
+      ? Layer.effect(
+          Repositories,
+          Effect.map(Repositories, (r) =>
+            Repositories.of({
+              ...r,
+              getServer: () =>
+                Effect.fail(new RepositoryError({ operation: "getServer", message: "injected" })),
+            }),
+          ),
+        ).pipe(Layer.provide(repositories))
+      : repositories;
     const deps = Layer.mergeAll(
-      repositories,
-      makeIdentityLayer.pipe(Layer.provide(repositories)),
+      activeRepositories,
+      makeIdentityLayer.pipe(Layer.provide(activeRepositories)),
       upstream,
       metadata,
     );
@@ -324,6 +347,7 @@ describe("Collections", () => {
         const collections = yield* Collections;
         const first = yield* collections.list(query);
         partial = true;
+        vi.spyOn(Date, "now").mockReturnValue(Date.now() + 900001);
         const members = yield* collections.members(first.items[0]!.id, query);
         return { first, members };
       }),
@@ -405,9 +429,30 @@ describe("Collections", () => {
         const second = yield* federation.list({ ...query, startIndex: 1 });
         const boxes = yield* federation.list({ ...query, itemTypes: ["BoxSet"], limit: 30 });
         const zero = yield* federation.list({ ...query, itemTypes: ["BoxSet"], limit: 0 });
-        return { first, second, boxes, zero };
+        const coldZero = yield* federation.list({
+          ...query,
+          limit: 0,
+          sort: [{ field: "SortName", direction: "Ascending" }],
+        });
+        const favoriteQuery = {
+          ...query,
+          filters: [{ field: "favorite", value: true }],
+          limit: 30,
+        } as const;
+        const beforeFavorite = yield* federation.list(favoriteQuery);
+        yield* (yield* Repositories).writeUserStateAndTargets({
+          canonicalId: second.items[0]!.id,
+          patch: { favorite: true },
+          updatedAtMs: Date.now(),
+        });
+        yield* federation.invalidateStateDependentGenerations();
+        const afterFavorite = yield* federation.list(favoriteQuery);
+        return { first, second, boxes, zero, coldZero, beforeFavorite, afterFavorite };
       }),
     );
+    expect(result.beforeFavorite.totalRecordCount).toBe(0);
+    expect(result.afterFavorite.totalRecordCount).toBe(1);
+    expect(result.coldZero.totalRecordCount).toBe(2);
     expect(result.zero.items).toEqual([]);
     expect(result.zero.totalRecordCount).toBe(1);
     expect(result.boxes.items).toHaveLength(1);
@@ -499,7 +544,11 @@ describe("Collections", () => {
           catalogNamespace: "catalog:0",
           serverGeneration: 1,
           upstreamBoxSetId: "box",
-          metadata: { Name: "Custom", ImageTags: { Primary: "tag" } },
+          metadata: {
+            Name: "Custom",
+            ImageTags: { Primary: "tag" },
+            ExternalImages: { Primary: "https://unregistered.example/image?api_key=secret" },
+          },
         };
         const set = (yield* repo.upsertCollection({
           tmdbCollectionId: null,
@@ -530,6 +579,323 @@ describe("Collections", () => {
     expect(result.image?.source?.upstreamBoxSetId).toBe("box");
     expect(result.missing).toBeNull();
     expect(result.inaccessible).toBeNull();
+  });
+
+  it("resumes interrupted TMDB member discovery and reuses completed results on later pages", async () => {
+    const calls: string[] = [];
+    let block = true;
+    const test = await setup((serverId, path) => {
+      const id = new URL(path, "https://test").searchParams.get("AnyProviderIdEquals");
+      if (id) {
+        calls.push(`${serverId}:${id}`);
+        if (id === "tmdb.11" && block) {
+          block = false;
+          return Effect.never;
+        }
+      }
+      return Effect.succeed({ Items: [], TotalRecordCount: 0 });
+    });
+    const result = await test.run(
+      Effect.gen(function* () {
+        const repo = yield* Repositories,
+          identity = yield* Identity;
+        const movie = yield* identity.resolve({
+          serverId: "server-0",
+          catalogNamespace: "catalog:0",
+          verifiedCatalogId: "catalog-id:0",
+          serverGeneration: 1,
+          sourceLibraryId: "movies-0",
+          upstreamItemId: "film",
+          itemType: "Movie",
+          providerIds: { tmdbMovie: "10" },
+          displayMetadata: { Name: "Film" },
+        });
+        const set = (yield* repo.upsertCollection({
+          tmdbCollectionId: "20",
+          metadata: {},
+          observedAtMs: 1000,
+        }))!;
+        yield* repo.replaceTmdbCollectionMembership({
+          sourceItemId: movie.sourceItem.id,
+          tmdbCollectionId: "20",
+          expectedGeneration: 1,
+          observedAtMs: 1000,
+        });
+        const collections = yield* Collections;
+        const query = {
+          scope: { virtualLibraryId: null },
+          startIndex: 0,
+          limit: 1,
+          sort: [],
+        } as const;
+        yield* collections.members(set.id, query).pipe(Effect.timeout(30), Effect.result);
+        const complete = yield* collections.members(set.id, query);
+        const count = calls.length;
+        yield* collections.members(set.id, { ...query, startIndex: 1 });
+        return { complete, count, final: calls.length };
+      }),
+    );
+    expect(calls.filter((c) => c === "server-0:tmdb.10")).toHaveLength(1);
+    expect(result.complete?.exhausted).toBe(true);
+    expect(result.final).toBe(result.count);
+  });
+
+  it("isolates collection query ordering by client language", async () => {
+    const test = await setup(
+      () => Effect.succeed({ Items: [], TotalRecordCount: 0 }),
+      (id) =>
+        Effect.map(ClientLanguage, (lang) => ({
+          id,
+          Name: lang === "zh-CN" ? (id === "20" ? "Z" : "A") : id === "20" ? "A" : "Z",
+          movieIds: [],
+        })),
+    );
+    const result = await test.run(
+      Effect.gen(function* () {
+        const repo = yield* Repositories,
+          identity = yield* Identity;
+        for (const id of ["20", "30"]) {
+          const movie = yield* identity.resolve({
+            serverId: "server-0",
+            catalogNamespace: "catalog:0",
+            verifiedCatalogId: "catalog-id:0",
+            serverGeneration: 1,
+            sourceLibraryId: "movies-0",
+            upstreamItemId: `film-${id}`,
+            itemType: "Movie",
+            providerIds: { tmdbMovie: id },
+            displayMetadata: { Name: "Film" },
+          });
+          yield* repo.upsertCollection({ tmdbCollectionId: id, metadata: {}, observedAtMs: 1000 });
+          yield* repo.replaceTmdbCollectionMembership({
+            sourceItemId: movie.sourceItem.id,
+            tmdbCollectionId: id,
+            expectedGeneration: 1,
+            observedAtMs: 1000,
+          });
+        }
+        const federation = yield* Federation;
+        const query = {
+          virtualLibraryId: null,
+          itemTypes: ["BoxSet"],
+          startIndex: 0,
+          limit: 30,
+          sort: [{ field: "SortName", direction: "Ascending" }],
+          filters: [],
+          userId: "u",
+          deviceId: "d",
+        } as const;
+        const en = yield* federation
+          .list(query)
+          .pipe(Effect.provideService(ClientLanguage, "en-US"));
+        const zh = yield* federation
+          .list(query)
+          .pipe(Effect.provideService(ClientLanguage, "zh-CN"));
+        return { en, zh };
+      }),
+    );
+    expect(result.en.items.map((i) => i.id)).toEqual(["collection:tmdb:20", "collection:tmdb:30"]);
+    expect(result.zh.items.map((i) => i.id)).toEqual(["collection:tmdb:30", "collection:tmdb:20"]);
+  });
+
+  it("propagates repository failures instead of returning partial collection success", async () => {
+    const test = await setup(
+      () => Effect.succeed({ Items: [], TotalRecordCount: 0 }),
+      undefined,
+      true,
+    );
+    const result = await test.run(
+      Effect.gen(function* () {
+        const repo = yield* Repositories,
+          identity = yield* Identity;
+        const movie = yield* identity.resolve({
+          serverId: "server-0",
+          catalogNamespace: "catalog:0",
+          verifiedCatalogId: "catalog-id:0",
+          serverGeneration: 1,
+          sourceLibraryId: "movies-0",
+          upstreamItemId: "film",
+          itemType: "Movie",
+          providerIds: { tmdbMovie: "10" },
+          displayMetadata: { Name: "Film" },
+        });
+        const set = (yield* repo.upsertCollection({
+          tmdbCollectionId: "20",
+          metadata: {},
+          observedAtMs: 1000,
+        }))!;
+        yield* repo.replaceTmdbCollectionMembership({
+          sourceItemId: movie.sourceItem.id,
+          tmdbCollectionId: "20",
+          expectedGeneration: 1,
+          observedAtMs: 1000,
+        });
+        return yield* (yield* Collections)
+          .members(set.id, {
+            scope: { virtualLibraryId: null },
+            startIndex: 0,
+            limit: 30,
+            sort: [],
+          })
+          .pipe(Effect.result);
+      }),
+    );
+    expect(result._tag).toBe("Failure");
+    if (result._tag === "Failure") expect(result.failure._tag).toBe("RepositoryError");
+  });
+
+  it("atomically fences competing TMDB identities for the same custom BoxSet", async () => {
+    await setup(() => Effect.succeed({ Items: [], TotalRecordCount: 0 }));
+    const db = new Database(join(directory, "db.sqlite"));
+    let armed = false,
+      reads = 0,
+      release!: () => void;
+    const barrier = new Promise<void>((resolve) => (release = resolve));
+    const repo = makeCollectionRepositories({
+      unsafe: (statement, params = []) =>
+        Effect.tryPromise(async () => {
+          const rows = db.query(statement).all(...(params as any[]));
+          if (armed && statement.startsWith("SELECT cs.collection_id")) {
+            reads++;
+            if (reads === 2) release();
+            await barrier;
+          }
+          return rows as any;
+        }),
+      batch: (commands) =>
+        Effect.sync(() =>
+          db.transaction(() => {
+            for (const c of commands) db.query(c.statement).run(...(c.params as any[]));
+          })(),
+        ),
+    });
+    const source = {
+      serverId: "server-0",
+      catalogNamespace: "catalog:0",
+      serverGeneration: 1,
+      upstreamBoxSetId: "race",
+    };
+    try {
+      const custom = await Effect.runPromise(
+        repo.upsertCollection({
+          tmdbCollectionId: null,
+          source,
+          metadata: { Name: "Custom" },
+          observedAtMs: 1000,
+        }),
+      );
+      armed = true;
+      await Promise.all(
+        ["20", "30"].map((tmdbCollectionId) =>
+          Effect.runPromise(
+            repo.upsertCollection({
+              tmdbCollectionId,
+              source,
+              metadata: { Name: "Linked" },
+              observedAtMs: 2000,
+            }),
+          ),
+        ),
+      );
+      const active = db
+        .query<{ collection_id: string }, []>("SELECT collection_id FROM collection_sources")
+        .get()!.collection_id;
+      const alias = db
+        .query<{ collection_id: string }, [string]>(
+          "SELECT collection_id FROM collection_aliases WHERE alias_id=?",
+        )
+        .get(custom!.id)!;
+      expect(alias.collection_id).toBe(active);
+      expect(
+        db
+          .query<{ count: number }, []>(
+            "SELECT count(*) as count FROM movie_collections WHERE tmdb_collection_id IS NOT NULL",
+          )
+          .get()!.count,
+      ).toBe(1);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("continues BoxSet proof after interruption without losing already proven members", async () => {
+    const calls: string[] = [];
+    let blocked = true;
+    const test = await setup((_server, path) => {
+      const u = new URL(path, "https://test"),
+        parent = u.searchParams.get("ParentId"),
+        id = u.searchParams.get("Ids");
+      calls.push(`${parent}:${id}`);
+      if (parent === "box")
+        return Effect.succeed({
+          Items: [
+            { Id: "one", Type: "Movie", Name: "One" },
+            { Id: "two", Type: "Movie", Name: "Two" },
+          ],
+          TotalRecordCount: 2,
+        });
+      if (id === "two" && blocked) {
+        blocked = false;
+        return Effect.never;
+      }
+      return Effect.succeed({
+        Items: id ? [{ Id: id, Type: "Movie", Name: id }] : [],
+        TotalRecordCount: id ? 1 : 0,
+      });
+    });
+    const output = await test.run(
+      Effect.gen(function* () {
+        const repo = yield* Repositories,
+          identity = yield* Identity;
+        const movie = yield* identity.resolve({
+          serverId: "server-0",
+          catalogNamespace: "catalog:0",
+          verifiedCatalogId: "catalog-id:0",
+          serverGeneration: 1,
+          sourceLibraryId: "movies-0",
+          upstreamItemId: "seed",
+          itemType: "Movie",
+          providerIds: {},
+          displayMetadata: { Name: "Seed" },
+        });
+        const source = {
+          serverId: "server-0",
+          catalogNamespace: "catalog:0",
+          serverGeneration: 1,
+          upstreamBoxSetId: "box",
+        };
+        const set = (yield* repo.upsertCollection({
+          tmdbCollectionId: null,
+          source,
+          metadata: { Name: "Custom" },
+          observedAtMs: 1000,
+        }))!;
+        yield* repo.writeCollectionSnapshot({
+          collectionId: set.id,
+          source,
+          members: [{ canonicalId: movie.canonical.id, sourceItemId: movie.sourceItem.id }],
+          complete: false,
+          observedAtMs: 1000,
+        });
+        const collections = yield* Collections;
+        const q = {
+          scope: { virtualLibraryId: null },
+          startIndex: 0,
+          limit: 30,
+          sort: [],
+        } as const;
+        yield* collections.members(set.id, q).pipe(Effect.timeout(30), Effect.result);
+        const partial = yield* repo.readCollectionMovies(set.id, q.scope);
+        const complete = yield* collections.members(set.id, q);
+        const n = calls.length;
+        yield* collections.members(set.id, q);
+        return { partial, complete, n, final: calls.length };
+      }),
+    );
+    expect(output.partial).toHaveLength(2);
+    expect(output.complete?.totalRecordCount).toBe(2);
+    expect(calls.filter((c) => c === "box:null")).toHaveLength(1);
+    expect(output.final).toBe(output.n);
   });
 
   it("does not scan an empty movie catalog to invent TMDB collections", async () => {

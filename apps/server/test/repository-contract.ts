@@ -167,6 +167,48 @@ export const repositoryContract = (makeHarness: () => Promise<RepositoryHarness>
       );
     });
 
+    it("preserves complete collection queries against late partial writes and expires old queries", async () => {
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const repo = yield* Repositories;
+          const now = Date.now();
+          yield* repo.writeCollectionQuery({
+            queryKey: "complete",
+            ids: ["a", "b"],
+            exhausted: true,
+            incompleteSourceIds: [],
+            expiresAtMs: now + 60000,
+          });
+          yield* repo.writeCollectionQuery({
+            queryKey: "complete",
+            ids: ["a"],
+            exhausted: false,
+            incompleteSourceIds: ["failed"],
+            expiresAtMs: now + 70000,
+          });
+          expect((yield* repo.readCollectionQuery("complete"))?.ids).toEqual(["a", "b"]);
+          yield* repo.writeCollectionQuery({
+            queryKey: "expired",
+            ids: [],
+            exhausted: true,
+            incompleteSourceIds: [],
+            expiresAtMs: now - 1,
+          });
+          expect(yield* repo.readCollectionQuery("expired")).toBeNull();
+          for (let n = 0; n < 510; n++)
+            yield* repo.writeCollectionQuery({
+              queryKey: `bounded-${n}`,
+              ids: [],
+              exhausted: true,
+              incompleteSourceIds: [],
+              expiresAtMs: now + 100000 + n,
+            });
+          expect(yield* repo.readCollectionQuery("bounded-0")).toBeNull();
+          expect(yield* repo.readCollectionQuery("bounded-509")).not.toBeNull();
+        }).pipe(Effect.provide(harness.layer)),
+      );
+    });
+
     it("issues Emby tokens with last-used time and the current auth generation", async () => {
       await Effect.runPromise(
         Effect.gen(function* () {

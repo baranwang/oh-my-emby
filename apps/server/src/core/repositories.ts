@@ -74,6 +74,7 @@ export interface CatalogItemRecord {
 }
 
 export interface StateMembershipLookup {
+  readonly includeWithoutState?: boolean;
   readonly virtualLibraryId: string;
   readonly favorite?: boolean;
   readonly resume?: boolean;

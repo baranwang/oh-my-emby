@@ -1,3 +1,4 @@
+import { ClientLanguage } from "./client-language.js";
 import { Collections, type CollectionFailure } from "./collections.js";
 import type { CollectionView } from "./collection-model.js";
 import { providerIds, sourceItemCandidate as candidate } from "./source-item-candidate.js";
@@ -1753,6 +1754,7 @@ export const makeFederationLayer = (
           const baseKey = canonicalJson({
             query: normalizedQuery(query, searchTerm),
             collectionId: query.collectionId ?? null,
+            clientLanguage: yield* ClientLanguage,
             userId: query.userId,
             deviceId: query.deviceId,
             scope: scope.virtualLibraryId,
@@ -1852,7 +1854,7 @@ export const makeFederationLayer = (
             const revision = yield* repositories.readCollectionRevision();
             const key = `${baseKey}:revision:${revision}`;
             const saved = yield* repositories.readCollectionQuery(key);
-            if (saved && saved.expiresAtMs > now() && saved.exhausted) {
+            if (!stateDependent(query) && saved && saved.expiresAtMs > now() && saved.exhausted) {
               const movieIds = saved.ids.filter((id) => !id.startsWith("collection:"));
               yield* addRecords(yield* readCatalog(movieIds));
               const items = saved.ids.flatMap((id) => (all.get(id) ? [all.get(id)!] : []));
@@ -1871,6 +1873,7 @@ export const makeFederationLayer = (
               for (const library of queryScope) {
                 for (const id of yield* repositories.listStateMemberCanonicalIds({
                   virtualLibraryId: library.id,
+                  includeWithoutState: true,
                   limit: MAX_MATERIALIZED_ITEMS,
                 }))
                   ids.add(id);
@@ -1948,7 +1951,7 @@ export const makeFederationLayer = (
                 maximum: MAX_MATERIALIZED_ITEMS,
               }),
             );
-          if (limit > 0 && !query.collectionId) {
+          if (limit > 0 && !query.collectionId && !stateDependent(query)) {
             const revision = yield* repositories.readCollectionRevision();
             yield* repositories.writeCollectionQuery({
               queryKey: `${baseKey}:revision:${revision}`,
