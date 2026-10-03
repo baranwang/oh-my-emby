@@ -42,9 +42,48 @@ describe("browser cover rendering", () => {
     new DataView(b.buffer).setUint32(20, 50000);
     expect(() => imageDimensions(b)).toThrow();
   });
-  it("uses a dark fallback for grayscale and circular red hue", () => {
-    expect(backgroundFromPixels(new Uint8ClampedArray([100, 100, 100, 255]))).toBe("#243447");
-    expect(backgroundFromPixels(new Uint8ClampedArray([255, 0, 0, 255]))).toBe("hsl(0, 32%, 32%)");
+  it("matches Python red fallback and HLS-to-RGB truncation", () => {
+    expect(backgroundFromPixels(new Uint8ClampedArray([100, 100, 100, 255]))).toBe(
+      "rgb(107, 55, 55)",
+    );
+    expect(backgroundFromPixels(new Uint8ClampedArray([255, 0, 0, 255]))).toBe("rgb(107, 55, 55)");
+  });
+  it.each([
+    {
+      pixels: [
+        [255, 0, 15],
+        [255, 15, 0],
+      ],
+      expected: "rgb(107, 55, 55)",
+    },
+    {
+      pixels: [
+        [255, 255, 0],
+        [255, 255, 0],
+        [0, 0, 255],
+      ],
+      expected: "rgb(107, 107, 55)",
+    },
+    {
+      pixels: [
+        [120, 125, 122],
+        [0, 150, 255],
+      ],
+      expected: "rgb(55, 86, 107)",
+    },
+    {
+      pixels: [
+        [255, 0, 0],
+        [0, 255, 0],
+        [0, 0, 255],
+        [255, 0, 0],
+      ],
+      expected: "rgb(107, 55, 55)",
+    },
+  ])("matches Python colorsys output for $pixels", ({ pixels, expected }) => {
+    expect(
+      backgroundFromPixels(new Uint8ClampedArray(pixels.flatMap((rgb) => [...rgb, 255]))),
+    ).toBe(expected);
   });
   it("fits mixed titles with system font, not downloaded fonts", () => {
     const ctx = { font: "", measureText: (s: string) => ({ width: [...s].length * 200 }) } as any;

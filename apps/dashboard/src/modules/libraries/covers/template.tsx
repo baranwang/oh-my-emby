@@ -4,7 +4,7 @@ export interface CoverRenderInput {
   readonly posters: ReadonlyArray<string>;
   readonly background: string;
 }
-export const orderPosters = (posters: ReadonlyArray<string>): string[] => {
+export const orderPosters = <T,>(posters: ReadonlyArray<T>): T[] => {
   if (!posters.length) throw new Error("No usable posters");
   const filled = Array.from({ length: 9 }, (_, i) => posters[i % posters.length]!);
   return [..."315426987"].map((n) => filled[Number(n) - 1]!);

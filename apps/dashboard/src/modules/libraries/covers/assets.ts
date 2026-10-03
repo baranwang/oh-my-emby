@@ -1,4 +1,5 @@
 import type { LibraryCoverPreparation } from "@oh-my-emby/contracts";
+import { orderPosters } from "./template.js";
 import { loadCoverImage } from "./render.js";
 export class CoverSessionExpired extends Error {
   constructor() {
@@ -56,7 +57,6 @@ export function backgroundFromPixels(pixels: Uint8ClampedArray): string {
     cos = 0,
     weight = 0;
   for (let i = 0; i + 3 < pixels.length; i += 4) {
-    if (pixels[i + 3]! < 128) continue;
     const r = pixels[i]! / 255,
       g = pixels[i + 1]! / 255,
       b = pixels[i + 2]! / 255,
@@ -73,9 +73,22 @@ export function backgroundFromPixels(pixels: Uint8ClampedArray): string {
     cos += Math.cos(h * 2 * Math.PI) * s;
     weight += s;
   }
-  if (!weight) return "#243447";
-  const hue = Math.round(((Math.atan2(sin, cos) * 180) / Math.PI + 360) % 360);
-  return `hsl(${hue % 360}, 32%, 32%)`;
+  // Match get_dominant_hue / hue_to_background_rgb in cover_style.py.
+  let hue = weight ? Math.atan2(sin / weight, cos / weight) / (2 * Math.PI) : 0;
+  if (hue < 0) hue += 1;
+  const lightness = 0.32,
+    saturation = 0.32;
+  const m2 = lightness * (1 + saturation),
+    m1 = 2 * lightness - m2;
+  const channel = (offset: number) => {
+    const h = (((hue + offset) % 1) + 1) % 1;
+    let value = m1;
+    if (h < 1 / 6) value = m1 + (m2 - m1) * h * 6;
+    else if (h < 1 / 2) value = m2;
+    else if (h < 2 / 3) value = m1 + (m2 - m1) * (2 / 3 - h) * 6;
+    return Math.floor(value * 255);
+  };
+  return `rgb(${channel(1 / 3)}, ${channel(0)}, ${channel(-1 / 3)})`;
 }
 const preprocess = async (url: string, signal?: AbortSignal) => {
   if (!url.startsWith("/api/dashboard/libraries/")) throw new Error("Invalid asset URL");
@@ -104,6 +117,8 @@ const preprocess = async (url: string, signal?: AbortSignal) => {
     const data = canvas.toDataURL("image/jpeg", 0.9);
     canvas.width = 100;
     canvas.height = 100;
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
     ctx.drawImage(image, 0, 0, 100, 100);
     return { data, background: backgroundFromPixels(ctx.getImageData(0, 0, 100, 100).data) };
   } finally {
@@ -129,5 +144,5 @@ export async function prepareLibraryCoverAssets(
   }
   signal?.throwIfAborted();
   if (!results.length) throw new Error("No usable posters");
-  return { posters: results.map((x) => x.data), background: results[0]!.background };
+  return { posters: results.map((x) => x.data), background: orderPosters(results)[0]!.background };
 }
