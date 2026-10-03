@@ -155,7 +155,7 @@ export const runWorkerRequest = async (
             );
           }),
         handleEmby: makeEmbyHandler({
-          config: { serverId: "oh-my-emby", serverName: "OhMyEmby", version: "0.0.0" },
+          config: { serverId: "oh-my-emby", serverName: "OhMyEmby", version: "4.10.1.0" },
           now: Date.now,
           auth,
           federation,
