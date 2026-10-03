@@ -1,5 +1,4 @@
 import type { LibraryCoverPreparation } from "@oh-my-emby/contracts";
-import { orderPosters } from "./template.js";
 import { loadCoverImage } from "./render.js";
 export class CoverSessionExpired extends Error {
   constructor() {
@@ -144,5 +143,5 @@ export async function prepareLibraryCoverAssets(
   }
   signal?.throwIfAborted();
   if (!results.length) throw new Error("No usable posters");
-  return { posters: results.map((x) => x.data), background: orderPosters(results)[0]!.background };
+  return { posters: results.map((x) => x.data), background: results[0]!.background };
 }

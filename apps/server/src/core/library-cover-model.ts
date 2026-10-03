@@ -4,7 +4,7 @@ import type { ServerEligibilityFence, VirtualLibrary } from "./model.js";
 export const COVER_WIDTH = 1920,
   COVER_HEIGHT = 1080,
   MAX_COVER_BYTES = 512000,
-  COVER_TEMPLATE_VERSION = "rotated-title-v4";
+  COVER_TEMPLATE_VERSION = "rotated-title-v5";
 export class LibraryCoverValidationFailed extends Schema.TaggedError<LibraryCoverValidationFailed>()(
   "LibraryCoverValidationFailed",
   { message: Schema.String },

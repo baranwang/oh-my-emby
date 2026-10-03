@@ -66,7 +66,7 @@ describe("cover assets", () => {
     await expect(prepareLibraryCoverAssets(preparation)).rejects.toThrow("No usable posters");
     expect(release).not.toHaveBeenCalled();
   });
-  it("takes background color from the first poster after Python's custom ordering", async () => {
+  it("takes background color from poster number one before layout ordering", async () => {
     let number = 0;
     const colors = [
       new Uint8ClampedArray([255, 0, 0, 255]),
@@ -85,6 +85,6 @@ describe("cover assets", () => {
       ...preparation,
       candidates: preparation.candidates.slice(0, 3),
     });
-    expect(result.background).toBe("rgb(55, 55, 107)");
+    expect(result.background).toBe("rgb(107, 55, 55)");
   });
 });
