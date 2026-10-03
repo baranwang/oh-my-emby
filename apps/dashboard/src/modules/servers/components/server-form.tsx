@@ -67,7 +67,7 @@ const userAgentPresets = [
   "Rex-Standard/0.5.0",
   "SenPlayer/6.2.2",
   "VidHub/3.0.0",
-];
+] as const;
 const emptyEndpoint = (): ServerEndpointInput => ({
   protocol: "http",
   host: "",
@@ -133,7 +133,7 @@ export const ServerForm = ({
     username: server?.username ?? "",
     password: preservePassword,
     userAgentPolicy: server?.userAgentPolicy ?? "client-preferred",
-    userAgent: server ? server.userAgent : m.server_default_user_agent(),
+    userAgent: server ? server.userAgent : userAgentPresets[0],
     enabled: server?.enabled ?? true,
   };
   const form = useForm({
@@ -585,7 +585,7 @@ export const ServerForm = ({
                 policyField.handleChange(policy);
                 if (policy === "passthrough") form.setFieldValue("userAgent", null);
                 if (policy === "fixed" && form.state.values.userAgent === null) {
-                  form.setFieldValue("userAgent", m.server_default_user_agent());
+                  form.setFieldValue("userAgent", userAgentPresets[0]);
                 }
               }}
             >

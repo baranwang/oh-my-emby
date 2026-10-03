@@ -320,7 +320,7 @@ describe("server User-Agent policy", () => {
     await change(byLabel(container, m.server_user_agent_fallback_value()) as HTMLInputElement, "");
     await click(byLabel(container, m.server_user_agent_fixed()));
     const input = byLabel(container, m.server_user_agent_fixed_value()) as HTMLInputElement;
-    expect(input.value).toBe(m.server_default_user_agent());
+    expect(input.value).toBe("Infuse-Direct/8.5.6");
     await act(async () => {
       input.focus();
       input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
@@ -436,7 +436,9 @@ describe("server credentials and failures", () => {
     await change(byLabel(container, m.server_password()) as HTMLInputElement, "secret");
     await click(byButton(container, m.save()));
 
-    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({ name: "" }));
+    expect(onSave).toHaveBeenCalledWith(
+      expect.objectContaining({ name: "", userAgent: "Infuse-Direct/8.5.6" }),
+    );
   });
 
   it("opts upstream credentials out of autofill without treating them as dashboard login fields", async () => {
