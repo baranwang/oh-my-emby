@@ -13,6 +13,7 @@ import {
 } from "./repository-contract.js";
 
 const tables = [
+  "collection_query_snapshots",
   "collection_members",
   "collection_membership_updates",
   "collection_sources",
@@ -1332,6 +1333,7 @@ it("keeps Wrangler and application migration bookkeeping separate", async () => 
       { version: 4, name: "drivemby_compat" },
       { version: 5, name: "metadata_artwork_languages" },
       { version: 6, name: "movie_collections" },
+      { version: 7, name: "collection_query_snapshots" },
     ],
   });
 });

@@ -1,3 +1,4 @@
+import { makeCollectionsLayer } from "../src/core/collections.js";
 import { Database } from "bun:sqlite";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -29,6 +30,13 @@ import { makeSqliteRepositoriesLayer } from "../src/platform/bun/sqlite-reposito
 const migration = [
   await Bun.file(new URL("../migrations/0001_initial.sql", import.meta.url)).text(),
   await Bun.file(new URL("../migrations/0002_dashboard_alignment.sql", import.meta.url)).text(),
+  await Bun.file(
+    new URL("../migrations/0005_metadata_artwork_languages.sql", import.meta.url),
+  ).text(),
+  await Bun.file(new URL("../migrations/0006_movie_collections.sql", import.meta.url)).text(),
+  await Bun.file(
+    new URL("../migrations/0007_collection_query_snapshots.sql", import.meta.url),
+  ).text(),
 ].join("\n");
 
 const server = (index: number): UpstreamServer => ({
@@ -186,7 +194,11 @@ describe("Federation", () => {
       ),
     );
     const dependencies = Layer.mergeAll(repositories, identity, upstream, metadataProviders);
-    return makeFederationLayer(options).pipe(Layer.provide(dependencies));
+    return makeFederationLayer(options).pipe(
+      Layer.provide(
+        Layer.merge(dependencies, makeCollectionsLayer().pipe(Layer.provide(dependencies))),
+      ),
+    );
   };
 
   it.each([{}, { Imdb: "tt1234567" }])(

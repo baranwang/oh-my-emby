@@ -157,6 +157,7 @@ export const makeCollectionsLayer = (): Layer.Layer<
       const view = (
         record: CollectionRecord,
         scope: CollectionScope,
+        cachedOnly = false,
       ): Effect.Effect<CollectionView | null, RepositoryError> =>
         Effect.gen(function* () {
           if (!(yield* allowedRecord(record, scope))) return null;
@@ -165,7 +166,7 @@ export const makeCollectionsLayer = (): Layer.Layer<
           const rawSources = yield* repo.readCollectionSources(record.id, scope);
           const external =
             record.tmdbCollectionId && (yield* tmdbEnabled())
-              ? yield* metadata.readTmdbCollection(record.tmdbCollectionId)
+              ? yield* metadata.readTmdbCollection(record.tmdbCollectionId, cachedOnly)
               : null;
           const fallback = object(rawSources[0]?.metadata ?? record.displayMetadata);
           return {
@@ -382,10 +383,12 @@ export const makeCollectionsLayer = (): Layer.Layer<
       const list: CollectionsApi["list"] = (query) =>
         Effect.gen(function* () {
           const incomplete =
-            query.limit > 0 ? yield* discover(query.scope, query.clientUserAgent) : [];
+            query.limit > 0 && query.discover !== false
+              ? yield* discover(query.scope, query.clientUserAgent)
+              : [];
           const records = yield* repo.listVisibleCollections(yield* evidenceScope(query.scope));
           const views = (yield* Effect.forEach(records, (record) =>
-            view(record, query.scope),
+            view(record, query.scope, true),
           )).filter((v): v is CollectionView => v !== null);
           const filtered = views.filter(
             (v) =>

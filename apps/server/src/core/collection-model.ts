@@ -49,6 +49,7 @@ export interface TmdbCollectionPayload {
   readonly ExternalArtworkLanguage?: string;
 }
 export interface CollectionQuery {
+  readonly discover?: boolean;
   readonly scope: CollectionScope;
   readonly startIndex: number;
   readonly limit: number;
@@ -62,7 +63,21 @@ export interface CollectionPage<A> {
   readonly exhausted: boolean;
   readonly incompleteSourceIds: ReadonlyArray<string>;
 }
+export interface CollectionQuerySnapshot {
+  readonly queryKey: string;
+  readonly ids: ReadonlyArray<string>;
+  readonly incompleteSourceIds: ReadonlyArray<string>;
+  readonly exhausted: boolean;
+  readonly expiresAtMs: number;
+}
 export interface CollectionRepositories {
+  readonly readCollectionQuery: (
+    queryKey: string,
+  ) => Effect.Effect<CollectionQuerySnapshot | null, RepositoryError>;
+  readonly writeCollectionQuery: (
+    snapshot: CollectionQuerySnapshot,
+  ) => Effect.Effect<void, RepositoryError>;
+
   readonly upsertCollection: (input: {
     tmdbCollectionId: string | null;
     source?: CollectionSource;

@@ -1,3 +1,4 @@
+import { makeCollectionsLayer } from "../src/core/collections.js";
 import { Effect, Layer, Schema } from "effect";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
@@ -238,7 +239,11 @@ const prepareFederation = async (app: AcceptanceApp) => {
     }),
   );
   const dependencies = Layer.mergeAll(app.repositories, identity, upstream, metadataProviders);
-  const federation = makeFederationLayer().pipe(Layer.provide(dependencies));
+  const federation = makeFederationLayer().pipe(
+    Layer.provide(
+      Layer.merge(dependencies, makeCollectionsLayer().pipe(Layer.provide(dependencies))),
+    ),
+  );
   const layer = Layer.mergeAll(dependencies, federation);
   const query = {
     userId: "owner",
@@ -721,6 +726,7 @@ export const crossPlatformAcceptance = (name: "workers" | "docker", harness: Acc
           "drivemby_compat",
           "metadata_artwork_languages",
           "movie_collections",
+          "collection_query_snapshots",
         ],
         enabledEncoding: 1,
       });

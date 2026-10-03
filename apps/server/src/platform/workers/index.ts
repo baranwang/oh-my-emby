@@ -1,3 +1,4 @@
+import { makeCollectionsLayer } from "../../core/collections.js";
 import { DashboardApi } from "@oh-my-emby/contracts";
 import { Effect, Layer, Option } from "effect";
 import * as HttpRouter from "effect/http/HttpRouter";
@@ -59,7 +60,10 @@ export const makeWorkersCoreLayer = (
     fetch: dependencies.upstreamFetch ?? fetch,
   }).pipe(Layer.provide(repositories));
   const foundation = Layer.mergeAll(repositories, upstream, identity, metadataProviders);
-  const federation = makeFederationLayer().pipe(Layer.provide(foundation));
+  const collections = makeCollectionsLayer().pipe(Layer.provide(foundation));
+  const federation = makeFederationLayer().pipe(
+    Layer.provide(Layer.merge(foundation, collections)),
+  );
   const auth = makeAuthLayer().pipe(Layer.provide(repositories));
   const userState = makeUserStateLayer().pipe(Layer.provide(repositories));
   const serverService = makeServerServiceLayer.pipe(Layer.provide(foundation));
@@ -71,6 +75,7 @@ export const makeWorkersCoreLayer = (
   const outbox = makeOutboxLayer().pipe(Layer.provide(foundation));
   return Layer.mergeAll(
     foundation,
+    collections,
     federation,
     auth,
     userState,

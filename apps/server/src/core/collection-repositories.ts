@@ -122,11 +122,10 @@ export const makeCollectionRepositories = (sql: CollectionSql): CollectionReposi
           old?.tmdb_collection_id &&
           input.tmdbCollectionId &&
           old.tmdb_collection_id !== input.tmdbCollectionId;
-        const id = conflict
-          ? old!.collection_id
-          : input.tmdbCollectionId
-            ? tmdbId(input.tmdbCollectionId)
-            : (old?.collection_id ?? sourceCollectionId(source!));
+        let id = input.tmdbCollectionId
+          ? tmdbId(input.tmdbCollectionId)
+          : (old?.collection_id ?? sourceCollectionId(source!));
+        if (conflict) id = old!.collection_id;
         const guard = source ? fence : "1=1",
           gp = source ? fenceParams(source) : [];
         const commands: Command[] = [
@@ -318,6 +317,27 @@ export const makeCollectionRepositories = (sql: CollectionSql): CollectionReposi
       }),
     );
   return {
+    readCollectionQuery: (queryKey) =>
+      run(
+        "readCollectionQuery",
+        Effect.map(
+          sql.unsafe<{ payload_json: string }>(
+            "SELECT payload_json FROM collection_query_snapshots WHERE query_key=?",
+            [queryKey],
+          ),
+          (rows) => (rows[0] ? JSON.parse(rows[0].payload_json) : null),
+        ),
+      ),
+    writeCollectionQuery: (snapshot) =>
+      run(
+        "writeCollectionQuery",
+        Effect.asVoid(
+          sql.unsafe(
+            "INSERT INTO collection_query_snapshots(query_key,payload_json,expires_at_ms) VALUES(?,?,?) ON CONFLICT(query_key) DO UPDATE SET payload_json=excluded.payload_json,expires_at_ms=excluded.expires_at_ms",
+            [snapshot.queryKey, JSON.stringify(snapshot), snapshot.expiresAtMs],
+          ),
+        ),
+      ),
     upsertCollection,
     replaceTmdbCollectionMembership,
     writeCollectionSnapshot,

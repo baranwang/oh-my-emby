@@ -1,3 +1,5 @@
+import { Collections, type CollectionFailure } from "./collections.js";
+import type { CollectionView } from "./collection-model.js";
 import { providerIds, sourceItemCandidate as candidate } from "./source-item-candidate.js";
 import { Context, Effect, Layer, Result, Schema } from "effect";
 
@@ -46,6 +48,7 @@ export interface CatalogFilter {
 }
 
 export interface FederatedQuery {
+  readonly collectionId?: string;
   readonly userId: string;
   readonly deviceId: string;
   readonly virtualLibraryId: string | null;
@@ -64,6 +67,7 @@ export interface SearchQuery extends FederatedQuery {
 }
 
 export interface CanonicalItemView {
+  readonly collection?: { readonly childCount: number };
   readonly id: string;
   readonly itemType: string;
   readonly displayMetadata: JsonValue;
@@ -122,9 +126,11 @@ export type FederationFailure =
   | FederationLimitExceeded
   | FederationUnavailable
   | IdentityFailure
-  | RepositoryError;
+  | RepositoryError
+  | CollectionFailure;
 
 export interface FederationService {
+  readonly collectionsAvailable: () => Effect.Effect<boolean, FederationFailure>;
   readonly counts: (
     clientUserAgent?: string,
   ) => Effect.Effect<FederatedItemCounts, FederationFailure>;
@@ -370,7 +376,9 @@ const sortValues = (
   return sort.map(({ field }) => {
     if (field === "DatePlayed") return record.userState?.updatedAtMs ?? null;
     if (field === "IsFavoriteOrLiked") return record.userState?.favorite ? 1 : 0;
-    return jsonObject(metadata) ? (metadata[field] ?? null) : null;
+    if (!jsonObject(metadata)) return null;
+    if (field === "SortName") return metadata.SortName ?? metadata.Name ?? null;
+    return metadata[field] ?? null;
   });
 };
 
@@ -493,7 +501,11 @@ const view = (
 
 export const makeFederationLayer = (
   config: FederationConfig = {},
-): Layer.Layer<Federation, never, Repositories | Identity | MetadataProviders | UpstreamClient> =>
+): Layer.Layer<
+  Federation,
+  never,
+  Repositories | Identity | MetadataProviders | UpstreamClient | Collections
+> =>
   Layer.effect(
     Federation,
     Effect.gen(function* () {
@@ -501,6 +513,7 @@ export const makeFederationLayer = (
       const identity = yield* Identity;
       const metadataProviders = yield* MetadataProviders;
       const upstream = yield* UpstreamClient;
+      const collections = yield* Collections;
       const now = config.now ?? Date.now;
       const listDeadlineMs = config.listDeadlineMs ?? UPSTREAM_LIST_DEADLINE_MS;
       const detailDeadlineMs = config.detailDeadlineMs ?? UPSTREAM_DETAIL_DEADLINE_MS;
@@ -1704,12 +1717,275 @@ export const makeFederationLayer = (
           };
         });
 
+      const collectionView = (item: CollectionView): CanonicalItemView => ({
+        id: item.id,
+        itemType: "BoxSet",
+        displayMetadata: {
+          ...(jsonObject(item.displayMetadata) ? item.displayMetadata : {}),
+          IsFolder: true,
+          ChildCount: item.childCount,
+        },
+        mediaVersions: [],
+        userState: null,
+        incompleteSourceIds: item.incompleteSourceIds,
+        collection: { childCount: item.childCount },
+      });
+      const listWithCollections = (
+        query: FederatedQuery,
+        searchTerm?: string,
+      ): Effect.Effect<FederatedPage, FederationFailure> =>
+        Effect.gen(function* () {
+          if (!query.collectionId && !query.itemTypes.includes("BoxSet"))
+            return yield* list(query, searchTerm);
+          const startIndex = Math.max(0, query.startIndex),
+            limit = Math.max(0, Math.min(MAX_PAGE_SIZE, query.limit));
+          if (startIndex + limit > MAX_MATERIALIZED_ITEMS)
+            return yield* Effect.fail(
+              new FederationLimitExceeded({
+                requestedEnd: startIndex + limit,
+                maximum: MAX_MATERIALIZED_ITEMS,
+              }),
+            );
+          const scope = { virtualLibraryId: query.virtualLibraryId };
+          const queryScope = yield* scopedLibraries(query),
+            participation = yield* scopedSources(queryScope);
+          const settings = yield* repositories.readMetadataSettings();
+          const baseKey = canonicalJson({
+            query: normalizedQuery(query, searchTerm),
+            collectionId: query.collectionId ?? null,
+            userId: query.userId,
+            deviceId: query.deviceId,
+            scope: scope.virtualLibraryId,
+            settings: settings.map((s) => [s.id, s.enabled, s.updatedAtMs]),
+            sources: participation.map((s) => [s.serverId, s.serverGeneration, s.sourceLibraryId]),
+          });
+          const all = new Map<string, CanonicalItemView>(),
+            incomplete = new Set<string>();
+          let exhausted = true;
+          const addRecords = (records: ReadonlyArray<CatalogItemRecord>) =>
+            Effect.gen(function* () {
+              for (const record of records) {
+                if (
+                  !record.sourceItems.some(
+                    (si) =>
+                      si.quarantineReason === null &&
+                      participation.some(
+                        (s) =>
+                          s.serverId === si.serverId &&
+                          s.serverGeneration === si.serverGeneration &&
+                          s.sourceLibraryId === si.sourceLibraryId,
+                      ),
+                  )
+                )
+                  continue;
+                if (
+                  !matchesFilters(record, query.filters) ||
+                  !matchesItemTypes(
+                    record,
+                    query.itemTypes.filter((t) => t !== "BoxSet"),
+                  )
+                )
+                  continue;
+                if (
+                  searchTerm &&
+                  (!jsonObject(record.canonical.displayMetadata) ||
+                    !String(record.canonical.displayMetadata.Name ?? "")
+                      .toLocaleLowerCase()
+                      .includes(searchTerm.toLocaleLowerCase()))
+                )
+                  continue;
+                all.set(
+                  record.canonical.id,
+                  view(yield* metadataProviders.overlayCached(record), []),
+                );
+              }
+            });
+          if (query.collectionId) {
+            if (query.itemTypes.length > 0 && !query.itemTypes.includes("Movie"))
+              return { items: [], totalRecordCount: 0, exhausted: true, incompleteSourceIds: [] };
+            const memberPage = yield* collections.members(query.collectionId, {
+              scope,
+              startIndex: 0,
+              limit: limit === 0 ? 0 : MAX_PAGE_SIZE,
+              sort: query.sort,
+              ...(query.clientUserAgent ? { clientUserAgent: query.clientUserAgent } : {}),
+            });
+            if (!memberPage)
+              return { items: [], totalRecordCount: 0, exhausted: true, incompleteSourceIds: [] };
+            const records = yield* repositories.readCollectionMovies(query.collectionId, {
+              ...scope,
+              includeTmdb: settings.some(
+                (s) => s.id === "tmdb" && s.enabled && s.credential !== null,
+              ),
+            });
+            yield* addRecords(yield* readCatalog(records.map((r) => r.canonicalId)));
+            memberPage.incompleteSourceIds.forEach((id) => incomplete.add(id));
+            exhausted = memberPage.exhausted;
+          } else {
+            // Discover BoxSets first; subsequent pages render cached metadata only.
+            for (let offset = 0; offset < MAX_MATERIALIZED_ITEMS; offset += MAX_PAGE_SIZE) {
+              const boxes = yield* collections.list({
+                scope,
+                startIndex: offset,
+                limit: MAX_PAGE_SIZE,
+                discover: limit > 0,
+                sort: query.sort,
+                ...(searchTerm ? { searchTerm } : {}),
+                ...(query.clientUserAgent ? { clientUserAgent: query.clientUserAgent } : {}),
+              });
+              for (const box of boxes.items) {
+                const item = collectionView(box);
+                const pseudo = {
+                  canonical: {
+                    id: item.id,
+                    itemType: "BoxSet",
+                    displayMetadata: item.displayMetadata,
+                  },
+                  userState: null,
+                } as CatalogItemRecord;
+                if (matchesFilters(pseudo, query.filters)) all.set(item.id, item);
+              }
+              boxes.incompleteSourceIds.forEach((id) => incomplete.add(id));
+              exhausted = exhausted && boxes.exhausted;
+              if (offset + MAX_PAGE_SIZE >= boxes.totalRecordCount) break;
+            }
+            const revision = yield* repositories.readCollectionRevision();
+            const key = `${baseKey}:revision:${revision}`;
+            const saved = yield* repositories.readCollectionQuery(key);
+            if (saved && saved.expiresAtMs > now() && saved.exhausted) {
+              const movieIds = saved.ids.filter((id) => !id.startsWith("collection:"));
+              yield* addRecords(yield* readCatalog(movieIds));
+              const items = saved.ids.flatMap((id) => (all.get(id) ? [all.get(id)!] : []));
+              return {
+                items: items.slice(startIndex, startIndex + limit),
+                totalRecordCount: items.length,
+                exhausted: saved.exhausted,
+                incompleteSourceIds: saved.incompleteSourceIds,
+              };
+            }
+            if (
+              limit === 0 &&
+              query.itemTypes.some((t) => t !== "BoxSet" && supportedItemTypes.includes(t))
+            ) {
+              const ids = new Set<string>();
+              for (const library of queryScope) {
+                for (const id of yield* repositories.listStateMemberCanonicalIds({
+                  virtualLibraryId: library.id,
+                  limit: MAX_MATERIALIZED_ITEMS,
+                }))
+                  ids.add(id);
+              }
+              yield* addRecords(yield* readCatalog([...ids]));
+              exhausted = false;
+            }
+            if (
+              query.itemTypes.some((t) => t !== "BoxSet" && supportedItemTypes.includes(t)) &&
+              limit > 0
+            ) {
+              const scan = Effect.gen(function* () {
+                for (let offset = 0; offset < MAX_MATERIALIZED_ITEMS; offset += MAX_PAGE_SIZE) {
+                  const movies = yield* list(
+                    {
+                      ...query,
+                      itemTypes: query.itemTypes.filter((t) => t !== "BoxSet"),
+                      startIndex: offset,
+                      limit: MAX_PAGE_SIZE,
+                    },
+                    searchTerm,
+                  );
+                  movies.items.forEach((movie) => all.set(movie.id, movie));
+                  movies.incompleteSourceIds.forEach((id) => incomplete.add(id));
+                  if (movies.exhausted && offset + movies.items.length >= movies.totalRecordCount)
+                    break;
+                  if (movies.items.length === 0) {
+                    exhausted = movies.exhausted;
+                    break;
+                  }
+                  if (offset + MAX_PAGE_SIZE >= MAX_MATERIALIZED_ITEMS) exhausted = false;
+                }
+              }).pipe(
+                Effect.timeout(listDeadlineMs),
+                Effect.catchTag("TimeoutError", () =>
+                  Effect.sync(() => {
+                    exhausted = false;
+                    participation.forEach((s) => incomplete.add(s.serverId));
+                  }),
+                ),
+              );
+              yield* scan;
+            }
+          }
+          const items = [...all.values()];
+          items.sort((a, b) =>
+            compareBuffered(
+              {
+                canonicalId: a.id,
+                sortValues: sortValues(
+                  {
+                    canonical: { displayMetadata: a.displayMetadata },
+                    userState: a.userState,
+                  } as CatalogItemRecord,
+                  query.sort,
+                ),
+              },
+              {
+                canonicalId: b.id,
+                sortValues: sortValues(
+                  {
+                    canonical: { displayMetadata: b.displayMetadata },
+                    userState: b.userState,
+                  } as CatalogItemRecord,
+                  query.sort,
+                ),
+              },
+              query.sort,
+            ),
+          );
+          if (items.length > MAX_MATERIALIZED_ITEMS)
+            return yield* Effect.fail(
+              new FederationLimitExceeded({
+                requestedEnd: items.length,
+                maximum: MAX_MATERIALIZED_ITEMS,
+              }),
+            );
+          if (limit > 0 && !query.collectionId) {
+            const revision = yield* repositories.readCollectionRevision();
+            yield* repositories.writeCollectionQuery({
+              queryKey: `${baseKey}:revision:${revision}`,
+              ids: items.map((i) => i.id),
+              exhausted: exhausted && incomplete.size === 0,
+              incompleteSourceIds: [...incomplete],
+              expiresAtMs: now() + QUERY_GENERATION_TTL_MS,
+            });
+          }
+          return {
+            items: items.slice(startIndex, startIndex + limit),
+            totalRecordCount: items.length,
+            exhausted: exhausted && incomplete.size === 0,
+            incompleteSourceIds: [...incomplete],
+          };
+        });
       return Federation.of({
         counts,
-        list: (query) => list(query),
-        search: (query) => list(query, query.searchTerm),
+        collectionsAvailable: () =>
+          Effect.map(
+            collections.list({
+              scope: { virtualLibraryId: null },
+              startIndex: 0,
+              limit: 1,
+              sort: [],
+            }),
+            (page) => page.totalRecordCount > 0,
+          ),
+        list: (query) => listWithCollections(query),
+        search: (query) => listWithCollections(query, query.searchTerm),
         studios,
-        detail: enrichVersions,
+        detail: (id, ua) =>
+          id.startsWith("collection:")
+            ? Effect.map(collections.detail(id, { virtualLibraryId: null }, ua), (result) =>
+                result ? collectionView(result) : null,
+              )
+            : enrichVersions(id, ua),
         lookupMembership,
         enrichVersions,
         showChildren,

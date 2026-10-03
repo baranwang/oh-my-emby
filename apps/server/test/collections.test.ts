@@ -1,3 +1,4 @@
+import { Federation, makeFederationLayer } from "../src/core/federation.js";
 import { UpstreamNotFound, UpstreamTimeout } from "../src/core/errors.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -112,7 +113,7 @@ describe("Collections", () => {
       MetadataProviders,
       MetadataProviders.of({
         readTmdbCollection: () =>
-          Effect.succeed({ id: "20", Name: "Set", movieIds: ["10", "11", "12"] }),
+          Effect.succeed({ id: "20", Name: "A Set", movieIds: ["10", "11", "12"] }),
         refresh: (r: any) => Effect.succeed(r),
         overlayCached: (r: any) => Effect.succeed(r),
       } as any),
@@ -126,7 +127,17 @@ describe("Collections", () => {
     const collections = makeCollectionsLayer().pipe(Layer.provide(deps));
     return {
       run: <A>(effect: Effect.Effect<A, any, any>) =>
-        Effect.runPromise(effect.pipe(Effect.provide(Layer.mergeAll(deps, collections)))),
+        Effect.runPromise(
+          effect.pipe(
+            Effect.provide(
+              Layer.mergeAll(
+                deps,
+                collections,
+                makeFederationLayer().pipe(Layer.provide(Layer.merge(deps, collections))),
+              ),
+            ),
+          ),
+        ),
     };
   };
   it("resolves only accessible TMDB parts and preserves two upstream versions of one movie", async () => {
@@ -334,6 +345,55 @@ describe("Collections", () => {
       }),
     );
     expect(page.items).toHaveLength(2);
+  });
+
+  it("paginates BoxSets and movies as one sorted federated result", async () => {
+    const test = await setup((_serverId, path) => {
+      const url = new URL(path, "https://test");
+      if (url.searchParams.get("IncludeItemTypes") === "BoxSet")
+        return Effect.succeed({
+          Items: [{ Id: "box", Type: "BoxSet", Name: "A Set", ProviderIds: { Tmdb: "20" } }],
+          TotalRecordCount: 1,
+        });
+      return Effect.succeed({
+        Items: [
+          {
+            Id: "film",
+            Type: "Movie",
+            Name: "B Film",
+            ProviderIds: { Tmdb: "10" },
+            MediaSources: [{ Id: "media", Container: "mkv" }],
+          },
+        ],
+        TotalRecordCount: 1,
+      });
+    });
+    const query = {
+      userId: "owner",
+      deviceId: "device",
+      virtualLibraryId: "movies",
+      startIndex: 0,
+      limit: 1,
+      sort: [{ field: "Name", direction: "Ascending" }],
+      filters: [],
+      itemTypes: ["Movie", "BoxSet"],
+    } as const;
+    const result = await test.run(
+      Effect.gen(function* () {
+        const federation = yield* Federation;
+        const first = yield* federation.list(query);
+        const second = yield* federation.list({ ...query, startIndex: 1 });
+        const boxes = yield* federation.list({ ...query, itemTypes: ["BoxSet"], limit: 30 });
+        const zero = yield* federation.list({ ...query, itemTypes: ["BoxSet"], limit: 0 });
+        return { first, second, boxes, zero };
+      }),
+    );
+    expect(result.zero.items).toEqual([]);
+    expect(result.zero.totalRecordCount).toBe(1);
+    expect(result.boxes.items).toHaveLength(1);
+    expect(result.first.items[0]?.itemType).toBe("BoxSet");
+    expect(result.second.items[0]?.itemType).toBe("Movie");
+    expect(result.first.totalRecordCount).toBe(2);
   });
 
   it("does not scan an empty movie catalog to invent TMDB collections", async () => {

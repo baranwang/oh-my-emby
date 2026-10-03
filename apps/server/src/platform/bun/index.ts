@@ -1,3 +1,4 @@
+import { makeCollectionsLayer } from "../../core/collections.js";
 import { BunRuntime as EffectBunRuntime } from "@effect/platform-bun";
 import { dirname, join, resolve } from "node:path";
 import { mkdir } from "node:fs/promises";
@@ -106,7 +107,10 @@ const makeBunCoreLayer = (config: BunRuntimeConfig) => {
     fetch: config.upstreamFetch ?? fetch,
   }).pipe(Layer.provide(repositories));
   const foundation = Layer.mergeAll(repositories, upstream, identity, metadataProviders);
-  const federation = makeFederationLayer().pipe(Layer.provide(foundation));
+  const collections = makeCollectionsLayer().pipe(Layer.provide(foundation));
+  const federation = makeFederationLayer().pipe(
+    Layer.provide(Layer.merge(foundation, collections)),
+  );
   const auth = makeAuthLayer().pipe(Layer.provide(repositories));
   const userState = makeUserStateLayer().pipe(Layer.provide(repositories));
   const serverService = makeServerServiceLayer.pipe(Layer.provide(foundation));
@@ -119,6 +123,7 @@ const makeBunCoreLayer = (config: BunRuntimeConfig) => {
   const outbox = makeOutboxLayer().pipe(Layer.provide(foundation));
   return Layer.mergeAll(
     foundation,
+    collections,
     federation,
     auth,
     userState,

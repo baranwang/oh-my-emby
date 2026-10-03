@@ -24,6 +24,9 @@ const collectionMigration = await Bun.file(
   new URL("../migrations/0006_movie_collections.sql", import.meta.url),
 ).text();
 
+const awaitedSnapshotMigration = await Bun.file(
+  new URL("../migrations/0007_collection_query_snapshots.sql", import.meta.url),
+).text();
 const withDatabase = <A>(filename: string, use: (database: Database) => A): A => {
   const database = new Database(filename);
   try {
@@ -42,6 +45,7 @@ const makeHarness = async (): Promise<RepositoryHarness> => {
     database.exec(alignmentMigration);
     database.exec(artworkMigration);
     database.exec(collectionMigration);
+    database.exec(awaitedSnapshotMigration);
   });
 
   return {

@@ -45,6 +45,7 @@ export class MetadataProviderFailure extends Schema.TaggedError<MetadataProvider
 export interface MetadataProvidersApi {
   readonly readTmdbCollection: (
     id: string,
+    cachedOnly?: boolean,
   ) => Effect.Effect<TmdbCollectionPayload | null, import("./errors.js").RepositoryError>;
   readonly refresh: (
     record: CatalogItemRecord,
@@ -152,34 +153,30 @@ const collectionFields = (
   value: unknown,
 ): Pick<ExternalMetadataPayload, "TmdbMovieId" | "TmdbCollectionId"> => {
   if (!object(value)) return {};
-  return {
-    ...(typeof value.id === "number" && Number.isSafeInteger(value.id) && value.id > 0
-      ? { TmdbMovieId: String(value.id) }
-      : {}),
-    ...(value.belongs_to_collection === null
-      ? { TmdbCollectionId: null }
-      : object(value.belongs_to_collection) &&
-          typeof value.belongs_to_collection.id === "number" &&
-          Number.isSafeInteger(value.belongs_to_collection.id) &&
-          value.belongs_to_collection.id > 0
-        ? { TmdbCollectionId: String(value.belongs_to_collection.id) }
-        : {}),
-  };
+  const fields: { TmdbMovieId?: string; TmdbCollectionId?: string | null } = {};
+  if (typeof value.id === "number" && Number.isSafeInteger(value.id) && value.id > 0)
+    fields.TmdbMovieId = String(value.id);
+  if (value.belongs_to_collection === null) fields.TmdbCollectionId = null;
+  else if (
+    object(value.belongs_to_collection) &&
+    typeof value.belongs_to_collection.id === "number" &&
+    Number.isSafeInteger(value.belongs_to_collection.id) &&
+    value.belongs_to_collection.id > 0
+  )
+    fields.TmdbCollectionId = String(value.belongs_to_collection.id);
+  return fields;
 };
 const cachedCollectionFields = (
   value: unknown,
 ): Pick<ExternalMetadataPayload, "TmdbMovieId" | "TmdbCollectionId"> => {
   if (!object(value)) return {};
-  return {
-    ...(typeof value.TmdbMovieId === "string" && /^[1-9]\d*$/.test(value.TmdbMovieId)
-      ? { TmdbMovieId: value.TmdbMovieId }
-      : {}),
-    ...(value.TmdbCollectionId === null
-      ? { TmdbCollectionId: null }
-      : typeof value.TmdbCollectionId === "string" && /^[1-9]\d*$/.test(value.TmdbCollectionId)
-        ? { TmdbCollectionId: value.TmdbCollectionId }
-        : {}),
-  };
+  const fields: { TmdbMovieId?: string; TmdbCollectionId?: string | null } = {};
+  if (typeof value.TmdbMovieId === "string" && /^[1-9]\d*$/.test(value.TmdbMovieId))
+    fields.TmdbMovieId = value.TmdbMovieId;
+  if (value.TmdbCollectionId === null) fields.TmdbCollectionId = null;
+  else if (typeof value.TmdbCollectionId === "string" && /^[1-9]\d*$/.test(value.TmdbCollectionId))
+    fields.TmdbCollectionId = value.TmdbCollectionId;
+  return fields;
 };
 const tmdbPayload = (value: unknown, itemType: string): ExternalMetadataPayload | null => {
   if (!object(value)) throw new TypeError("invalid TMDB response");
@@ -675,10 +672,14 @@ export const makeMetadataProvidersLayer = (
             record.sourceItems.length === 0
           )
             return;
+          const collection =
+            value.TmdbCollectionId !== null
+              ? yield* readTmdbCollection(value.TmdbCollectionId)
+              : null;
           if (value.TmdbCollectionId !== null)
             yield* repositories.upsertCollection({
               tmdbCollectionId: value.TmdbCollectionId,
-              metadata: {},
+              metadata: (collection as unknown as JsonValue) ?? {},
               observedAtMs,
             });
           for (const source of record.sourceItems)
@@ -785,7 +786,10 @@ export const makeMetadataProvidersLayer = (
         });
 
       const collectionLocks = new Map<string, ReturnType<typeof Semaphore.makeUnsafe>>();
-      const readTmdbCollection: MetadataProvidersApi["readTmdbCollection"] = (id) =>
+      const readTmdbCollection: MetadataProvidersApi["readTmdbCollection"] = (
+        id,
+        cachedOnly = false,
+      ) =>
         Effect.gen(function* () {
           if (!/^[1-9]\d*$/.test(id)) return null;
           const setting = (yield* configured()).find((setting) => setting.id === "tmdb");
@@ -801,6 +805,8 @@ export const makeMetadataProvidersLayer = (
               if (fresh)
                 return fresh.found ? (fresh.payload as unknown as TmdbCollectionPayload) : null;
               const stale = yield* readCached(setting, key, false);
+              if (cachedOnly)
+                return stale?.found ? (stale.payload as unknown as TmdbCollectionPayload) : null;
               const url = new URL(`https://api.themoviedb.org/3/collection/${id}`);
               url.searchParams.set("language", language);
               const result = yield* requestJson(
