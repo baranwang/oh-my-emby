@@ -1,3 +1,4 @@
+import { useLibraryCovers } from "./hooks/use-library-covers";
 import { Button } from "@/components/ui/button";
 import {
   Drawer,
@@ -35,6 +36,7 @@ export const LibrariesPage = ({
   onClose,
 }: LibrariesPageProps) => {
   const libraries = useLibraries();
+  const covers = useLibraryCovers(libraries.data ?? []);
   const servers = useServers();
   const groups = useSourceLibraryGroups(servers.data ?? [], creating);
   const create = useCreateLibrary();
@@ -45,7 +47,14 @@ export const LibrariesPage = ({
 
   const renderDrawerContent = () => {
     if (!creating) {
-      return selectedId ? <LibraryDetailPage id={selectedId} onClose={onClose} /> : null;
+      return selectedId ? (
+        <LibraryDetailPage
+          id={selectedId}
+          onClose={onClose}
+          coverState={covers.phases[selectedId] ?? "idle"}
+          onGenerateCover={() => covers.regenerate(selectedId)}
+        />
+      ) : null;
     }
     if (servers.isPending) {
       return <Skeleton aria-label={m.servers_loading()} className="h-24 w-full" />;
@@ -97,6 +106,7 @@ export const LibrariesPage = ({
       </header>
       <LibraryList
         state={listState}
+        coverPhases={covers.phases}
         libraries={libraries.data ?? []}
         onRetry={() => void libraries.refetch()}
         onCreate={onCreate}

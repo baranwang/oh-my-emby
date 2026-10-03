@@ -250,5 +250,10 @@
   "metadata_poster_language": "Poster language",
   "metadata_language_client": "Follow client language",
   "metadata_language_metadata": "Follow metadata language",
-  "metadata_language_original": "Original language"
+  "metadata_language_original": "Original language",
+  "library_cover_missing": "No library cover yet",
+  "library_cover_generating": "Generating cover…",
+  "library_cover_failed": "Cover generation failed. Please try again.",
+  "library_cover_regenerate": "Regenerate cover",
+  "library_cover_title": "Library cover"
 }

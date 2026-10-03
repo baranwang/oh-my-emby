@@ -250,5 +250,10 @@
   "metadata_poster_language": "海报语言",
   "metadata_language_client": "跟随客户端语言",
   "metadata_language_metadata": "跟随元数据语言",
-  "metadata_language_original": "影片原语言"
+  "metadata_language_original": "影片原语言",
+  "library_cover_missing": "暂无媒体库封面",
+  "library_cover_generating": "正在生成封面…",
+  "library_cover_failed": "封面生成失败，请重试。",
+  "library_cover_regenerate": "重新生成封面",
+  "library_cover_title": "媒体库封面"
 }
