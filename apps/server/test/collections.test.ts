@@ -1,3 +1,4 @@
+import { Playback, makePlaybackLayer, serveRegisteredResource } from "../src/core/playback.js";
 import { Federation, makeFederationLayer } from "../src/core/federation.js";
 import { UpstreamNotFound, UpstreamTimeout } from "../src/core/errors.js";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -113,7 +114,12 @@ describe("Collections", () => {
       MetadataProviders,
       MetadataProviders.of({
         readTmdbCollection: () =>
-          Effect.succeed({ id: "20", Name: "A Set", movieIds: ["10", "11", "12"] }),
+          Effect.succeed({
+            id: "20",
+            Name: "A Set",
+            ExternalImages: { Primary: "https://image.tmdb.org/t/p/w780/set.jpg" },
+            movieIds: ["10", "11", "12"],
+          }),
         refresh: (r: any) => Effect.succeed(r),
         overlayCached: (r: any) => Effect.succeed(r),
       } as any),
@@ -134,6 +140,20 @@ describe("Collections", () => {
                 deps,
                 collections,
                 makeFederationLayer().pipe(Layer.provide(Layer.merge(deps, collections))),
+                makePlaybackLayer({
+                  fetchArtwork: async () =>
+                    new Response(new Uint8Array([0xff, 0xd8, 0xff]), {
+                      headers: { "content-type": "image/jpeg" },
+                    }),
+                }).pipe(
+                  Layer.provide(
+                    Layer.mergeAll(
+                      deps,
+                      collections,
+                      makeFederationLayer().pipe(Layer.provide(Layer.merge(deps, collections))),
+                    ),
+                  ),
+                ),
               ),
             ),
           ),
@@ -394,6 +414,122 @@ describe("Collections", () => {
     expect(result.first.items[0]?.itemType).toBe("BoxSet");
     expect(result.second.items[0]?.itemType).toBe("Movie");
     expect(result.first.totalRecordCount).toBe(2);
+  });
+
+  it("proxies collection artwork for Infuse and rejects collection playback", async () => {
+    const test = await setup(() => Effect.succeed({ Items: [], TotalRecordCount: 0 }));
+    const result = await test.run(
+      Effect.gen(function* () {
+        const identity = yield* Identity,
+          repo = yield* Repositories;
+        const movie = yield* identity.resolve({
+          serverId: "server-0",
+          catalogNamespace: "catalog:0",
+          verifiedCatalogId: "catalog-id:0",
+          serverGeneration: 1,
+          sourceLibraryId: "movies-0",
+          upstreamItemId: "film",
+          itemType: "Movie",
+          providerIds: { tmdbMovie: "10" },
+          displayMetadata: { Name: "Film" },
+        });
+        const set = (yield* repo.upsertCollection({
+          tmdbCollectionId: "20",
+          metadata: {},
+          observedAtMs: 1000,
+        }))!;
+        yield* repo.replaceTmdbCollectionMembership({
+          sourceItemId: movie.sourceItem.id,
+          tmdbCollectionId: "20",
+          expectedGeneration: 1,
+          observedAtMs: 1000,
+        });
+        const playback = yield* Playback;
+        const image = yield* playback.resolveImage({
+          canonicalId: set.id,
+          imageType: "Primary",
+          clientUserAgent: "Infuse-Direct/8.5.6",
+        });
+        const regular = yield* playback.resolveImage({
+          canonicalId: set.id,
+          imageType: "Primary",
+          clientUserAgent: "Rex-Standard/0.5.0",
+        });
+        const playable = yield* playback.getInfo(set.id).pipe(Effect.result);
+        const response =
+          image._tag === "Proxy" ? yield* serveRegisteredResource(image.request, {}) : null;
+        const bytes = response ? yield* Effect.promise(() => response.arrayBuffer()) : null;
+        return {
+          image,
+          regular,
+          playable,
+          status: response?.status,
+          mime: response?.headers.get("content-type"),
+          bytes: bytes ? [...new Uint8Array(bytes)] : [],
+        };
+      }),
+    );
+    expect(result.status).toBe(200);
+    expect(result.mime).toBe("image/jpeg");
+    expect(result.bytes).toEqual([0xff, 0xd8, 0xff]);
+    expect(result.image._tag).toBe("Proxy");
+    expect(result.regular._tag).toBe("Redirect");
+    expect(result.playable._tag).toBe("Failure");
+  });
+
+  it("uses registered upstream artwork and hides it when the movie scope is disabled", async () => {
+    const test = await setup(() => Effect.succeed({ Items: [], TotalRecordCount: 0 }));
+    const result = await test.run(
+      Effect.gen(function* () {
+        const repo = yield* Repositories,
+          identity = yield* Identity;
+        const movie = yield* identity.resolve({
+          serverId: "server-0",
+          catalogNamespace: "catalog:0",
+          verifiedCatalogId: "catalog-id:0",
+          serverGeneration: 1,
+          sourceLibraryId: "movies-0",
+          upstreamItemId: "film",
+          itemType: "Movie",
+          providerIds: {},
+          displayMetadata: { Name: "Film" },
+        });
+        const source = {
+          serverId: "server-0",
+          catalogNamespace: "catalog:0",
+          serverGeneration: 1,
+          upstreamBoxSetId: "box",
+          metadata: { Name: "Custom", ImageTags: { Primary: "tag" } },
+        };
+        const set = (yield* repo.upsertCollection({
+          tmdbCollectionId: null,
+          source,
+          metadata: source.metadata,
+          observedAtMs: 1000,
+        }))!;
+        yield* repo.writeCollectionSnapshot({
+          source,
+          collectionId: set.id,
+          members: [{ canonicalId: movie.canonical.id, sourceItemId: movie.sourceItem.id }],
+          complete: true,
+          observedAtMs: 1000,
+        });
+        const collections = yield* Collections;
+        const image = yield* collections.image(set.id, { virtualLibraryId: null }, "Primary");
+        const missing = yield* collections.image(set.id, { virtualLibraryId: null }, "Logo");
+        const inaccessible = yield* collections.image(
+          set.id,
+          { virtualLibraryId: "missing" },
+          "Primary",
+        );
+        return { image, missing, inaccessible };
+      }),
+    );
+    expect(result.image?.url.origin).toBe("https://server-0.example.com");
+    expect(result.image?.url.pathname).toBe("/Items/box/Images/Primary");
+    expect(result.image?.source?.upstreamBoxSetId).toBe("box");
+    expect(result.missing).toBeNull();
+    expect(result.inaccessible).toBeNull();
   });
 
   it("does not scan an empty movie catalog to invent TMDB collections", async () => {

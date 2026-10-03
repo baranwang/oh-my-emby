@@ -1,3 +1,9 @@
+import {
+  collectionDto,
+  collectionsRootDto,
+  isCollectionsRoot,
+  isCollectionId,
+} from "./emby-collections.js";
 import { ClientLanguage, clientLanguage } from "../core/client-language.js";
 import { mediaFileName, mediaFilePath } from "../core/media-file-path.js";
 import { userAvatarPng } from "./user-avatar.js";
@@ -74,7 +80,7 @@ export interface EmbyServices {
     FederationService,
     "list" | "search" | "studios" | "detail" | "lookupMembership"
   > &
-    Partial<Pick<FederationService, "showChildren" | "counts">>;
+    Partial<Pick<FederationService, "showChildren" | "counts" | "collectionsAvailable">>;
   readonly compat?: DrivembyCompat;
   readonly userState: Pick<UserStateService, "write" | "recordPlaybackEvent">;
   readonly libraries: Pick<LibraryServiceApi, "list">;
@@ -524,6 +530,16 @@ const externalImageTags = (metadata: Readonly<Record<string, JsonValue>>) => {
 };
 
 const itemDto = (item: CanonicalItemView, serverId: string): EmbyItemDtoValue => {
+  if (item.itemType === "BoxSet")
+    return collectionDto(
+      {
+        id: item.id,
+        displayMetadata: item.displayMetadata,
+        childCount: item.collection?.childCount ?? 0,
+        incompleteSourceIds: item.incompleteSourceIds,
+      },
+      serverId,
+    );
   const metadata = object(item.displayMetadata);
   const upstreamImageTags = imageTagTypes(metadata);
   const upstreamBackdrops = backdropImageTags(metadata);
@@ -666,7 +682,11 @@ const query = (
   return {
     userId: principal.username,
     deviceId: principal.deviceId,
-    virtualLibraryId: input.ParentId ?? null,
+    virtualLibraryId:
+      input.ParentId && !isCollectionsRoot(input.ParentId) && !isCollectionId(input.ParentId)
+        ? input.ParentId
+        : null,
+    ...(input.ParentId && isCollectionId(input.ParentId) ? { collectionId: input.ParentId } : {}),
     startIndex: input.StartIndex ?? 0,
     limit: input.Limit ?? 100,
     sort,
@@ -674,7 +694,16 @@ const query = (
       ...(input.Filters ?? []).map(filter),
       ...(input.Studios === undefined ? [] : [{ field: "Studios", value: input.Studios }]),
     ],
-    itemTypes: [...new Set(input.IncludeItemTypes ?? [])],
+    itemTypes: [
+      ...new Set(
+        input.IncludeItemTypes ??
+          (input.ParentId && isCollectionsRoot(input.ParentId)
+            ? ["BoxSet"]
+            : input.ParentId && isCollectionId(input.ParentId)
+              ? ["Movie"]
+              : []),
+      ),
+    ],
     ...(input.Fields === undefined ? {} : { fields: input.Fields }),
   };
 };
@@ -1305,7 +1334,9 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
     if (views) {
       yield* requireUser(principal, views[1]!);
       const libraries = yield* services.libraries.list();
-      const items = libraries
+      const items: Array<
+        ReturnType<typeof collectionsRootDto> & { UserData: ReturnType<typeof userData> }
+      > = libraries
         .filter(({ enabled }) => enabled)
         .map((library) => ({
           Id: library.id,
@@ -1316,6 +1347,14 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
           IsFolder: true,
           UserData: userData(null, library.id),
         }));
+      if (
+        services.federation.collectionsAvailable &&
+        (yield* services.federation.collectionsAvailable())
+      )
+        items.push({
+          ...collectionsRootDto(services.config.serverId),
+          UserData: userData(null, "collections:movies"),
+        });
       return json({ Items: items, TotalRecordCount: items.length, StartIndex: 0 });
     }
 
@@ -1416,6 +1455,17 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
     if (userDetail || itemDetail) {
       if (userDetail) yield* requireUser(principal, userDetail[1]!);
       const canonicalId = yield* pathSegment((userDetail?.[2] ?? itemDetail?.[1])!);
+      if (isCollectionsRoot(canonicalId)) {
+        if (
+          !services.federation.collectionsAvailable ||
+          !(yield* services.federation.collectionsAvailable())
+        )
+          return yield* Effect.fail(new EmbyNotFound());
+        return json({
+          ...collectionsRootDto(services.config.serverId),
+          UserData: userData(null, canonicalId),
+        });
+      }
       const library = (yield* services.libraries.list()).find(
         ({ id, enabled }) => enabled && id === canonicalId,
       );
@@ -1446,6 +1496,8 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
     if (userDataRoute) {
       yield* requireUser(principal, userDataRoute[1]!);
       const canonicalId = yield* pathSegment(userDataRoute[2]!);
+      if (isCollectionId(canonicalId) || isCollectionsRoot(canonicalId))
+        return yield* Effect.fail(new EmbyNotFound());
       const body = yield* readJson(request).pipe(
         Effect.flatMap((value) => decode(EmbyUserDataPatch, value)),
       );
@@ -1463,6 +1515,8 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
     if (favorite && (method === "POST" || method === "DELETE")) {
       yield* requireUser(principal, favorite[1]!);
       const canonicalId = yield* pathSegment(favorite[2]!);
+      if (isCollectionId(canonicalId) || isCollectionsRoot(canonicalId))
+        return yield* Effect.fail(new EmbyNotFound());
       const membership = yield* services.federation.lookupMembership(canonicalId);
       if (membership === null) return yield* Effect.fail(new EmbyNotFound());
       const written = yield* services.userState.write(membership.item.id, {
@@ -1475,6 +1529,8 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
     if (played && (method === "POST" || method === "DELETE")) {
       yield* requireUser(principal, played[1]!);
       const canonicalId = yield* pathSegment(played[2]!);
+      if (isCollectionId(canonicalId) || isCollectionsRoot(canonicalId))
+        return yield* Effect.fail(new EmbyNotFound());
       const membership = yield* services.federation.lookupMembership(canonicalId);
       if (membership === null) return yield* Effect.fail(new EmbyNotFound());
       const patch: UserStatePatch =
@@ -1488,6 +1544,8 @@ const handle = (services: EmbyServices, request: Request): Effect.Effect<Respons
 
     if (playbackInfo) {
       const canonicalId = yield* pathSegment(playbackInfo[1]!);
+      if (isCollectionId(canonicalId) || isCollectionsRoot(canonicalId))
+        return yield* Effect.fail(new EmbyNotFound());
       const body =
         method === "POST"
           ? yield* readOptionalJson(request).pipe(

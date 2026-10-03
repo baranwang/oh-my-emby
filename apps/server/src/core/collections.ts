@@ -26,7 +26,7 @@ import { MetadataProviders } from "./metadata-providers.js";
 import type { EligibleSource, JsonValue } from "./model.js";
 import { Repositories } from "./repositories.js";
 import { isCatalogObject, sourceItemCandidate } from "./source-item-candidate.js";
-import { UpstreamClient } from "./upstream-client.js";
+import { UpstreamClient, endpointUrl } from "./upstream-client.js";
 
 export type CollectionFailure = RepositoryError | IdentityFailure | UpstreamFailure;
 export interface CollectionsApi {
@@ -47,6 +47,7 @@ export interface CollectionsApi {
     scope: CollectionScope,
     imageType: string,
     clientUserAgent?: string,
+    imageIndex?: number,
   ) => Effect.Effect<{ url: URL; source: CollectionSource | null } | null, CollectionFailure>;
 }
 export class Collections extends Context.Service<Collections, CollectionsApi>()(
@@ -505,16 +506,46 @@ export const makeCollectionsLayer = (): Layer.Layer<
             incompleteSourceIds: [...incomplete],
           };
         });
-      const image: CollectionsApi["image"] = (id, scope, imageType) =>
+      const image: CollectionsApi["image"] = (id, scope, imageType, clientUserAgent, imageIndex) =>
         Effect.gen(function* () {
-          const current = yield* detail(id, scope);
+          const current = yield* detail(id, scope, clientUserAgent);
           if (!current) return null;
           const images = object(object(current.displayMetadata).ExternalImages);
           const url =
             imageType === "Backdrop" && Array.isArray(images.Backdrop)
-              ? images.Backdrop[0]
+              ? images.Backdrop[imageIndex ?? 0]
               : images[imageType];
-          return typeof url === "string" ? { url: new URL(url), source: null } : null;
+          if (typeof url === "string" && (imageType === "Backdrop" || (imageIndex ?? 0) === 0))
+            return { url: new URL(url), source: null };
+          const eligible = yield* sources(scope);
+          for (const registered of yield* repo.readCollectionSources(current.id, scope)) {
+            const raw = object(registered.metadata);
+            const tags = object(raw.ImageTags);
+            const present =
+              imageType === "Backdrop"
+                ? Array.isArray(raw.BackdropImageTags) &&
+                  typeof raw.BackdropImageTags[imageIndex ?? 0] === "string"
+                : typeof tags[imageType] === "string" && (imageIndex ?? 0) === 0;
+            if (!present) continue;
+            const source = eligible.find(
+              (s) =>
+                s.serverId === registered.serverId &&
+                s.serverGeneration === registered.serverGeneration &&
+                s.catalogNamespace === registered.catalogNamespace,
+            );
+            const endpoint = source?.endpoints.find(
+              (e) => e.health === "healthy" && e.verifiedCatalogId === source.verifiedCatalogId,
+            );
+            if (!source || !endpoint) continue;
+            const url = endpointUrl(
+              endpoint,
+              `/Items/${encodeURIComponent(registered.upstreamBoxSetId)}/Images/${encodeURIComponent(imageType)}` +
+                (imageIndex === undefined ? "" : `/${imageIndex}`),
+            );
+            if (source.accessToken !== null) url.searchParams.set("api_key", source.accessToken);
+            return { url, source: registered };
+          }
+          return null;
         });
       return Collections.of({ list, detail, members, image });
     }),

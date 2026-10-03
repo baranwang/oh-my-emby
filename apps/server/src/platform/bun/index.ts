@@ -119,7 +119,7 @@ const makeBunCoreLayer = (config: BunRuntimeConfig) => {
   const playback = makePlaybackLayer({
     fetchArtwork: config.upstreamFetch ?? fetch,
     isClientUsableResource: ({ kind }) => kind === "image",
-  }).pipe(Layer.provide(Layer.merge(foundation, federation)));
+  }).pipe(Layer.provide(Layer.mergeAll(foundation, federation, collections)));
   const outbox = makeOutboxLayer().pipe(Layer.provide(foundation));
   return Layer.mergeAll(
     foundation,

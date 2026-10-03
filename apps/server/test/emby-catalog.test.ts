@@ -135,6 +135,61 @@ const get = (path: string, token = "token") =>
   });
 
 describe("Emby catalog routes", () => {
+  it("exposes the BoxSet view and translates collection ParentId into member queries", async () => {
+    let observed: FederatedQuery | undefined;
+    const base = services();
+    const box = item("collection:tmdb:20", "BoxSet", {
+      collection: { childCount: 2 },
+      displayMetadata: {
+        Name: "Set",
+        Overview: "About",
+        ExternalImages: { Primary: "https://image.tmdb.org/t/p/w780/set.jpg" },
+      },
+      mediaVersions: [],
+      userState: null,
+    });
+    const app = makeEmbyHandler(
+      services({
+        federation: {
+          ...base.federation,
+          collectionsAvailable: () => Effect.succeed(true),
+          detail: () => Effect.succeed(box),
+          list: (query) => {
+            observed = query;
+            return Effect.succeed({
+              items: [item("movie-1")],
+              totalRecordCount: 1,
+              exhausted: true,
+              incompleteSourceIds: [],
+            });
+          },
+        },
+      }),
+    );
+    const views = (await (await Effect.runPromise(app(get("/Users/owner/Views")))).json()) as any;
+    expect(views.Items).toContainEqual(
+      expect.objectContaining({
+        Id: "collections:movies",
+        CollectionType: "boxsets",
+        Type: "CollectionFolder",
+      }),
+    );
+    const detail = (await (
+      await Effect.runPromise(app(get("/Items/collection%3Atmdb%3A20")))
+    ).json()) as any;
+    expect(detail).toMatchObject({ Type: "BoxSet", IsFolder: true, ChildCount: 2, Name: "Set" });
+    expect(detail.MediaSources ?? []).toEqual([]);
+    expect(detail.ImageTags.Primary).toBeTruthy();
+    await Effect.runPromise(app(get("/Users/owner/Items?ParentId=collection%3Atmdb%3A20")));
+    expect(observed).toMatchObject({
+      virtualLibraryId: null,
+      collectionId: "collection:tmdb:20",
+      itemTypes: ["Movie"],
+    });
+    await Effect.runPromise(app(get("/Users/owner/Items?ParentId=collections%3Amovies")));
+    expect(observed).toMatchObject({ virtualLibraryId: null, itemTypes: ["BoxSet"] });
+  });
+
   it("returns local show relationships without exposing upstream IDs or ProviderIds", async () => {
     const episode = item("episode-local", "Episode", {
       hierarchy: {

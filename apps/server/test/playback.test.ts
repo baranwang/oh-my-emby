@@ -2,6 +2,7 @@ import { Effect, Layer } from "effect";
 import { describe, expect, it } from "vitest";
 
 import { makeEmbyHandler, type EmbyServices } from "../src/api/emby.js";
+import { Collections } from "../src/core/collections.js";
 import { Federation, type CanonicalItemView } from "../src/core/federation.js";
 import { MetadataProviders } from "../src/core/metadata-providers.js";
 import type { EligibleSource, SourceItemRecord, SourceMediaVersion } from "../src/core/model.js";
@@ -213,7 +214,17 @@ const makeFixture = (
     sessionId: () => "play-session",
     ...(options.fetchArtwork === undefined ? {} : { fetchArtwork: options.fetchArtwork }),
     isClientUsableResource: () => options.clientUsable ?? false,
-  }).pipe(Layer.provide(Layer.mergeAll(repositories, federation, upstream, metadataProviders)));
+  }).pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        repositories,
+        federation,
+        upstream,
+        metadataProviders,
+        Layer.succeed(Collections, { image: () => Effect.succeed(null) } as any),
+      ),
+    ),
+  );
   const run = <A>(effect: Effect.Effect<A, any, Playback>) =>
     Effect.runPromise(effect.pipe(Effect.provide(layer)));
   return {

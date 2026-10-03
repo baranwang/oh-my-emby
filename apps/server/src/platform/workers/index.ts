@@ -71,7 +71,7 @@ export const makeWorkersCoreLayer = (
   const metadataSettings = makeMetadataSettingsLayer.pipe(Layer.provide(repositories));
   const playback = makePlaybackLayer({
     fetchArtwork: dependencies.upstreamFetch ?? fetch,
-  }).pipe(Layer.provide(Layer.merge(foundation, federation)));
+  }).pipe(Layer.provide(Layer.mergeAll(foundation, federation, collections)));
   const outbox = makeOutboxLayer().pipe(Layer.provide(foundation));
   return Layer.mergeAll(
     foundation,

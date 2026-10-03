@@ -1,6 +1,7 @@
 import { Context, Effect, Exit, Layer, Schema, Scope } from "effect";
 
 import type { FederationFailure } from "./federation.js";
+import { Collections } from "./collections.js";
 import { Federation } from "./federation.js";
 import {
   AUXILIARY_PROXY_DEADLINE_MS,
@@ -314,11 +315,16 @@ const subtitleMimeTypes: Readonly<Record<string, ReadonlyArray<string>>> = {
 
 export const makePlaybackLayer = (
   config: PlaybackConfig = {},
-): Layer.Layer<Playback, never, Federation | MetadataProviders | Repositories | UpstreamClient> =>
+): Layer.Layer<
+  Playback,
+  never,
+  Federation | Collections | MetadataProviders | Repositories | UpstreamClient
+> =>
   Layer.effect(
     Playback,
     Effect.gen(function* () {
       const federation = yield* Federation;
+      const collections = yield* Collections;
       const metadataProviders = yield* MetadataProviders;
       const repositories = yield* Repositories;
       const upstream = yield* UpstreamClient;
@@ -484,7 +490,10 @@ export const makePlaybackLayer = (
 
       const proxyArtwork = (
         location: URL,
-        current: CatalogItemRecord,
+        current: {
+          readonly canonical: { readonly id: string };
+          readonly sourceItems: ReadonlyArray<SourceItemRecord>;
+        },
         imageType: string,
         imageIndex?: number,
         registered?: {
@@ -576,6 +585,55 @@ export const makePlaybackLayer = (
               (!Number.isSafeInteger(input.imageIndex) || input.imageIndex < 0))
           ) {
             return yield* Effect.fail(new ResourceRejected());
+          }
+          if (input.canonicalId.startsWith("collection:")) {
+            const artwork = yield* collections.image(
+              input.canonicalId,
+              { virtualLibraryId: null },
+              input.imageType,
+              input.clientUserAgent,
+              input.imageIndex,
+            );
+            if (artwork === null) return yield* Effect.fail(new PlaybackNotFound());
+            const current = { canonical: { id: input.canonicalId }, sourceItems: [] };
+            const infuse = input.clientUserAgent?.toLowerCase().includes("infuse") ?? false;
+            if (artwork.source === null)
+              return infuse
+                ? yield* proxyArtwork(artwork.url, current, input.imageType, input.imageIndex)
+                : { _tag: "Redirect" as const, location: artwork.url };
+            const libraries = (yield* repositories.listVirtualLibraries()).filter(
+              (l) => l.enabled && l.mediaType === "movies",
+            );
+            const sources = (yield* Effect.forEach(libraries, (l) =>
+              repositories.resolveEligibleSources(l.id),
+            )).flat();
+            const source = sources.find(
+              (s) =>
+                s.serverId === artwork.source!.serverId &&
+                s.serverGeneration === artwork.source!.serverGeneration &&
+                s.catalogNamespace === artwork.source!.catalogNamespace,
+            );
+            if (!source) return yield* Effect.fail(new PlaybackNotFound());
+            if (infuse) {
+              const location = yield* upstream
+                .resolvePlaybackRedirect({
+                  serverId: source.serverId,
+                  generation: source.serverGeneration,
+                  url: artwork.url.href,
+                  ...(input.clientUserAgent === undefined
+                    ? {}
+                    : { clientUserAgent: input.clientUserAgent }),
+                })
+                .pipe(Effect.mapError(() => new ResourceUnavailable()));
+              return yield* proxyArtwork(location, current, input.imageType, input.imageIndex, {
+                url: artwork.url,
+                source,
+                ...(input.clientUserAgent === undefined
+                  ? {}
+                  : { clientUserAgent: input.clientUserAgent }),
+              });
+            }
+            return { _tag: "Redirect" as const, location: artwork.url };
           }
           const { current, eligibleSources } = yield* record(input.canonicalId, false);
           const infuse = input.clientUserAgent?.trim().toLowerCase().includes("infuse") ?? false;
