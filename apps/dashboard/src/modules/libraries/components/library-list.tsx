@@ -4,6 +4,8 @@ import type { VirtualLibraryView } from "@oh-my-emby/contracts";
 import { Link } from "@tanstack/react-router";
 
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Card, CardAction, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { m } from "@/paraglide/messages.js";
 
@@ -51,26 +53,31 @@ export const LibraryList = ({
   return (
     <ul className="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
       {libraries.map((library) => (
-        <li key={library.id} className="bg-card text-card-foreground rounded-lg border p-4">
+        <li key={library.id} className="min-w-0">
           <Link
-            className="focus-visible:ring-ring block rounded-md outline-none focus-visible:ring-2"
+            className="focus-visible:ring-ring block h-full rounded-lg outline-none focus-visible:ring-2"
             to="/libraries/$id"
             params={{ id: library.id }}
           >
-            <div className="mb-4">
-              <LibraryCover library={library} state={coverPhases?.[library.id] ?? "idle"} />
-            </div>
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <h2 className="font-medium">{library.name}</h2>
-                <p className="text-muted-foreground text-sm">
+            {/* oxlint-disable-next-line shadcn/no-restyle -- Match the user-provided CardImage demo's flush cover. */}
+            <Card className="h-full pt-0">
+              <LibraryCover
+                library={library}
+                state={coverPhases?.[library.id] ?? "idle"}
+                imageClassName="rounded-none"
+              />
+              <CardHeader>
+                <CardAction>
+                  <Badge variant="secondary">{library.enabled ? m.enabled() : m.disabled()}</Badge>
+                </CardAction>
+                <CardTitle className="min-w-0 break-words">
+                  <h2>{library.name}</h2>
+                </CardTitle>
+                <CardDescription>
                   {library.mediaType === "movies" ? m.media_movies() : m.media_series()}
-                </p>
-              </div>
-              <span className="bg-muted rounded-md px-2 py-1 text-xs">
-                {library.enabled ? m.enabled() : m.disabled()}
-              </span>
-            </div>
+                </CardDescription>
+              </CardHeader>
+            </Card>
           </Link>
         </li>
       ))}

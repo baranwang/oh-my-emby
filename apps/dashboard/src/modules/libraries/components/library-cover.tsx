@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { cn } from "cn";
 import { GridReveal } from "@/components/ui/grid-reveal";
 import type { VirtualLibraryView } from "@oh-my-emby/contracts";
 import { ImageIcon } from "lucide-react";
@@ -9,10 +10,12 @@ export function LibraryCover({
   library,
   state = "idle",
   onGenerate,
+  imageClassName,
 }: {
   readonly library: VirtualLibraryView;
   readonly state?: LibraryCoverPhase;
   readonly onGenerate?: () => void;
+  readonly imageClassName?: string;
 }) {
   const busy = state !== "idle" && state !== "error";
   const [revealing, setRevealing] = useState(false);
@@ -25,7 +28,9 @@ export function LibraryCover({
     : null;
   return (
     <div className="space-y-3">
-      <div className="bg-muted relative aspect-video overflow-hidden rounded-md">
+      <div
+        className={cn("bg-muted relative aspect-video overflow-hidden rounded-md", imageClassName)}
+      >
         {library.cover ? (
           <img className="size-full object-cover" src={imageUrl!} alt={library.name} />
         ) : (
