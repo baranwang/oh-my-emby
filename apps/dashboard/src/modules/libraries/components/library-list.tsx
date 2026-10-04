@@ -49,7 +49,7 @@ export const LibraryList = ({
     );
   }
   return (
-    <ul className="grid gap-3 md:grid-cols-2">
+    <ul className="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
       {libraries.map((library) => (
         <li key={library.id} className="bg-card text-card-foreground rounded-lg border p-4">
           <Link
