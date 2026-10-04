@@ -53,13 +53,15 @@ export const makeWorkersCoreLayer = (
   dependencies: WorkersRuntimeDependencies = {},
 ) => {
   const repositories = makeD1RepositoriesLayer(env.DB);
+  // Workers fetch requires its global receiver even when called as a config method.
+  const upstreamFetch = dependencies.upstreamFetch ?? globalThis.fetch.bind(globalThis);
   const upstream = makeUpstreamClientLayer({
-    fetch: dependencies.upstreamFetch ?? fetch,
+    fetch: upstreamFetch,
     destinationPolicy: { platform: "workers" },
   }).pipe(Layer.provide(repositories));
   const identity = makeIdentityLayer.pipe(Layer.provide(repositories));
   const metadataProviders = makeMetadataProvidersLayer({
-    fetch: dependencies.upstreamFetch ?? fetch,
+    fetch: upstreamFetch,
   }).pipe(Layer.provide(repositories));
   const foundation = Layer.mergeAll(repositories, upstream, identity, metadataProviders);
   const collections = makeCollectionsLayer().pipe(Layer.provide(foundation));
@@ -73,7 +75,7 @@ export const makeWorkersCoreLayer = (
   const libraryCovers = makeLibraryCoverServiceLayer.pipe(Layer.provide(foundation));
   const metadataSettings = makeMetadataSettingsLayer.pipe(Layer.provide(repositories));
   const playback = makePlaybackLayer({
-    fetchArtwork: dependencies.upstreamFetch ?? fetch,
+    fetchArtwork: upstreamFetch,
   }).pipe(Layer.provide(Layer.mergeAll(foundation, federation, collections)));
   const outbox = makeOutboxLayer().pipe(Layer.provide(foundation));
   return Layer.mergeAll(

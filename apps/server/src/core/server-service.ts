@@ -376,6 +376,7 @@ export const makeServerServiceLayer: Layer.Layer<
         let catalogId = server.verifiedCatalogId;
         let verifiedBaseUrl = server.verifiedBaseUrl;
         let rejection: UpstreamFailure | undefined;
+        let endpointFailure: UpstreamFailure | undefined;
         const nowMs = Date.now();
         const results: Array<ConnectionTestView["endpoints"][number]> = [];
         const endpoints: Array<UpstreamEndpoint> = [];
@@ -384,6 +385,9 @@ export const makeServerServiceLayer: Layer.Layer<
             .getServerIdentity(serverId, includeDiagnostic, endpoint.id)
             .pipe(Effect.result);
           if (attempted._tag === "Failure") {
+            if (endpointFailure === undefined || endpointFailure._tag === "DestinationRejected") {
+              endpointFailure = attempted.failure;
+            }
             const previouslyVerified =
               endpoint.verifiedCatalogId !== null ||
               (server.verifiedCatalogId === null && server.verifiedBaseUrl === endpoint.displayUrl);
@@ -393,6 +397,7 @@ export const makeServerServiceLayer: Layer.Layer<
             if (
               attempted.failure._tag !== "UpstreamUnavailable" &&
               attempted.failure._tag !== "UpstreamTimeout" &&
+              attempted.failure._tag !== "DestinationRejected" &&
               !(
                 attempted.failure._tag === "UpstreamRejected" &&
                 [500, 502, 503, 504].includes(attempted.failure.status)
@@ -467,6 +472,9 @@ export const makeServerServiceLayer: Layer.Layer<
         );
         if (saved === null) return yield* Effect.fail(new ObsoleteGeneration({ serverId }));
         if (rejection !== undefined) return yield* Effect.fail(rejection);
+        if (includeDiagnostic && health !== "healthy" && endpointFailure !== undefined) {
+          return yield* Effect.fail(endpointFailure);
+        }
         return {
           reachable: results.some(({ reachable }) => reachable),
           catalogId,

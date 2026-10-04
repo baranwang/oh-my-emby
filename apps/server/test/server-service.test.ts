@@ -12,9 +12,7 @@ import { Repositories } from "../src/core/repositories.js";
 import { ServerService, makeServerServiceLayer } from "../src/core/server-service.js";
 import { makeUpstreamClientLayer } from "../src/core/upstream-client.js";
 import { makeSqliteRepositoriesLayer } from "../src/platform/bun/sqlite-repositories.js";
-import {
-  authorizeDashboardControlRequest,
-} from "../src/api/dashboard.js";
+import { authorizeDashboardControlRequest } from "../src/api/dashboard.js";
 
 const migration = [
   await Bun.file(new URL("../migrations/0001_initial.sql", import.meta.url)).text(),
@@ -583,6 +581,157 @@ describe("ServerService", () => {
           endpoints: [expect.objectContaining({ health: "unknown", verifiedCatalogId: null })],
         });
       }).pipe(Effect.provide(layer(async () => new Response(null, { status: 503 })))),
+    );
+  });
+
+  it("uses a healthy domain endpoint when Workers rejects an IP endpoint", async () => {
+    const requests: Array<string> = [];
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const service = yield* ServerService;
+        const created = yield* service.create({
+          ...input,
+          endpoints: [endpointInput("110.42.42.172"), endpointInput("backup.example.com")],
+        });
+        const result = yield* service.testConnection(created.id, true);
+        expect(result).toMatchObject({
+          reachable: true,
+          catalogId: "stable-id",
+          endpoints: [
+            { reachable: false, health: "unknown" },
+            { reachable: true, health: "healthy" },
+          ],
+        });
+        expect(yield* service.getRecord(created.id)).toMatchObject({
+          health: "healthy",
+          accessToken: "backup-token",
+          upstreamUserId: "backup-user",
+        });
+      }).pipe(
+        Effect.provide(
+          layer(async (request) => {
+            requests.push((request as Request).url);
+            return Response.json({
+              AccessToken: "backup-token",
+              User: { Id: "backup-user" },
+              ServerId: "stable-id",
+            });
+          }),
+        ),
+      ),
+    );
+    expect(requests).toEqual(["https://backup.example.com/Users/AuthenticateByName"]);
+  });
+
+  it("does not keep credentials from a backup whose identity probe is rejected", async () => {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const service = yield* ServerService;
+        const created = yield* service.create({
+          ...input,
+          endpoints: [endpointInput("one.example.com"), endpointInput("backup.example.com")],
+        });
+        expect(yield* service.testConnection(created.id, true)).toMatchObject({
+          reachable: true,
+          catalogId: "stable-id",
+        });
+        expect(yield* service.getRecord(created.id)).toMatchObject({
+          accessToken: "primary-token",
+          upstreamUserId: "primary-user",
+        });
+      }).pipe(
+        Effect.provide(
+          layer(async (request) => {
+            const url = new URL((request as Request).url);
+            if (url.hostname === "one.example.com")
+              return Response.json({
+                AccessToken: "primary-token",
+                User: { Id: "primary-user" },
+                ServerId: "stable-id",
+              });
+            if (url.pathname === "/Users/AuthenticateByName")
+              return Response.json({
+                AccessToken: "unverified-token",
+                User: { Id: "unverified-user" },
+              });
+            return new Response(null, {
+              status: 302,
+              headers: { location: "https://untrusted.example.net/info" },
+            });
+          }),
+        ),
+      ),
+    );
+  });
+
+  it("preserves transport diagnostics when every connection-test endpoint is unavailable", async () => {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const service = yield* ServerService;
+        const created = yield* service.create(input);
+        const result = yield* service.testConnection(created.id, true).pipe(Effect.result);
+        expect(result).toMatchObject({
+          _tag: "Failure",
+          failure: { _tag: "UpstreamUnavailable", detail: "connection refused" },
+        });
+        expect((yield* service.getRecord(created.id)).health).toBe("unknown");
+      }).pipe(
+        Effect.provide(
+          layer(async () => {
+            throw new Error("connection refused");
+          }),
+        ),
+      ),
+    );
+  });
+
+  it("reports a backup transport failure instead of a rejected IP endpoint", async () => {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const service = yield* ServerService;
+        const created = yield* service.create({
+          ...input,
+          endpoints: [endpointInput("110.42.42.172"), endpointInput("backup.example.com")],
+        });
+        const result = yield* service.testConnection(created.id, true).pipe(Effect.result);
+        expect(result).toMatchObject({
+          _tag: "Failure",
+          failure: { _tag: "UpstreamUnavailable", detail: "connection refused" },
+        });
+      }).pipe(
+        Effect.provide(
+          layer(async () => {
+            throw new Error("connection refused");
+          }),
+        ),
+      ),
+    );
+  });
+
+  it("explains the Workers IP restriction when no domain endpoint is configured", async () => {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const service = yield* ServerService;
+        const created = yield* service.create({
+          ...input,
+          endpoints: [endpointInput("110.42.42.172")],
+        });
+        const result = yield* service.testConnection(created.id, true).pipe(Effect.result);
+        expect(result).toMatchObject({
+          _tag: "Failure",
+          failure: {
+            _tag: "DestinationRejected",
+            detail:
+              "Cloudflare Workers cannot fetch IP addresses directly. Use a public domain name instead.",
+          },
+        });
+      }).pipe(
+        Effect.provide(
+          layer(async () => {
+            throw new Error("must not fetch an IP");
+          }),
+        ),
+      ),
     );
   });
 

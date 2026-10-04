@@ -295,8 +295,23 @@ const validateDestination = (
     return Effect.fail(new DestinationRejected({ serverId: server.id }));
   }
   if (policy.platform === "workers") {
-    if (isIpLiteral(hostname) || isPrivateHostname(hostname)) {
-      return Effect.fail(new DestinationRejected({ serverId: server.id }));
+    if (isIpLiteral(hostname)) {
+      return Effect.fail(
+        new DestinationRejected({
+          serverId: server.id,
+          detail:
+            "Cloudflare Workers cannot fetch IP addresses directly. Use a public domain name instead.",
+        }),
+      );
+    }
+    if (isPrivateHostname(hostname)) {
+      return Effect.fail(
+        new DestinationRejected({
+          serverId: server.id,
+          detail:
+            "Cloudflare Workers cannot connect to private hosts. Use a publicly reachable domain name instead.",
+        }),
+      );
     }
   }
   return Effect.void;
@@ -1016,29 +1031,45 @@ export const makeUpstreamClientLayer = (
               includeDiagnostic,
               endpoint.id,
               undefined,
-              persistAuthentication,
+              false,
             );
-            if (authenticated.catalogId !== null) return authenticated.catalogId;
-            const refreshedEndpoint = yield* endpointById(authenticated.server, endpoint.id);
-            const response = yield* fetchWithRedirects(
-              authenticated.server,
-              refreshedEndpoint,
-              {
+            let catalogId = authenticated.catalogId;
+            if (catalogId === null) {
+              const refreshedEndpoint = yield* endpointById(authenticated.server, endpoint.id);
+              const response = yield* fetchWithRedirects(
+                authenticated.server,
+                refreshedEndpoint,
+                {
+                  serverId: server.id,
+                  generation: server.generation,
+                  path: "/System/Info/Public",
+                  method: "GET",
+                },
+                null,
+                includeDiagnostic,
+              );
+              const info = yield* decodeResponse(
+                response,
+                server.id,
+                PublicSystemInfo,
+                includeDiagnostic,
+              );
+              catalogId = info.Id?.trim() || null;
+            }
+            // A failed identity probe must not replace a healthy endpoint's credentials.
+            if (persistAuthentication) {
+              const saved = yield* repositories.saveServerResult({
                 serverId: server.id,
-                generation: server.generation,
-                path: "/System/Info/Public",
-                method: "GET",
-              },
-              null,
-              includeDiagnostic,
-            );
-            const info = yield* decodeResponse(
-              response,
-              server.id,
-              PublicSystemInfo,
-              includeDiagnostic,
-            );
-            return info.Id?.trim() || null;
+                expectedGeneration: server.generation,
+                accessToken: authenticated.server.accessToken,
+                accessTokenExpiresAtMs: null,
+                upstreamUserId: authenticated.upstreamUserId,
+                updatedAtMs: Date.now(),
+              });
+              if (saved === null)
+                return yield* Effect.fail(new ObsoleteGeneration({ serverId: server.id }));
+            }
+            return catalogId;
           }),
           server.id,
         );
